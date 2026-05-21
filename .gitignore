@@ -10,6 +10,9 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
+.conda/
+.conda-env/
+.python_packages/
 *.egg-info/
 
 # Node

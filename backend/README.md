@@ -34,7 +34,7 @@ cd ..\frontend
 npm install
 npm run build
 cd ..\backend
-& X:\KI\anaconda3\envs\omnivoice-tts-gui\python.exe -m pytest tests -q -p no:cacheprovider
+& ..\.conda-env\python.exe -m pytest tests -q -p no:cacheprovider
 ```
 
 ## Current Caveats

@@ -11,11 +11,11 @@ $BackendDir = Join-Path $RepoRoot 'backend'
 $FrontendDir = Join-Path $RepoRoot 'frontend'
 $FrontendIndex = Join-Path $FrontendDir 'dist\index.html'
 $ModelsDir = Join-Path $RepoRoot 'models'
-$CondaRoot = 'X:\KI\anaconda3'
-$EnvName = 'omnivoice-tts-gui'
-$EnvDir = Join-Path $CondaRoot "envs\$EnvName"
+$LocalCondaHome = if ($env:OMNIVOICE_TTS_LOCAL_CONDA_HOME) { $env:OMNIVOICE_TTS_LOCAL_CONDA_HOME } else { Join-Path $RepoRoot '.conda' }
+$EnvDir = if ($env:OMNIVOICE_TTS_CONDA_ENV_DIR) { $env:OMNIVOICE_TTS_CONDA_ENV_DIR } else { Join-Path $RepoRoot '.conda-env' }
+$PythonVersion = if ($env:OMNIVOICE_TTS_CONDA_PYTHON_VERSION) { $env:OMNIVOICE_TTS_CONDA_PYTHON_VERSION } else { '3.12' }
 $PythonExe = Join-Path $EnvDir 'python.exe'
-$CondaExe = Join-Path $CondaRoot 'Scripts\conda.exe'
+$TempDir = Join-Path $RepoRoot '.tmp'
 
 function Write-Step {
     param([string]$Message)
@@ -49,20 +49,88 @@ function Test-CommandAvailable {
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-if (-not (Test-Path $CondaExe)) {
-    throw "Conda was not found at $CondaExe."
+function Resolve-Conda {
+    if ($env:OMNIVOICE_TTS_CONDA_EXE) {
+        return $env:OMNIVOICE_TTS_CONDA_EXE
+    }
+    if ($env:CONDA_EXE) {
+        return $env:CONDA_EXE
+    }
+    $command = Get-Command conda -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    $default = 'X:\KI\anaconda3\Scripts\conda.exe'
+    if (Test-Path $default) {
+        return $default
+    }
+    throw 'Conda was not found. Install Miniconda/Anaconda, add conda to PATH, or set OMNIVOICE_TTS_CONDA_EXE.'
+}
+
+function Use-Local-Conda-State {
+    foreach ($path in @(
+        $LocalCondaHome,
+        (Join-Path $LocalCondaHome 'pkgs'),
+        (Join-Path $LocalCondaHome 'envs'),
+        (Join-Path $LocalCondaHome 'bld'),
+        (Join-Path $LocalCondaHome 'localappdata'),
+        (Join-Path $LocalCondaHome 'appdata'),
+        $TempDir
+    )) {
+        if (-not (Test-Path $path)) {
+            New-Item -ItemType Directory -Path $path | Out-Null
+        }
+    }
+
+    $env:LOCALAPPDATA = Join-Path $LocalCondaHome 'localappdata'
+    $env:APPDATA = Join-Path $LocalCondaHome 'appdata'
+    $env:CONDA_PKGS_DIRS = Join-Path $LocalCondaHome 'pkgs'
+    $env:CONDA_ENVS_PATH = Join-Path $LocalCondaHome 'envs'
+    $env:CONDA_BLD_PATH = Join-Path $LocalCondaHome 'bld'
+    $env:CONDA_NUMBER_CHANNEL_NOTICES = '0'
+    $env:CONDA_REPORT_ERRORS = 'false'
+    $env:TMP = $TempDir
+    $env:TEMP = $TempDir
+    $env:TMPDIR = $TempDir
+    $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
+    $env:PYTHONUTF8 = '1'
+}
+
+Use-Local-Conda-State
+
+if ($env:OMNIVOICE_TTS_PYTHON) {
+    Invoke-External -Label 'Checking provided OMNIVOICE_TTS_PYTHON' -FilePath $env:OMNIVOICE_TTS_PYTHON -Arguments @(
+        '-c',
+        'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'
+    )
+    $PythonExe = $env:OMNIVOICE_TTS_PYTHON
+}
+else {
+    $CondaExe = Resolve-Conda
+    if (-not (Test-Path $PythonExe)) {
+        Invoke-External -Label "Creating local Conda environment in $EnvDir" -FilePath $CondaExe -Arguments @(
+            'create',
+            '-y',
+            '-p',
+            $EnvDir,
+            "python=$PythonVersion",
+            'pip'
+        )
+    }
+    else {
+        Write-Host "Using existing local Conda environment: $EnvDir"
+    }
 }
 
 if (-not (Test-Path $PythonExe)) {
-    Invoke-External -Label "Creating Conda environment $EnvName" -FilePath $CondaExe -Arguments @('create', '-y', '-n', $EnvName, 'python=3.12')
-}
-else {
-    Write-Host "Using existing Conda environment: $EnvDir"
+    throw "Python was not found at $PythonExe."
 }
 
 if (-not (Test-Path $ModelsDir)) {
     New-Item -ItemType Directory -Path $ModelsDir | Out-Null
 }
+
+Invoke-External -Label 'Using Python' -FilePath $PythonExe -Arguments @('-c', 'import sys; print(sys.executable); print(sys.version)')
 
 Invoke-External -Label 'Upgrading pip tooling' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
 
@@ -75,6 +143,10 @@ if (-not $SkipTorch) {
 else {
     Write-Host 'Skipping CUDA PyTorch installation.'
 }
+
+Invoke-External -Label 'Installing optional Triton for torch.compile' -FilePath $PythonExe -Arguments @(
+    '-m', 'pip', 'install', 'triton-windows<3.7'
+)
 
 Invoke-External -Label 'Installing OmniVoice backend package' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev]")
 
@@ -97,6 +169,9 @@ if (-not (Test-Path $FrontendIndex)) {
 
 Write-Host ''
 Write-Host 'Installation finished.' -ForegroundColor Green
+Write-Host "Python: $PythonExe"
+Write-Host "Local Conda env: $EnvDir"
+Write-Host "Local Conda cache: $LocalCondaHome"
 Write-Host 'Start the app with: .\start_server.bat'
 Write-Host 'Open: http://127.0.0.1:8091'
 Write-Host ''

@@ -1,0 +1,47 @@
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env and local config
+.env
+.env.*
+!.env.example
+
+# Logs and temp
+*.log
+tmp/
+.tmp/
+temp/
+
+# Build and coverage
+coverage/
+htmlcov/
+*.coverage
+
+# Audio and runtime data
+data/
+artifacts/
+uploads/
+
+# Models and caches
+models/
+.uv-cache/
+.pycache_tmp/
+.pycache_tmp_manual/
+.pytest-tmp/
+frontend-dist-u864zn04/

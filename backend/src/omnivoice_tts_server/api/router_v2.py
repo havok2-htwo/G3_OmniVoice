@@ -38,6 +38,9 @@ from ..domain.models import (
     ModelInfo,
     ServerSettingsResponse,
     ServerSettingsUpdateRequest,
+    SettingsPresetItem,
+    SettingsPresetListResponse,
+    SettingsPresetSaveRequest,
     SpeechJobCreateResponse,
     SpeechRequest,
     SynthesisResultResponse,
@@ -54,6 +57,9 @@ from ..domain.state import VoiceProfileRecord, new_id, utcnow
 from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID
 from ..security import get_admin_record, require_admin_key, rotate_admin_key
 from ..capacity import capacity_summary as _capacity_summary
+from ..presets import delete_preset as _delete_preset
+from ..presets import list_presets as _list_presets
+from ..presets import save_preset as _save_preset
 from ..services_v2 import (
     BenchmarkService,
     EventHub,
@@ -641,6 +647,29 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
 
     save_runtime_settings(settings)
     return _settings_response(settings)
+
+
+@admin.get('/settings/presets', response_model=SettingsPresetListResponse)
+async def list_settings_presets(request: Request) -> SettingsPresetListResponse:
+    data_dir = request.app.state.settings.data_dir
+    return SettingsPresetListResponse(presets=[SettingsPresetItem(**item) for item in _list_presets(data_dir)])
+
+
+@admin.put('/settings/presets/{name}', response_model=SettingsPresetItem)
+async def save_settings_preset(request: Request, name: str, payload: SettingsPresetSaveRequest) -> SettingsPresetItem:
+    data_dir = request.app.state.settings.data_dir
+    try:
+        entry = _save_preset(data_dir, name, payload.values, now_iso=utcnow().isoformat())
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return SettingsPresetItem(**entry)
+
+
+@admin.delete('/settings/presets/{name}')
+async def delete_settings_preset(request: Request, name: str) -> dict[str, bool]:
+    if not _delete_preset(request.app.state.settings.data_dir, name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Preset not found')
+    return {'ok': True}
 
 
 @admin.get('/snapshot', response_model=DashboardSnapshot)

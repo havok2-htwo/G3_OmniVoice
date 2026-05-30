@@ -45,6 +45,8 @@ function isRunActive(status: string | undefined): boolean {
   return !!status && !TERMINAL_RUN_STATUSES.includes(status);
 }
 
+type SettingsPreset = { name: string; values: Partial<ServerSettings>; created_at?: string | null };
+
 // Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
 const VRAM_BASE_MB = 11500;
 const VRAM_MB_PER_AUDIO_S = 42;
@@ -131,7 +133,7 @@ const ADMIN_HELP = {
   positionTemperature: "Temperatur fuer die Positionsauswahl beim Token-Unmasking. Default: 5.0.",
   classTemperature: "Temperatur fuer die Token-Klassenwahl. 0 bedeutet greedy. Default: 0.0.",
   audioChunkDuration: "Interne OmniVoice-Ziellaenge fuer lange Audio-Chunks in Sekunden. Default: 15.0.",
-  audioChunkThreshold: "Ab welcher geschaetzten Dauer OmniVoice internes Audio-Chunking nutzt. Default: 30.0.",
+  audioChunkThreshold: "Ab welcher geschaetzten Dauer (Sek.) OmniVoice intern in Stuecke schneidet. Fuer Hoerbuecher hoch setzen (z.B. 1800), damit der Text als EINE durchgehende Sequenz mit Betonung erzeugt wird. Grenze ist der VRAM (~7-9 min am Stueck). Default: 30.",
   sentenceChunking: "Zerlegt lange Texte in Saetze. Das macht Streaming frueher hoerbar und erlaubt Satz-Batching.",
   compileModel: "Aktiviert torch.compile fuer das LLM im OmniVoice-Modell. Erst nach Reload/Restart wirksam.",
   cudagraphSkip: "Laesst Inductor dynamische CUDAGraph-Shapes ueberspringen und unterdrueckt viele Shape-Warnungen.",
@@ -317,6 +319,8 @@ export function AdminApp() {
   const [adminKey, setAdminKey] = useState(() => readStoredAdminKey());
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ServerSettings | null>(null);
+  const [presets, setPresets] = useState<SettingsPreset[]>([]);
+  const [presetName, setPresetName] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -494,11 +498,12 @@ export function AdminApp() {
     return () => controller.abort();
   }, [adminKey]);
 
-  // Load benchmark/WER history once when the key changes (e.g. on page reload).
+  // Load benchmark/WER history + settings presets once when the key changes (e.g. on page reload).
   useEffect(() => {
     if (!adminKey) return;
     void loadBenchmarks(adminKey);
     void loadWerBenchmarks(adminKey);
+    void loadPresets(adminKey);
   }, [adminKey]);
 
   // Poll the benchmark endpoints ONLY while a run is actually in progress, and at the
@@ -732,6 +737,56 @@ export function AdminApp() {
       setMessage("Admin-Key rotiert und kopiert.");
     } catch (rotateError) {
       setError(rotateError instanceof Error ? rotateError.message : "Key-Rotation fehlgeschlagen.");
+    }
+  }
+
+  async function loadPresets(key = adminKey) {
+    if (!key) return;
+    try {
+      const payload = await apiFetch<{ presets: SettingsPreset[] }>("/api/admin/settings/presets", { adminKey: key });
+      setPresets(payload.presets || []);
+    } catch {
+      // Presets are optional; keep the panel usable if the endpoint is unavailable.
+    }
+  }
+
+  function handleApplyPreset(name: string) {
+    setPresetName(name);
+    const preset = presets.find((item) => item.name === name);
+    if (!preset || !settingsDraft) return;
+    // Load preset values into the draft only; the user reviews and clicks Save to apply.
+    setSettingsDraft(applyOmniVoiceDefaults({ ...settingsDraft, ...preset.values } as ServerSettings));
+    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.`);
+  }
+
+  async function handleSavePreset() {
+    const name = presetName.trim();
+    if (!adminKey || !settingsDraft || !name) return;
+    setError("");
+    try {
+      await apiFetch<SettingsPreset>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        adminKey,
+        body: { values: settingsDraft },
+      });
+      await loadPresets(adminKey);
+      setMessage(`Preset "${name}" gespeichert.`);
+    } catch (presetError) {
+      setError(presetError instanceof Error ? presetError.message : "Preset konnte nicht gespeichert werden.");
+    }
+  }
+
+  async function handleDeletePreset() {
+    const name = presetName.trim();
+    if (!adminKey || !name) return;
+    setError("");
+    try {
+      await apiFetch<{ ok: boolean }>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, { method: "DELETE", adminKey });
+      setPresetName("");
+      await loadPresets(adminKey);
+      setMessage(`Preset "${name}" geloescht.`);
+    } catch (presetError) {
+      setError(presetError instanceof Error ? presetError.message : "Preset konnte nicht geloescht werden.");
     }
   }
 
@@ -1278,7 +1333,26 @@ export function AdminApp() {
             <label className="checkbox-row with-help" title={ADMIN_HELP.preprocessPrompt}><input type="checkbox" checked={Boolean(settingsDraft.preprocess_prompt)} onChange={(event) => setSettingsDraft({ ...settingsDraft, preprocess_prompt: event.target.checked })} />Preprocess prompt</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.postprocessOutput}><input type="checkbox" checked={Boolean(settingsDraft.postprocess_output)} onChange={(event) => setSettingsDraft({ ...settingsDraft, postprocess_output: event.target.checked })} />Postprocess output</label>
           </div>
-          <div className="button-row"><button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button></div>
+          <div className="button-row" style={{ flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
+            <button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button>
+            <span className="pill" title="Benannte Parametersaetze: laden (in den Entwurf), speichern, loeschen.">Presets</span>
+            <select
+              value={presets.some((preset) => preset.name === presetName) ? presetName : ""}
+              onChange={(event) => handleApplyPreset(event.target.value)}
+              title="Preset laden (Werte in den Entwurf uebernehmen, dann speichern)"
+            >
+              <option value="">— Preset laden —</option>
+              {presets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+            </select>
+            <input
+              value={presetName}
+              onChange={(event) => setPresetName(event.target.value)}
+              placeholder="Preset-Name"
+              style={{ maxWidth: "170px" }}
+            />
+            <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim()}>Als Preset speichern</button>
+            <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!presets.some((preset) => preset.name === presetName.trim())}>Preset loeschen</button>
+          </div>
         </section>
 
         <section className="widget span-6"><div className="widget-header"><h2>Benchmark</h2></div>

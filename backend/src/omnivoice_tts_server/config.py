@@ -127,8 +127,11 @@ class Settings(BaseSettings):
     denoise: bool | None = None
     preprocess_prompt: bool | None = None
     postprocess_output: bool | None = None
-    audio_chunk_duration: float | None = Field(default=None, ge=0.1, le=60.0)
-    audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=120.0)
+    # Caps raised so internal OmniVoice audio chunking can be pushed high enough to be
+    # effectively disabled (audiobooks need one continuous sequence for prosody). Set the
+    # threshold above your longest single generation; the real ceiling is VRAM (~7-9 min).
+    audio_chunk_duration: float | None = Field(default=None, ge=0.1, le=3600.0)
+    audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=3600.0)
     position_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
     class_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
 

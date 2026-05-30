@@ -271,10 +271,26 @@ class ServerSettingsUpdateRequest(BaseModel):
     denoise: bool | None = None
     preprocess_prompt: bool | None = None
     postprocess_output: bool | None = None
-    audio_chunk_duration: float | None = Field(default=None, ge=0.1, le=60.0)
-    audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=120.0)
+    # Raised caps: set the threshold above your longest text to effectively disable
+    # internal audio chunking (needed for audiobook prosody). Real ceiling is VRAM.
+    audio_chunk_duration: float | None = Field(default=None, ge=0.1, le=3600.0)
+    audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=3600.0)
     position_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
     class_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
+
+
+class SettingsPresetItem(BaseModel):
+    name: str
+    values: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+
+
+class SettingsPresetListResponse(BaseModel):
+    presets: list[SettingsPresetItem] = Field(default_factory=list)
+
+
+class SettingsPresetSaveRequest(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelOperationRequest(BaseModel):

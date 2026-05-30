@@ -50,6 +50,7 @@ class OmniVoiceSynthesizer:
         self.store = store
         self.sample_rate = settings.sample_rate
         self._loaded_model_id: str | None = None
+        self._loaded_model_source: str | None = None
         self._model: Any | None = None
         self._torch: Any | None = None
         self._soundfile: Any | None = None
@@ -71,6 +72,19 @@ class OmniVoiceSynthesizer:
         target_model = requested_model or self.settings.active_model or OMNIVOICE_AUTO_ALIAS
         if self._loaded_model_id == target_model and self._model is not None:
             return target_model, 0
+        # The OmniVoice aliases (AutoVoice/VoiceDesign/Base) all resolve to ONE
+        # checkpoint; only the task type differs at generate() time. If the requested
+        # alias maps to the already-resident checkpoint, just re-point the alias
+        # instead of evicting and reloading identical weights.
+        if self._model is not None and self._loaded_model_source is not None:
+            try:
+                resolved_source, _ = self._resolve_model_source(target_model)
+            except Exception:
+                resolved_source = None
+            if resolved_source is not None and resolved_source == self._loaded_model_source:
+                self._loaded_model_id = target_model
+                self.settings.active_model = target_model
+                return target_model, 0
         warm_ms = await asyncio.to_thread(self._load_model_sync, target_model)
         return target_model, warm_ms
 
@@ -135,6 +149,7 @@ class OmniVoiceSynthesizer:
 
         self._model = model
         self._loaded_model_id = model_id
+        self._loaded_model_source = model_source
         self.settings.active_model = model_id
         self.sample_rate = int(getattr(model, 'sampling_rate', self.settings.sample_rate) or self.settings.sample_rate)
 
@@ -170,7 +185,12 @@ class OmniVoiceSynthesizer:
             def compile_target(target: Any) -> Any:
                 if use_cudagraphs:
                     return self._torch.compile(target, mode='reduce-overhead')
-                return self._torch.compile(target)
+                # dynamic=True compiles a single shape-generic graph so that varying
+                # batch sizes (1..max_batch_size sentences) do NOT each trigger a fresh
+                # 10-60s Inductor recompilation. Without this, every new batch shape
+                # stalls the single worker and starves the GPU (observed: cold batch
+                # sizes took 10-60s at <10% GPU; warm sizes ran at 95% GPU in ~250ms).
+                return self._torch.compile(target, dynamic=True)
 
             if hasattr(model, 'llm'):
                 model.llm = compile_target(model.llm)
@@ -260,8 +280,20 @@ class OmniVoiceSynthesizer:
     def _release_model(self) -> None:
         self._model = None
         self._loaded_model_id = None
+        self._loaded_model_source = None
         self.store.prompt_cache.clear()
         self._trim_cuda_cache_sync()
+
+    def resident_models(self) -> set[str]:
+        """Alias model_ids served by the currently resident checkpoint.
+
+        All OmniVoice aliases (AutoVoice/VoiceDesign/Base) share a single checkpoint,
+        so when any one is loaded they are all effectively resident -- only the task
+        type differs per request. Used so a task-type switch is not reported as a
+        cold 'warming' model reload."""
+        if self._model is None:
+            return set()
+        return set(self.settings.supported_models)
 
     def _free_memory_sync(self) -> dict[str, int | str | bool | None]:
         before = query_nvidia_smi()
@@ -513,6 +545,9 @@ class MockSynthesizer:
 
     async def ensure_model(self, requested_model: str | None) -> tuple[str, int]:
         return requested_model or OMNIVOICE_AUTO_ALIAS, 0
+
+    def resident_models(self) -> set[str]:
+        return {OMNIVOICE_AUTO_ALIAS, OMNIVOICE_DESIGN_ALIAS, OMNIVOICE_BASE_ALIAS}
 
     async def preload(self, requested_model: str | None = None) -> tuple[str, int]:
         return await self.ensure_model(requested_model)

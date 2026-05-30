@@ -7,18 +7,45 @@ SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?\u3002\uff01\uff1f\u2026])\s+|\n+')
 SHORT_SENTENCE_MERGE_ENDINGS = ('!', '?', '.', '\uff01', '\uff1f', '\u3002')
 
 
+def _hard_split(text: str, max_chars: int) -> list[str]:
+    """Split text into pieces of at most max_chars, preferring whitespace boundaries.
+    Guards a single over-long sequence (e.g. chunking off, or one giant sentence) so
+    no generate() call exceeds the VRAM budget. max_chars <= 0 is a no-op."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    current = ''
+    for word in text.split():
+        if current and len(current) + 1 + len(word) > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = f'{current} {word}' if current else word
+    if current:
+        chunks.append(current)
+    out: list[str] = []
+    for chunk in chunks:
+        while len(chunk) > max_chars:  # a single word longer than the limit
+            out.append(chunk[:max_chars])
+            chunk = chunk[max_chars:]
+        if chunk:
+            out.append(chunk)
+    return out or [text[:max_chars]]
+
+
 def split_sentences(
     text: str,
     *,
     enabled: bool,
     short_sentence_merge_max_chars: int = 30,
     following_sentence_merge_min_chars: int = 20,
+    max_chars: int = 0,
 ) -> list[str]:
     cleaned = (text or '').strip()
     if not cleaned:
         return []
     if not enabled:
-        return [cleaned]
+        return _hard_split(cleaned, max_chars)
 
     merge_limit = max(0, int(short_sentence_merge_max_chars))
     min_following_chars = max(0, int(following_sentence_merge_min_chars))
@@ -66,7 +93,10 @@ def split_sentences(
 
         merged_parts.extend(line_parts)
 
-    return merged_parts or [cleaned]
+    result = merged_parts or [cleaned]
+    if max_chars > 0:
+        result = [piece for part in result for piece in _hard_split(part, max_chars)]
+    return result
 
 
 def chunk_pcm16le(pcm_bytes: bytes, *, sample_rate: int, chunk_ms: int) -> list[bytes]:

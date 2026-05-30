@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -7,17 +8,48 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .api.router_v2 import router as api_router
+from .capacity import capacity_summary
 from .config import Settings, get_settings
 from .domain.state import InMemoryStore
 from .runtime_v2 import build_synthesizer
 from .security import bootstrap_admin_key, setup_startup_admin_key
-from .services_v2 import BenchmarkService, EventHub, QueueService, StatsService, TranscriptionService, WerBenchmarkService
+from .services_v2 import (
+    BenchmarkService,
+    EventHub,
+    QueueService,
+    StatsService,
+    TranscriptionService,
+    WerBenchmarkService,
+    spawn_tracked_task,
+)
 
 logger = logging.getLogger('omnivoice_tts_server')
+
+
+class _DropInvalidHTTPRequestWarning(logging.Filter):
+    """uvicorn/h11 logs 'Invalid HTTP request received' for non-HTTP bytes hitting the
+    port (e.g. a TLS handshake to the plaintext port, or LAN scanners). Verified benign:
+    our response framing and HTTP/1.1 keep-alive are correct (a standard client reusing a
+    connection succeeds), so this is external noise, not an app bug. Drop just this record
+    so it stops flooding the log while keeping every other uvicorn warning."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return 'Invalid HTTP request received' not in record.getMessage()
+
+
+_LOG_FILTER_INSTALLED = False
+
+
+def _install_uvicorn_log_filter() -> None:
+    global _LOG_FILTER_INSTALLED
+    if _LOG_FILTER_INSTALLED:
+        return
+    logging.getLogger('uvicorn.error').addFilter(_DropInvalidHTTPRequestWarning())
+    _LOG_FILTER_INSTALLED = True
 
 
 def configure_frontend(app: FastAPI, settings: Settings) -> None:
@@ -35,6 +67,14 @@ def configure_frontend(app: FastAPI, settings: Settings) -> None:
         app.mount('/assets', StaticFiles(directory=assets_dir), name='frontend-assets')
 
     logger.info('frontend dist enabled path=%s', frontend_root)
+
+    @app.get('/favicon.ico', include_in_schema=False)
+    async def frontend_favicon() -> Response:
+        icon = frontend_root / 'favicon.ico'
+        if icon.is_file():
+            return FileResponse(icon)
+        # No icon shipped: 204 so browsers stop logging a 404 on every page load.
+        return Response(status_code=204)
 
     @app.get('/', include_in_schema=False)
     async def frontend_index() -> FileResponse:
@@ -70,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        _install_uvicorn_log_filter()
         settings.models_root_dir.mkdir(parents=True, exist_ok=True)
         store = InMemoryStore(max_queue_size=settings.max_queue_size)
         store.load_secrets(settings.data_dir)
@@ -108,6 +149,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info('startup frontend_dist=%s', settings.frontend_dist_dir)
         await queue_service.start_worker()
         logger.info('startup worker_state=%s queue_limit=%s', store.worker_state, settings.max_queue_size)
+        cap = capacity_summary(getattr(settings, 'vram_budget_mb', 0))
+        if cap['vram_budget_mb'] > 0:
+            logger.info(
+                'startup vram_budget_mb=%s -> max_batch_audio_s=%.0f max_chars_per_chunk=%s est_peak_vram_mb=%s max_input_chars=%s',
+                cap['vram_budget_mb'], cap['max_batch_audio_seconds'], cap['max_chars_per_chunk'],
+                cap['estimated_peak_vram_mb'], getattr(settings, 'max_input_chars', 0),
+            )
+        else:
+            logger.info('startup vram budgeting disabled (vram_budget_mb=0)')
+
+        async def _job_reaper() -> None:
+            # Backstop for the per-batch prune: evicts terminal jobs even while idle so
+            # store.jobs / final_audio never grow unbounded (retention_days is enforced here).
+            while True:
+                await asyncio.sleep(120)
+                async with store.job_condition:
+                    removed = store.prune_terminal_jobs(
+                        retention_days=settings.retention_days,
+                        max_retained_jobs=settings.max_retained_jobs,
+                    )
+                if removed:
+                    logger.info('job reaper evicted %s terminal jobs', removed)
+
+        spawn_tracked_task(store, _job_reaper(), label='job-reaper')
 
         # Pre-load the active model at startup so the first real request is never cold.
         # Also primes torch.compile / Triton kernel cache via a warmup inference pass.
@@ -124,15 +189,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             logger.info('shutdown requested')
             await queue_service.stop_worker()
+            pending = list(store.background_tasks)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             store.save_secrets(settings.data_dir)
             store.save_voices(settings.data_dir)
             logger.info('shutdown complete')
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
+    # allow_origins='*' together with allow_credentials=True is unsafe: Starlette then
+    # reflects any caller's Origin and lets it send credentialed requests. This API
+    # authenticates via the X-Admin-Key / Authorization headers (not cookies), so we
+    # keep the wildcard origin for easy LAN access but disable credentials.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=['*'],
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=['*'],
         allow_headers=['*'],
     )

@@ -42,6 +42,8 @@ RUNTIME_SETTINGS_FIELDS = {
     'max_parallel_requests',
     'max_batch_size',
     'batch_wait_ms',
+    'vram_budget_mb',
+    'max_input_chars',
     'stream_chunk_ms',
     'stream_prebuffer_ms',
     'num_step',
@@ -103,6 +105,8 @@ class Settings(BaseSettings):
     sample_rate: int = 24_000
     channels: int = 1
     retention_days: int = 7
+    max_retained_jobs: int = 500
+    max_retained_benchmark_runs: int = 25
     benchmark_dataset_default: str = 'de_standard_v1'
     frontend_poll_interval_ms: int = 500
     frontend_theme: str = 'onyx'
@@ -112,6 +116,8 @@ class Settings(BaseSettings):
     max_parallel_requests: int = 6
     max_batch_size: int = 8
     batch_wait_ms: int = 35
+    vram_budget_mb: int = 24000        # 0 = disable VRAM budgeting (unbounded)
+    max_input_chars: int = 100000      # hard reject single requests above this (abuse guard)
     stream_chunk_ms: int = 140
     stream_prebuffer_ms: int = 0
     num_step: int | None = Field(default=None, ge=1, le=256)

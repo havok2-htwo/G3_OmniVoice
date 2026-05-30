@@ -40,6 +40,22 @@ function inferTaskType(modelId: string): TaskType {
   return "CustomVoice";
 }
 
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled", "error"];
+function isRunActive(status: string | undefined): boolean {
+  return !!status && !TERMINAL_RUN_STATUSES.includes(status);
+}
+
+// Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
+const VRAM_BASE_MB = 11500;
+const VRAM_MB_PER_AUDIO_S = 42;
+const VRAM_EST_S_PER_CHAR = 0.06;
+function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number } | null {
+  if (!budgetMb || budgetMb <= 0) return null;
+  const budgetS = Math.max(15, (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_AUDIO_S);
+  const chars = Math.max(240, Math.floor(budgetS / VRAM_EST_S_PER_CHAR));
+  return { peakGb: ((VRAM_BASE_MB + budgetS * VRAM_MB_PER_AUDIO_S) / 1024).toFixed(1), budgetS: Math.round(budgetS), chars };
+}
+
 const OMNIVOICE_DEFAULTS = {
   num_step: 32,
   guidance_scale: 2.0,
@@ -96,6 +112,9 @@ const ADMIN_HELP = {
   activeRequests: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.",
   batchSize: "Maximale Anzahl kompatibler Saetze/Requests pro echtem OmniVoice generate(text=[...]) Batch.",
   batchWait: "Wartezeit, um kompatible Queue-Items fuer einen groesseren Batch zu sammeln.",
+  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). RTX 5090: ~24000-28000 sinnvoll.",
+  maxInputChars: "Harte Obergrenze fuer die Zeichenzahl eines einzelnen Requests. Darueber kommt 413. 0 = aus.",
+  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel: ~11,3 GB Modell + ~2,3 GB pro Audio-Minute.",
   streamPrebuffer: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.",
   modelDirectory: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache.",
   whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://192.168.0.200:7861; ein voller Endpoint wie /transcribe/ geht auch.",
@@ -475,16 +494,32 @@ export function AdminApp() {
     return () => controller.abort();
   }, [adminKey]);
 
+  // Load benchmark/WER history once when the key changes (e.g. on page reload).
   useEffect(() => {
     if (!adminKey) return;
     void loadBenchmarks(adminKey);
     void loadWerBenchmarks(adminKey);
+  }, [adminKey]);
+
+  // Poll the benchmark endpoints ONLY while a run is actually in progress, and at the
+  // configured poll interval. Previously this polled both list endpoints (which return
+  // every run's full results[]) every 1000ms unconditionally for as long as a key was
+  // set, which flooded the server with ~2 req/sec/tab even when idle.
+  useEffect(() => {
+    if (!adminKey) return;
+    const active =
+      benchmarkBusy ||
+      werBenchmarkBusy ||
+      benchmarks.some((run) => isRunActive(run.status)) ||
+      werBenchmarks.some((run) => isRunActive(run.status));
+    if (!active) return;
+    const pollMs = Math.min(Math.max(snapshot?.settings.poll_interval_ms ?? 1000, 750), 5000);
     const timer = window.setInterval(() => {
       void loadBenchmarks(adminKey);
       void loadWerBenchmarks(adminKey);
-    }, 1000);
+    }, pollMs);
     return () => window.clearInterval(timer);
-  }, [adminKey]);
+  }, [adminKey, benchmarkBusy, werBenchmarkBusy, benchmarks, werBenchmarks, snapshot?.settings.poll_interval_ms]);
 
   useEffect(() => {
     if (!adminKey || !modelDownloads.some((model) => model.status === "downloading")) return;
@@ -1204,6 +1239,14 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.activeRequests}>Active requests<input type="number" value={settingsDraft.max_parallel_requests} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_parallel_requests: Number(event.target.value) || 1 })} /></label>
             <label className="with-help" title={ADMIN_HELP.batchSize}>Batch size<input type="number" value={settingsDraft.max_batch_size} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_batch_size: Number(event.target.value) || 1 })} /></label>
             <label className="with-help" title={ADMIN_HELP.batchWait}>Batch wait ms<input type="number" value={settingsDraft.batch_wait_ms} onChange={(event) => setSettingsDraft({ ...settingsDraft, batch_wait_ms: Number(event.target.value) || 0 })} /></label>
+            <label className="with-help" title={ADMIN_HELP.vramBudget}>VRAM budget MB<input type="number" min="0" step="1000" value={settingsDraft.vram_budget_mb ?? 0} onChange={(event) => setSettingsDraft({ ...settingsDraft, vram_budget_mb: Number(event.target.value) || 0 })} /></label>
+            <label className="with-help" title={ADMIN_HELP.maxInputChars}>Max input chars<input type="number" min="0" step="1000" value={settingsDraft.max_input_chars ?? 0} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_input_chars: Number(event.target.value) || 0 })} /></label>
+            {(() => {
+              const est = vramEstimate(settingsDraft.vram_budget_mb ?? 0);
+              return (
+                <label className="with-help" title={ADMIN_HELP.vramEstimate}>Est. VRAM peak<input type="text" readOnly value={est ? `~${est.peakGb} GB · ${est.budgetS}s/Batch · ${est.chars} Zeichen/Chunk` : "Budget aus (unbegrenzt)"} /></label>
+              );
+            })()}
             <label className="with-help" title={ADMIN_HELP.streamPrebuffer}>Stream prebuffer ms<input type="number" value={settingsDraft.stream_prebuffer_ms} onChange={(event) => setSettingsDraft({ ...settingsDraft, stream_prebuffer_ms: Number(event.target.value) || 0 })} /></label>
             <label className="with-help" title={ADMIN_HELP.dtype}>Dtype<select value={settingsDraft.torch_dtype} onChange={(event) => setSettingsDraft({ ...settingsDraft, torch_dtype: event.target.value })}>
               <option value="float16">fp16</option>

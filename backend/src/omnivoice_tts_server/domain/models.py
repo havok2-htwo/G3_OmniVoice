@@ -210,6 +210,12 @@ class ServerSettingsResponse(BaseModel):
     max_parallel_requests: int
     max_batch_size: int
     batch_wait_ms: int
+    vram_budget_mb: int = 0
+    max_input_chars: int = 0
+    # Derived from vram_budget_mb (read-only, ignored on update):
+    max_batch_audio_seconds: float = 0.0
+    max_chars_per_chunk: int = 0
+    estimated_peak_vram_mb: int = 0
     stream_chunk_ms: int
     stream_prebuffer_ms: int
     num_step: int | None = None
@@ -251,9 +257,11 @@ class ServerSettingsUpdateRequest(BaseModel):
     sentence_chunking: bool | None = None
     short_sentence_merge_max_chars: int | None = Field(default=None, ge=0, le=512)
     following_sentence_merge_min_chars: int | None = Field(default=None, ge=0, le=1024)
-    max_parallel_requests: int | None = Field(default=None, ge=1, le=64)
-    max_batch_size: int | None = Field(default=None, ge=1, le=64)
+    max_parallel_requests: int | None = Field(default=None, ge=1, le=128)
+    max_batch_size: int | None = Field(default=None, ge=1, le=128)
     batch_wait_ms: int | None = Field(default=None, ge=0, le=1000)
+    vram_budget_mb: int | None = Field(default=None, ge=0, le=80000)
+    max_input_chars: int | None = Field(default=None, ge=0, le=1_000_000)
     stream_chunk_ms: int | None = Field(default=None, ge=20, le=1000)
     stream_prebuffer_ms: int | None = Field(default=None, ge=0, le=5000)
     num_step: int | None = Field(default=None, ge=1, le=256)

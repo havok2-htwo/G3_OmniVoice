@@ -91,6 +91,11 @@ export interface ServerSettings {
   max_parallel_requests: number;
   max_batch_size: number;
   batch_wait_ms: number;
+  vram_budget_mb: number;
+  max_input_chars: number;
+  max_batch_audio_seconds?: number;
+  max_chars_per_chunk?: number;
+  estimated_peak_vram_mb?: number;
   stream_chunk_ms: number;
   stream_prebuffer_ms: number;
   num_step?: number | null;

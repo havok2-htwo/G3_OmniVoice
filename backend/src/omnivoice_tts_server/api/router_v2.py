@@ -53,7 +53,16 @@ from ..domain.models import (
 from ..domain.state import VoiceProfileRecord, new_id, utcnow
 from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID
 from ..security import get_admin_record, require_admin_key, rotate_admin_key
-from ..services_v2 import BenchmarkService, EventHub, QueueService, TranscriptionService, WerBenchmarkService
+from ..capacity import capacity_summary as _capacity_summary
+from ..services_v2 import (
+    BenchmarkService,
+    EventHub,
+    QueueSaturatedError,
+    QueueService,
+    RequestTooLargeError,
+    TranscriptionService,
+    WerBenchmarkService,
+)
 
 router = APIRouter()
 health = APIRouter()
@@ -130,6 +139,11 @@ def _settings_response(settings: Any) -> ServerSettingsResponse:
         max_parallel_requests=settings.max_parallel_requests,
         max_batch_size=settings.max_batch_size,
         batch_wait_ms=settings.batch_wait_ms,
+        vram_budget_mb=getattr(settings, 'vram_budget_mb', 0),
+        max_input_chars=getattr(settings, 'max_input_chars', 0),
+        max_batch_audio_seconds=_capacity_summary(getattr(settings, 'vram_budget_mb', 0))['max_batch_audio_seconds'],
+        max_chars_per_chunk=_capacity_summary(getattr(settings, 'vram_budget_mb', 0))['max_chars_per_chunk'],
+        estimated_peak_vram_mb=_capacity_summary(getattr(settings, 'vram_budget_mb', 0))['estimated_peak_vram_mb'],
         stream_chunk_ms=settings.stream_chunk_ms,
         stream_prebuffer_ms=settings.stream_prebuffer_ms,
         num_step=settings.num_step,
@@ -481,8 +495,14 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
 async def _submit_or_429(queue: QueueService, payload: SpeechRequest, *, owner_scope: str = 'public'):
     try:
         return await queue.submit(payload, owner_scope=owner_scope)
-    except RuntimeError as exc:
+    except QueueSaturatedError as exc:
+        # Genuine rate limit -> retryable.
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except RequestTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # Validation failures (empty input, bad voice/model) are permanent -> 400, not 429.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @health.get('/health')
@@ -588,6 +608,10 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.max_batch_size = payload.max_batch_size
     if payload.batch_wait_ms is not None:
         settings.batch_wait_ms = payload.batch_wait_ms
+    if payload.vram_budget_mb is not None:
+        settings.vram_budget_mb = payload.vram_budget_mb
+    if payload.max_input_chars is not None:
+        settings.max_input_chars = payload.max_input_chars
     if payload.stream_chunk_ms is not None:
         settings.stream_chunk_ms = payload.stream_chunk_ms
     if payload.stream_prebuffer_ms is not None:
@@ -980,11 +1004,28 @@ async def synthesize_stream(request: Request, payload: SpeechRequest) -> Streami
     job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public')
 
     async def iterator() -> Any:
-        while True:
-            event = await job.stream_events.get()
-            if event is None:
-                break
-            yield json.dumps(event) + '\n'
+        disconnected = False
+        try:
+            while True:
+                if await request.is_disconnected():
+                    disconnected = True
+                    break
+                try:
+                    event = await asyncio.wait_for(job.stream_events.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if event is None:
+                    break
+                yield json.dumps(event) + '\n'
+        finally:
+            # Client gone mid-stream: cancel so the single worker stops rendering
+            # audio nobody consumes (otherwise the job runs to completion and its
+            # PCM piles up in the unbounded stream queue).
+            if disconnected:
+                try:
+                    await queue.cancel(job.job_id)
+                except Exception:
+                    pass
 
     return StreamingResponse(iterator(), media_type='application/x-ndjson')
 
@@ -996,11 +1037,25 @@ async def speech(request: Request, payload: SpeechRequest) -> Response | Streami
         job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public')
 
         async def stream_job() -> Any:
-            while True:
-                chunk = await job.stream_chunks.get()
-                if chunk is None:
-                    break
-                yield chunk
+            disconnected = False
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        disconnected = True
+                        break
+                    try:
+                        chunk = await asyncio.wait_for(job.stream_chunks.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if chunk is None:
+                        break
+                    yield chunk
+            finally:
+                if disconnected:
+                    try:
+                        await queue.cancel(job.job_id)
+                    except Exception:
+                        pass
 
         return StreamingResponse(stream_job(), media_type='audio/pcm')
 

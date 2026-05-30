@@ -5,7 +5,7 @@ import json
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -124,6 +124,9 @@ class InMemoryStore:
         self.job_condition = asyncio.Condition()
         self.worker_stop = asyncio.Event()
         self.worker_task: asyncio.Task[None] | None = None
+        # Long-running side tasks (benchmark/WER runs, reaper) kept referenced so the
+        # event loop does not GC them mid-run, and so they can be cancelled at shutdown.
+        self.background_tasks: set[asyncio.Task[Any]] = set()
         self.worker_state = 'idle'
         self.models_loaded: set[str] = set()
         self.active_model: str | None = None
@@ -240,3 +243,40 @@ class InMemoryStore:
         if position <= 0:
             return 0
         return position * (900 + min(text_length * 10, 2800))
+
+    def prune_terminal_jobs(self, *, retention_days: int = 0, max_retained_jobs: int = 500) -> int:
+        """Evict finished jobs so the in-memory store stays bounded.
+
+        Removes terminal jobs (completed/failed/cancelled) older than retention_days
+        and, beyond max_retained_jobs, the oldest terminal jobs regardless of age.
+        Frees the heavy fields (final_audio WAV bytes, pcm_parts) and drops the
+        request_states entry. Never touches queued/active jobs. Returns count removed.
+
+        Callers must hold job_condition (or run before the worker starts); this only
+        mutates plain dicts and does no awaiting.
+        """
+        terminal = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
+        removable = [(job_id, job) for job_id, job in self.jobs.items() if job.status in terminal]
+        to_remove: set[str] = set()
+
+        if retention_days and retention_days > 0:
+            cutoff = utcnow() - timedelta(days=retention_days)
+            for job_id, job in removable:
+                stamp = job.completed_at or job.updated_at or job.created_at
+                if stamp and stamp < cutoff:
+                    to_remove.add(job_id)
+
+        remaining = [(job_id, job) for job_id, job in removable if job_id not in to_remove]
+        if max_retained_jobs >= 0 and len(remaining) > max_retained_jobs:
+            remaining.sort(key=lambda kv: kv[1].completed_at or kv[1].updated_at or kv[1].created_at)
+            overflow = len(remaining) - max_retained_jobs
+            for job_id, _ in remaining[:overflow]:
+                to_remove.add(job_id)
+
+        for job_id in to_remove:
+            job = self.jobs.pop(job_id, None)
+            if job is not None:
+                job.final_audio = None
+                job.pcm_parts = []
+            self.request_states.pop(job_id, None)
+        return len(to_remove)

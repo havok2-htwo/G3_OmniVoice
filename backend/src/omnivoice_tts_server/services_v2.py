@@ -5,6 +5,7 @@ import ast
 import base64
 import hashlib
 import json
+import logging
 import math
 import random
 import re
@@ -41,7 +42,41 @@ from .domain.models import (
 from .domain.state import InMemoryStore, JobRecord, RequestState, utcnow
 from .prompt_batch import chunk_pcm16le, split_sentences
 from .runtime_v2 import BatchSynthesisItem, query_nvidia_smi
+from .capacity import batch_audio_budget_seconds, estimate_audio_seconds, max_chars_per_chunk
 from .voice_design import normalize_voice_design_instruct
+
+logger = logging.getLogger('omnivoice_tts_server.services')
+
+
+def spawn_tracked_task(store: InMemoryStore, coro: Any, *, label: str) -> 'asyncio.Task[Any]':
+    """Create a background task that is referenced (so it is not GC'd mid-run) and
+    whose exceptions are logged instead of silently swallowed. Tasks are tracked on
+    the store so the lifespan can cancel them at shutdown."""
+    task = asyncio.create_task(coro)
+    store.background_tasks.add(task)
+
+    def _on_done(done: 'asyncio.Task[Any]') -> None:
+        store.background_tasks.discard(done)
+        if done.cancelled():
+            return
+        exc = done.exception()
+        if exc is not None:
+            logger.error('background task %s failed: %s', label, exc, exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
+class QueueSaturatedError(RuntimeError):
+    """Raised by submit() only when the queue is full -> maps to HTTP 429.
+
+    Distinguished from validation RuntimeErrors (empty input, bad voice/model)
+    so callers don't translate a permanent 400-class failure into a retryable 429.
+    """
+
+
+class RequestTooLargeError(RuntimeError):
+    """Raised by submit() when the input text exceeds max_input_chars -> HTTP 413."""
 
 
 class EventHub:
@@ -99,6 +134,12 @@ class QueueService:
         text = (request.input or '').strip()
         if not text:
             raise RuntimeError('Missing input text')
+        max_input = int(getattr(self.settings, 'max_input_chars', 0) or 0)
+        if max_input > 0 and len(text) > max_input:
+            raise RequestTooLargeError(
+                f'Input text is {len(text)} characters; the limit is {max_input}. '
+                'Split it into smaller requests.'
+            )
         self._validate_request_voice_model(request)
 
         sentences = split_sentences(
@@ -106,6 +147,7 @@ class QueueService:
             enabled=self.settings.sentence_chunking,
             short_sentence_merge_max_chars=self.settings.short_sentence_merge_max_chars,
             following_sentence_merge_min_chars=self.settings.following_sentence_merge_min_chars,
+            max_chars=max_chars_per_chunk(getattr(self.settings, 'vram_budget_mb', 0)),
         )
         if not sentences:
             raise RuntimeError('Missing input text')
@@ -125,7 +167,7 @@ class QueueService:
         async with self.store.job_condition:
             total_outstanding = len(self.store.waiting_requests) + len(self.store.active_request_ids)
             if total_outstanding >= self.store.max_queue_size:
-                raise RuntimeError('Queue saturated')
+                raise QueueSaturatedError('Queue saturated')
             self.store.jobs[job.job_id] = job
             self.store.request_states[job.job_id] = state
             self.store.waiting_requests.append(job.job_id)
@@ -192,11 +234,15 @@ class QueueService:
         await self._publish_state()
 
     async def wait_for_completion(self, job_id: str) -> JobRecord:
-        while True:
-            job = self.store.jobs[job_id]
-            if job.status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
-                return job
-            await asyncio.sleep(0.01)
+        terminal = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
+        async with self.store.job_condition:
+            await self.store.job_condition.wait_for(
+                lambda: job_id not in self.store.jobs or self.store.jobs[job_id].status in terminal
+            )
+            job = self.store.jobs.get(job_id)
+        if job is None:
+            raise RuntimeError(f'Job {job_id} was removed before it completed.')
+        return job
 
     def get(self, job_id: str) -> JobRecord:
         return self.store.jobs[job_id]
@@ -212,7 +258,18 @@ class QueueService:
     def _mark_loaded_model_locked(self, model_id: str) -> None:
         self.store.active_model = model_id
         self.store.models_loaded.clear()
+        self.store.models_loaded.update(self._resident_models() or {model_id})
         self.store.models_loaded.add(model_id)
+
+    def _resident_models(self) -> set[str]:
+        """Aliases backed by the currently resident checkpoint (all share one)."""
+        resident_fn = getattr(self.synthesizer, 'resident_models', None)
+        if callable(resident_fn):
+            try:
+                return set(resident_fn())
+            except Exception:
+                return set()
+        return set()
 
     async def _worker_loop(self) -> None:
         self.store.worker_state = 'idle'
@@ -267,7 +324,9 @@ class QueueService:
                         job.metrics['queue_wait_ms'] = int((job.started_at - job.created_at).total_seconds() * 1000)
                     if job.status not in {JobStatus.cancelling, JobStatus.cancelled}:
                         target_model = job.request.model or self.store.active_model
-                        job.status = JobStatus.warming if target_model and target_model != self.store.active_model else JobStatus.running
+                        resident = self._resident_models()
+                        needs_warm = bool(target_model) and target_model not in resident
+                        job.status = JobStatus.warming if needs_warm else JobStatus.running
                     job.updated_at = utcnow()
 
             await self._publish_state()
@@ -343,6 +402,10 @@ class QueueService:
                         self._complete_job_locked(job, state)
 
                 self._recompute_positions_locked()
+                self.store.prune_terminal_jobs(
+                    retention_days=self.settings.retention_days,
+                    max_retained_jobs=self.settings.max_retained_jobs,
+                )
                 self.store.job_condition.notify_all()
 
             await self._publish_state()
@@ -596,7 +659,11 @@ class QueueService:
         if first_audio_plan:
             return first_audio_plan
 
+        # VRAM-aware budget: cap the batch by estimated audio seconds (not just count),
+        # so a batch of long sentences uses no more VRAM than one of short ones. 0 = off.
+        audio_budget = batch_audio_budget_seconds(getattr(self.settings, 'vram_budget_mb', 0))
         plan: list[tuple[str, int]] = []
+        planned_audio_s = 0.0
         per_request_offsets = {job_id: 0 for job_id in eligible}
         made_progress = True
         while len(plan) < self.settings.max_batch_size and made_progress:
@@ -606,7 +673,14 @@ class QueueService:
                 offset = per_request_offsets[job_id]
                 if offset >= len(state.pending_sentence_indices):
                     continue
-                plan.append((job_id, state.pending_sentence_indices[offset]))
+                sentence_index = state.pending_sentence_indices[offset]
+                if audio_budget > 0 and plan:
+                    # Always include at least one sentence; stop before exceeding budget.
+                    sentence_s = estimate_audio_seconds(state.sentences[sentence_index])
+                    if planned_audio_s + sentence_s > audio_budget:
+                        return plan
+                    planned_audio_s += sentence_s
+                plan.append((job_id, sentence_index))
                 per_request_offsets[job_id] = offset + 1
                 made_progress = True
                 if len(plan) >= self.settings.max_batch_size:
@@ -1074,15 +1148,27 @@ class BenchmarkService:
             'error_message': None,
         }
         self.store.benchmark_runs[run_id] = run
+        self._prune_runs()
         await self.events.publish('dashboard.snapshot', {'reason': 'benchmark.started', 'run_id': run_id})
-        asyncio.create_task(self._execute_run(run, payload))
+        spawn_tracked_task(self.store, self._execute_run(run, payload), label=f'benchmark:{run_id}')
         return self._to_response(run)
 
+    def _prune_runs(self) -> None:
+        # Each run carries a full per-iteration results[] list (potentially thousands
+        # of entries); keep only the newest N so the dict (and every /runs poll) stays
+        # bounded. Mirrors the WER service, which already clears between runs.
+        cap = max(1, int(getattr(self.settings, 'max_retained_benchmark_runs', 25)))
+        runs = self.store.benchmark_runs
+        if len(runs) <= cap:
+            return
+        ordered = sorted(runs.items(), key=lambda kv: kv[1]['created_at'])
+        for run_id, _ in ordered[: len(runs) - cap]:
+            runs.pop(run_id, None)
+
     async def list_runs(self) -> list[BenchmarkRunResponse]:
-        return [
-            self._to_response(run)
-            for run in sorted(self.store.benchmark_runs.values(), key=lambda item: item['created_at'], reverse=True)
-        ]
+        cap = max(1, int(getattr(self.settings, 'max_retained_benchmark_runs', 25)))
+        ordered = sorted(self.store.benchmark_runs.values(), key=lambda item: item['created_at'], reverse=True)
+        return [self._to_response(run) for run in ordered[:cap]]
 
     async def _execute_run(self, run: dict[str, Any], payload: BenchmarkRunCreateRequest) -> None:
         try:
@@ -1497,7 +1583,7 @@ class WerBenchmarkService:
         self.store.wer_benchmark_runs.clear()
         self.store.wer_benchmark_runs[run_id] = run
         await self.events.publish('dashboard.snapshot', {'reason': 'wer_benchmark.started', 'run_id': run_id})
-        asyncio.create_task(self._execute_run(run, payload))
+        spawn_tracked_task(self.store, self._execute_run(run, payload), label=f'wer:{run_id}')
         return self._to_response(run)
 
     async def list_runs(self) -> list[WerBenchmarkRunResponse]:

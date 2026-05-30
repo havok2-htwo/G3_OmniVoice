@@ -225,6 +225,32 @@ def test_base_clone_uses_saved_profile_and_prompt_cache(tmp_path, monkeypatch) -
     assert first_call['voice_clone_prompt'][0]['preprocess_prompt'] is False
 
 
+def test_alias_switch_reuses_resident_checkpoint(tmp_path, monkeypatch) -> None:
+    # AutoVoice/VoiceDesign/Base all map to ONE checkpoint; switching alias must
+    # re-point the task type WITHOUT evicting and reloading identical weights.
+    install_fake_omnivoice(monkeypatch)
+    settings = make_settings(tmp_path)
+    store = InMemoryStore(max_queue_size=8)
+    synthesizer = OmniVoiceSynthesizer(settings=settings, store=store)
+
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+    assert len(FakeOmniVoice.load_calls) == 1
+    assert OMNIVOICE_BASE_ALIAS in synthesizer.resident_models()
+
+    model_id, warm_ms = asyncio.run(synthesizer.ensure_model(OMNIVOICE_BASE_ALIAS))
+    assert model_id == OMNIVOICE_BASE_ALIAS
+    assert warm_ms == 0
+    assert len(FakeOmniVoice.load_calls) == 1  # no second from_pretrained
+    assert synthesizer._loaded_model_id == OMNIVOICE_BASE_ALIAS
+
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_DESIGN_ALIAS))
+    assert len(FakeOmniVoice.load_calls) == 1  # still no reload
+
+    # An explicit reload() DOES re-load the weights (used after dtype/compile changes).
+    asyncio.run(synthesizer.reload(OMNIVOICE_AUTO_ALIAS))
+    assert len(FakeOmniVoice.load_calls) == 2
+
+
 def test_batch_group_keys_separate_clone_design_and_auto(tmp_path) -> None:
     settings = make_settings(tmp_path)
     store = InMemoryStore(max_queue_size=8)

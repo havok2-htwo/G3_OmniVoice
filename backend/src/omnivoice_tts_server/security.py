@@ -47,7 +47,11 @@ async def require_admin_key(
 
     # Check persisted admin key records
     for record in store.api_keys.values():
-        if record.name == 'admin' and record.key_hash == provided_hash and not record.disabled:
+        if (
+            record.name == 'admin'
+            and not record.disabled
+            and secrets.compare_digest(record.key_hash, provided_hash)
+        ):
             record.last_used_at = datetime.now(timezone.utc)
             store.save_secrets(settings.data_dir)
             return record

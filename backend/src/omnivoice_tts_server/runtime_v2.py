@@ -169,6 +169,10 @@ class OmniVoiceSynthesizer:
 
         if getattr(self.settings, 'warmup_on_startup', True):
             self._run_warmup_inference(model_id, None)
+            # Warmup bypasses the per-batch trim, so its reserved-pool spike would stay
+            # pinned right after startup (the ~9GB-at-load the operator sees). Release it
+            # now so idle VRAM is low immediately, not only after the first real job.
+            self._trim_cuda_cache_sync()
 
         return int((time.perf_counter() - start) * 1000)
 

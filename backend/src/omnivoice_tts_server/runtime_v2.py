@@ -225,7 +225,13 @@ class OmniVoiceSynthesizer:
         logger.info('warmup model_id=%s starting...', model_id)
         try:
             task_type = request.task_type if request and request.task_type else self._task_type_from_model(model_id)
-            text = (request.input if request and request.input else 'Warmup.')
+            # A representative ~20-word sentence warms the compiled kernels for a realistic
+            # input shape (better first-request latency than a 1-word 'Warmup.').
+            text = (
+                request.input
+                if request and request.input
+                else 'Dies ist ein Aufwaermsatz fuer das Sprachmodell mit etwa zwanzig Woertern, damit die Kernel fuer typische Eingaben vorbereitet sind.'
+            )
             language = self._normalize_language(request.language if request and request.language else None)
             if task_type == TaskType.voice_design:
                 self._model.generate(

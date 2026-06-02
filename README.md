@@ -11,8 +11,8 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 
 ## Project Layout
 
-- `OMNIVOICE_TTS_SERVER_SPEC.md` - local product/API notes
-- `docs/API.md` - endpoint reference with request/response examples
+- `API_DOCUMENTATION.md` - endpoint reference, storage notes, and runtime API behavior
+- `docs/API.md` - compact endpoint reference with request/response examples
 - `backend/` - Python service
 - `frontend/` - React/Vite UI
 - `models/` - default local model directory, ignored by git
@@ -71,7 +71,7 @@ stores only a hash under `data/`; the returned token is shown once.
 
 ## API
 
-- Human reference: `docs/API.md`
+- Human reference: `API_DOCUMENTATION.md`
 - Interactive docs: `http://127.0.0.1:8091/docs`
 - OpenAPI JSON: `http://127.0.0.1:8091/openapi.json`
 

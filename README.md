@@ -47,6 +47,18 @@ with `OMNIVOICE_TTS_CONDA_ENV_DIR`, `OMNIVOICE_TTS_LOCAL_CONDA_HOME`,
 .\start_server.bat
 ```
 
+`start_server.bat` also sets `PYTORCH_CUDA_ALLOC_CONF`
+(`garbage_collection_threshold:0.8,max_split_size_mb:256`) to keep the CUDA
+caching-allocator pool small, lowering idle VRAM and leaving room for other
+local models.
+
+To start the backend and the frontend dev server together in their own named
+windows:
+
+```powershell
+.\start_all.bat
+```
+
 Open:
 
 - `http://127.0.0.1:8091/`
@@ -91,6 +103,23 @@ or set:
 ```powershell
 $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
 ```
+
+## Operator Features
+
+- **Settings presets** - save, load, and delete named parameter sets from the
+  admin panel (`GET/PUT/DELETE /api/admin/settings/presets`, persisted in
+  `data/settings_presets.json`).
+- **Audiobook chunking controls** - `audio_chunk_threshold` and
+  `audio_chunk_duration` accept values up to 3600s, so internal chunking can be
+  effectively disabled for continuous prosody on long, single-pass narration.
+- **VRAM trim / low idle footprint** - `cuda_memory_trim_after_batch` releases
+  the reserved CUDA pool after batches; the trim also runs right after the
+  startup warmup, so idle GPU usage stays low (~3-4GB) immediately. A
+  `vram_budget_mb` / `max_input_chars` capacity budget derives chunk sizes and a
+  per-batch audio-second limit.
+- **Experimental fp8 dtype** - selectable in the admin Dtype dropdown
+  (`FineGrainedFP8Config`), gated on kernel availability with automatic bf16
+  fallback.
 
 ## Notes
 

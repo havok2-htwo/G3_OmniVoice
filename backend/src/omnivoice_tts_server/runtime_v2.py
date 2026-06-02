@@ -309,7 +309,9 @@ class OmniVoiceSynthesizer:
             from omnivoice import OmniVoice
         except Exception as exc:
             raise RuntimeError(
-                'OmniVoice runtime dependencies are missing. Install CUDA PyTorch plus omnivoice, numpy, and soundfile.'
+                'OmniVoice runtime dependencies are missing or incompatible. '
+                f'Import failed with {type(exc).__name__}: {exc}. '
+                'Install the pinned Windows runtime versions from docs/RUNTIME_VERSIONS.md.'
             ) from exc
 
         preferred_device = normalize_runtime_device(self.settings.preferred_device)

@@ -18,7 +18,8 @@ dependencies = [
   "numpy>=1.26",
   "soundfile>=0.12",
   "huggingface-hub>=0.30",
-  "kernels>=0.15.1,<1.0",
+  "kernels>=0.14.1,<0.15",
+  "tomlkit>=0.13.3,<0.15",
   "omnivoice==0.1.5"
 ]
 

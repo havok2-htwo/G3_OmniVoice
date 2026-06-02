@@ -50,6 +50,8 @@ idna==3.16
 iniconfig==2.3.0
 Jinja2==3.1.6
 joblib==1.5.3
+kernels==0.14.1
+kernels-data==0.15.1
 lazy-loader==0.5
 librosa==0.11.0
 llvmlite==0.47.0
@@ -120,14 +122,12 @@ websockets==16.0
 wheel==0.47.0
 
 # ----------------------------------------------------------------------------------
-# Optional / experimental — for fp8 and other quantization. NOT installed by default.
+# fp8 / quantization notes
 # ----------------------------------------------------------------------------------
 # fp8 (torch_dtype="fp8" -> transformers FineGrainedFP8Config) needs the HF `kernels`
-# package at inference time. It is intentionally NOT installed: on this exact stack
-# (torch 2.10+cu130 / transformers 5.9 / Windows) installing it BROKE model loading
-# ("Either a revision or a version must be specified"). With kernels absent, the fp8
-# path safely falls back to bf16. Re-test carefully before enabling fp8.
-#   kernels>=0.15.1
+# package at inference time. The compatible version on this stack is kernels==0.14.1.
+# Do NOT upgrade to kernels==0.15.1 with transformers==5.9.0: importing omnivoice then
+# fails with "Either a revision or a version must be specified" from LayerRepository.
 #
 # bitsandbytes is used for int8 quantization (e.g. the G3_WHISPER server's int8_bnb).
 # OmniVoice runs bf16/fp16 and does NOT need it; not installed here.

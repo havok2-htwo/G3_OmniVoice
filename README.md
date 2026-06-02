@@ -92,6 +92,10 @@ The dev server proxies `/api` and `/v1` to `http://127.0.0.1:8091`.
 & .\.conda-env\python.exe -m pytest backend\tests -q -p no:cacheprovider
 ```
 
+Pinned Windows/CUDA runtime versions are recorded in `docs/RUNTIME_VERSIONS.md`.
+In particular, fp8 currently needs `kernels>=0.14.1,<0.15`; `kernels 0.15.1`
+breaks `transformers 5.9.0` during `omnivoice` import.
+
 For first real model download, either place the checkpoint under:
 
 ```text

@@ -4,6 +4,12 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased] - 2026-06-02
 
+### API
+
+- Added `GET /v1/audio/languages` (+ alias `GET /api/v1/languages`) returning the
+  supported synthesis languages (`Auto` + the curated language set), parallel to
+  `GET /v1/audio/voices`. Stops clients that probe this endpoint from getting 404s.
+
 ### Hardening / Stability
 
 - Alias-reload fix: loaded models are cached on the resolved checkpoint instead

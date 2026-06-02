@@ -74,6 +74,12 @@ router = APIRouter()
 health = APIRouter()
 admin = APIRouter(prefix='/api/admin', dependencies=[Depends(require_admin_key)])
 
+# Languages OmniVoice can synthesize (the curated UI/WER set); 'Auto' lets the model detect.
+SUPPORTED_LANGUAGES: list[str] = [
+    'Auto', 'Deutsch', 'English', 'Français', 'Español', 'Italiano', 'Nederlands',
+    'Polski', 'Português', 'Türkçe', 'Русский', 'Українська', '中文', '日本語', '한국어',
+]
+
 MODEL_DOWNLOAD_META = {
     'k2-fsa/OmniVoice-AutoVoice': {
         'label': 'OmniVoice AutoVoice',
@@ -1000,6 +1006,16 @@ async def list_voices_alias(request: Request) -> list[VoiceProfileListItem]:
 @router.get('/v1/audio/voices', response_model=list[VoiceProfileListItem])
 async def list_audio_voices(request: Request) -> list[VoiceProfileListItem]:
     return _voice_items(request)
+
+
+@router.get('/v1/audio/languages', response_model=list[str])
+async def list_audio_languages() -> list[str]:
+    return SUPPORTED_LANGUAGES
+
+
+@router.get('/api/v1/languages', response_model=list[str])
+async def list_languages_alias() -> list[str]:
+    return SUPPORTED_LANGUAGES
 
 
 @router.get('/v1/models', response_model=list[ModelInfo])

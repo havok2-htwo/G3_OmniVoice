@@ -300,6 +300,18 @@ class OmniVoiceSynthesizer:
         Audio quality MUST be verified -- fp8 on the diffusion head can degrade output."""
         if (self.settings.torch_dtype or '').lower() != 'fp8':
             return None
+        # finegrained-fp8 inference needs HF `kernels` at generate() time. Without it the
+        # model loads but every synthesis raises ImportError -- so only engage fp8 when
+        # kernels is importable, otherwise fall back to the bf16 compute dtype.
+        try:
+            import kernels  # noqa: F401
+        except Exception:
+            logger.warning(
+                'fp8 requested but the `kernels` package is missing -> using bf16. '
+                'Install it (pip install -U kernels) to enable fp8; verify it does not '
+                'break model loading on this torch/transformers/GPU stack first.'
+            )
+            return None
         try:
             from transformers import FineGrainedFP8Config
 

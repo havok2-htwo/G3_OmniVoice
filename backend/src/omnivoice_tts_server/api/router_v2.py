@@ -583,9 +583,9 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
     if payload.attention_implementation is not None:
         settings.attention_implementation = payload.attention_implementation
     if payload.torch_dtype is not None:
-        dtype_aliases = {'fp16': 'float16', 'bf16': 'bfloat16', 'fp32': 'float32'}
+        dtype_aliases = {'fp16': 'float16', 'bf16': 'bfloat16', 'fp32': 'float32', 'float8': 'fp8'}
         requested_dtype = dtype_aliases.get(payload.torch_dtype.lower(), payload.torch_dtype.lower())
-        if requested_dtype not in {'float16', 'bfloat16', 'float32'}:
+        if requested_dtype not in {'float16', 'bfloat16', 'float32', 'fp8'}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported torch dtype')
         settings.torch_dtype = requested_dtype
     if payload.compile_model is not None:

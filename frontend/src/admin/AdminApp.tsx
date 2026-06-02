@@ -125,7 +125,7 @@ const ADMIN_HELP = {
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
   werConcurrency: "TTS-Wellengroesse fuer WER-Benchmarks. Eine Welle wird zusammen in die Queue gelegt, damit OmniVoice echte Batches sieht.",
   werTranscriptionConcurrency: "Whisper-Parallelitaet nach der Audio-Erzeugung. Auf demselben GPU-System meist 1 lassen, damit ASR die TTS-Batches nicht ausbremst.",
-  dtype: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig.",
+  dtype: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig. fp8 = experimentell (RTX 50xx fp8-Tensor-Cores, weniger VRAM); faellt bei Fehler automatisch auf bf16 zurueck. Erst nach Reload aktiv; Audioqualitaet unbedingt per WER-Benchmark pruefen.",
   numStep: "OmniVoice Diffusion-/Sampling-Schritte. Mehr kann Qualitaet verbessern, kostet Zeit. Default: 32.",
   guidance: "Guidance Scale fuer die Steuerstaerke. Hoeher folgt Prompts staerker, kann aber Artefakte erzeugen. Default: 2.0.",
   duration: "Optionale Ziel-Dauer in Sekunden. Leer lassen fuer OmniVoice-Automatik. Default: auto.",
@@ -1307,6 +1307,7 @@ export function AdminApp() {
               <option value="float16">fp16</option>
               <option value="bfloat16">bf16</option>
               <option value="float32">fp32</option>
+              <option value="fp8">fp8 (experimentell)</option>
             </select></label>
             <label className="with-help" title={ADMIN_HELP.numStep}>Num step<input type="number" value={settingsDraft.num_step ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, num_step: event.target.value ? Number(event.target.value) : null })} /></label>
             <label className="with-help" title={ADMIN_HELP.guidance}>Guidance<input type="number" step="0.1" value={settingsDraft.guidance_scale ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, guidance_scale: event.target.value ? Number(event.target.value) : null })} /></label>

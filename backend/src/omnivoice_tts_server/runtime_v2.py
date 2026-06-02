@@ -128,21 +128,35 @@ class OmniVoiceSynthesizer:
         }
         kwargs.update(extra_kwargs)
 
-        try:
-            model = omnivoice_cls.from_pretrained(model_source, **kwargs)
-        except TypeError:
-            relaxed = dict(kwargs)
-            relaxed.pop('attn_implementation', None)
-            model = omnivoice_cls.from_pretrained(model_source, **relaxed)
-        except Exception as exc:
-            if self.settings.attention_implementation == 'sdpa':
-                raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
-            fallback = dict(kwargs)
-            fallback['attn_implementation'] = 'sdpa'
+        model = None
+        quant_config = self._fp8_quant_config_if_requested()
+        if quant_config is not None:
             try:
-                model = omnivoice_cls.from_pretrained(model_source, **fallback)
-            except Exception:
-                raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
+                logger.info('loading model=%s with EXPERIMENTAL fp8 quantization', model_id)
+                model = omnivoice_cls.from_pretrained(model_source, quantization_config=quant_config, **kwargs)
+                logger.info('fp8 quantized load succeeded for model=%s', model_id)
+            except Exception as exc:
+                # Never let an experimental fp8 load brick startup: fall back to the dtype below.
+                logger.warning('fp8 quantized load failed (%s); falling back to dtype=%s', exc, self.settings.torch_dtype)
+                self._trim_cuda_cache_sync()
+                model = None
+
+        if model is None:
+            try:
+                model = omnivoice_cls.from_pretrained(model_source, **kwargs)
+            except TypeError:
+                relaxed = dict(kwargs)
+                relaxed.pop('attn_implementation', None)
+                model = omnivoice_cls.from_pretrained(model_source, **relaxed)
+            except Exception as exc:
+                if self.settings.attention_implementation == 'sdpa':
+                    raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
+                fallback = dict(kwargs)
+                fallback['attn_implementation'] = 'sdpa'
+                try:
+                    model = omnivoice_cls.from_pretrained(model_source, **fallback)
+                except Exception:
+                    raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
 
         if getattr(self.settings, 'compile_model', False):
             self._compile_model(model)
@@ -270,12 +284,29 @@ class OmniVoiceSynthesizer:
         return OMNIVOICE_MODEL_ID, {'cache_dir': str(self.settings.models_root_dir)}
 
     def _torch_dtype(self, torch: Any) -> Any:
+        bf16 = getattr(torch, 'bfloat16', torch.float16)
         mapping = {
             'float16': torch.float16,
-            'bfloat16': getattr(torch, 'bfloat16', torch.float16),
+            'bfloat16': bf16,
             'float32': torch.float32,
+            'fp8': bf16,  # fp8 keeps bf16 as the compute dtype; weights quantized via quant config
         }
         return mapping.get(self.settings.torch_dtype.lower(), torch.float16)
+
+    def _fp8_quant_config_if_requested(self) -> Any | None:
+        """Experimental: when torch_dtype == 'fp8', quantize the model at load time via
+        transformers FineGrainedFP8Config (RTX 50xx has native fp8 tensor cores); compute
+        dtype stays bf16. Returns None unless fp8 is selected / the config class is missing.
+        Audio quality MUST be verified -- fp8 on the diffusion head can degrade output."""
+        if (self.settings.torch_dtype or '').lower() != 'fp8':
+            return None
+        try:
+            from transformers import FineGrainedFP8Config
+
+            return FineGrainedFP8Config()
+        except Exception as exc:
+            logger.warning('fp8 requested but FineGrainedFP8Config is unavailable: %s', exc)
+            return None
 
     def _release_model(self) -> None:
         self._model = None

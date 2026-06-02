@@ -28,6 +28,10 @@ Important fp8 note:
   `omnivoice`, because `transformers.integrations.hub_kernels` constructs
   `LayerRepository` without a revision/version.
 - Keep `kernels>=0.14.1,<0.15` and `tomlkit>=0.13.3,<0.15` pinned.
+- On Windows, `transformers` tries `kernels-community/deep-gemm` before the
+  Triton `kernels-community/finegrained-fp8` fallback. DeepGEMM currently has no
+  Windows build for this stack, so the server disables only that Hub lookup at
+  runtime to avoid repeated Hugging Face requests/rate limits.
 
 Validation commands:
 

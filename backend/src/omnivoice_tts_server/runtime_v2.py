@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import hashlib
 import importlib.util
@@ -24,6 +25,54 @@ OMNIVOICE_DESIGN_ALIAS = 'k2-fsa/OmniVoice-VoiceDesign'
 OMNIVOICE_BASE_ALIAS = 'k2-fsa/OmniVoice-Base'
 
 logger = logging.getLogger('omnivoice_tts_server.runtime')
+
+
+def _disable_windows_deepgemm_hub_kernel(
+    hub_kernels_module: Any | None = None,
+    finegrained_fp8_module: Any | None = None,
+) -> bool:
+    """Avoid Transformers' DeepGEMM Hub lookup on Windows while keeping fp8 fallback active."""
+    if os.name != 'nt':
+        return False
+
+    changed = False
+    try:
+        if hub_kernels_module is None:
+            from transformers.integrations import hub_kernels as hub_kernels_module
+
+        hub_mapping = getattr(hub_kernels_module, '_HUB_KERNEL_MAPPING', None)
+        if isinstance(hub_mapping, dict) and 'deep-gemm' in hub_mapping:
+            hub_mapping.pop('deep-gemm', None)
+            changed = True
+
+        module_mapping = getattr(hub_kernels_module, '_KERNEL_MODULE_MAPPING', None)
+        if isinstance(module_mapping, dict) and module_mapping.get('deep-gemm') is not None:
+            module_mapping['deep-gemm'] = None
+            changed = True
+    except Exception as exc:
+        logger.debug('could not disable Transformers DeepGEMM hub mapping: %s', exc)
+
+    try:
+        if finegrained_fp8_module is None:
+            from transformers.integrations import finegrained_fp8 as finegrained_fp8_module
+
+        loader = getattr(finegrained_fp8_module, '_load_deepgemm_kernel', None)
+        if getattr(loader, '_omnivoice_windows_disabled', False):
+            return changed
+
+        @functools.cache
+        def _disabled_deepgemm_kernel() -> Any:
+            raise ImportError(
+                'DeepGEMM hub kernel is disabled on Windows; using Triton finegrained-fp8 fallback.'
+            )
+
+        setattr(_disabled_deepgemm_kernel, '_omnivoice_windows_disabled', True)
+        finegrained_fp8_module._load_deepgemm_kernel = _disabled_deepgemm_kernel
+        changed = True
+    except Exception as exc:
+        logger.debug('could not disable Transformers DeepGEMM loader: %s', exc)
+
+    return changed
 
 
 def normalize_runtime_device(value: str | None) -> str:
@@ -379,6 +428,8 @@ class OmniVoiceSynthesizer:
                 'break model loading on this torch/transformers/GPU stack first.'
             )
             return None
+        if _disable_windows_deepgemm_hub_kernel():
+            logger.info('DeepGEMM hub kernel disabled on Windows; using Triton finegrained-fp8 fallback.')
         try:
             from transformers import FineGrainedFP8Config
 

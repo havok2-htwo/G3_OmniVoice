@@ -19,6 +19,7 @@ from omnivoice_tts_server.runtime_v2 import (
     OMNIVOICE_DESIGN_ALIAS,
     BatchSynthesisItem,
     OmniVoiceSynthesizer,
+    _disable_windows_deepgemm_hub_kernel,
     normalize_runtime_device,
 )
 from omnivoice_tts_server.voice_design import (
@@ -101,6 +102,41 @@ def test_runtime_device_normalization() -> None:
     assert normalize_runtime_device(' cpu ') == 'cpu'
     with pytest.raises(ValueError):
         normalize_runtime_device('intel')
+
+
+def test_windows_fp8_disables_deepgemm_hub_lookup(monkeypatch) -> None:
+    hub_kernels = types.SimpleNamespace(
+        _HUB_KERNEL_MAPPING={
+            'deep-gemm': {'repo_id': 'kernels-community/deep-gemm', 'version': 1},
+            'finegrained-fp8': {'repo_id': 'kernels-community/finegrained-fp8', 'version': 1},
+        },
+        _KERNEL_MODULE_MAPPING={'deep-gemm': object()},
+    )
+    finegrained_fp8 = types.SimpleNamespace(_load_deepgemm_kernel=lambda: None)
+
+    monkeypatch.setattr('omnivoice_tts_server.runtime_v2.os.name', 'nt')
+
+    assert _disable_windows_deepgemm_hub_kernel(hub_kernels, finegrained_fp8) is True
+    assert 'deep-gemm' not in hub_kernels._HUB_KERNEL_MAPPING
+    assert 'finegrained-fp8' in hub_kernels._HUB_KERNEL_MAPPING
+    assert hub_kernels._KERNEL_MODULE_MAPPING['deep-gemm'] is None
+
+    with pytest.raises(ImportError, match='disabled on Windows'):
+        finegrained_fp8._load_deepgemm_kernel()
+
+
+def test_deepgemm_hook_is_noop_off_windows(monkeypatch) -> None:
+    hub_kernels = types.SimpleNamespace(
+        _HUB_KERNEL_MAPPING={'deep-gemm': {'repo_id': 'kernels-community/deep-gemm', 'version': 1}},
+        _KERNEL_MODULE_MAPPING={},
+    )
+    finegrained_fp8 = types.SimpleNamespace(_load_deepgemm_kernel=lambda: None)
+
+    monkeypatch.setattr('omnivoice_tts_server.runtime_v2.os.name', 'posix')
+
+    assert _disable_windows_deepgemm_hub_kernel(hub_kernels, finegrained_fp8) is False
+    assert 'deep-gemm' in hub_kernels._HUB_KERNEL_MAPPING
+    assert finegrained_fp8._load_deepgemm_kernel() is None
 
 
 def test_voice_design_instruct_normalization_and_errors() -> None:

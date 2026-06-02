@@ -128,6 +128,8 @@ wheel==0.47.0
 # package at inference time. The compatible version on this stack is kernels==0.14.1.
 # Do NOT upgrade to kernels==0.15.1 with transformers==5.9.0: importing omnivoice then
 # fails with "Either a revision or a version must be specified" from LayerRepository.
+# On Windows, Transformers' DeepGEMM fp8 preflight has no matching Hub build here;
+# the app disables only that lookup and keeps the finegrained-fp8 Triton fallback.
 #
 # bitsandbytes is used for int8 quantization (e.g. the G3_WHISPER server's int8_bnb).
 # OmniVoice runs bf16/fp16 and does NOT need it; not installed here.

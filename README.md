@@ -123,7 +123,8 @@ $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
   per-batch audio-second limit.
 - **Experimental fp8 dtype** - selectable in the admin Dtype dropdown
   (`FineGrainedFP8Config`), gated on kernel availability with automatic bf16
-  fallback.
+  fallback. On Windows, the unsupported DeepGEMM Hub lookup is disabled so fp8
+  uses the finegrained-fp8 Triton path without repeated Hub retries.
 
 ## Notes
 

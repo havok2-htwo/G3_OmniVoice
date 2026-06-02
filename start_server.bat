@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
-title G3 OmniVoice Server
+title G3 OmniVoice Backend (API + UI :8091)
 
 set "ROOT=%~dp0"
 set "LOCAL_CONDA_HOME=%ROOT%.conda"

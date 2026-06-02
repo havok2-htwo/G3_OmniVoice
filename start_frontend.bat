@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0frontend"
-title G3 OmniVoice Control Room
+title G3 OmniVoice Frontend Dev (:5181)
 
 echo Starting G3 OmniVoice Frontend from %CD%...
 echo Open: http://127.0.0.1:5181

@@ -83,7 +83,8 @@ Useful notes:
 - `voice` is a saved custom voice id for `Base` clone requests.
 - `instructions` is used by `VoiceDesign`; unsupported instruction words are rejected by OmniVoice.
 - `ref_audio` is reserved for direct clone integrations; saved voice profiles are the normal UI/API path.
-- `response_format` is WAV-first. MP3 is not implemented.
+- `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
+- Streaming uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.
 - `metadata` overrides runtime generation settings for that request.
 
 ## Public Routes
@@ -231,7 +232,8 @@ POST /v1/audio/speech
 Content-Type: application/json
 ```
 
-Non-streaming requests return audio bytes with media type `audio/wav`.
+Non-streaming requests return audio bytes. Use `response_format="wav"` for
+`audio/wav` or `response_format="mp3"` for `audio/mpeg`.
 
 ```powershell
 Invoke-WebRequest `
@@ -264,6 +266,11 @@ Submits a job and returns immediately:
 ```
 
 Use admin job routes to inspect or download completed job audio.
+Completed public jobs can also be downloaded with:
+
+```http
+GET /v1/jobs/{job_id}/audio?format=mp3
+```
 
 ## Admin Routes
 
@@ -394,7 +401,7 @@ DELETE /api/admin/jobs/{job_id}
 ```
 
 `DELETE` cancels active/queued jobs or removes completed jobs from memory.
-`/audio` returns completed WAV bytes.
+`/audio` returns completed WAV bytes by default, or MP3 with `?format=mp3`.
 
 ### Voice Library
 

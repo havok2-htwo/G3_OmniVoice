@@ -134,10 +134,13 @@ $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
   (`FineGrainedFP8Config`), gated on kernel availability with automatic bf16
   fallback. On Windows, the unsupported DeepGEMM Hub lookup is disabled so fp8
   uses the finegrained-fp8 Triton path without repeated Hub retries.
+- **MP3 downloads** - Demo and Admin history/quick synthesis expose completed
+  audio as MP3 for easy sharing; export uses system FFmpeg or the bundled
+  `imageio-ffmpeg` fallback.
 
 ## Notes
 
 - Public demo and synthesis endpoints intentionally stay open for local performance parity.
 - Admin endpoints use `X-Admin-Key`.
 - Streaming is simulated PCM chunking after sentence/batch generation because OmniVoice does not expose an official native streaming hook.
-- Non-streaming output is WAV-first; MP3 is not implemented.
+- Non-streaming output can be downloaded as WAV or MP3.

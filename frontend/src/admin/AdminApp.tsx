@@ -349,6 +349,7 @@ export function AdminApp() {
   const [quickSeed, setQuickSeed] = useState("");
   const [quickMetrics, setQuickMetrics] = useState<JobMetrics | null>(null);
   const [quickAudioUrl, setQuickAudioUrl] = useState("");
+  const [quickAudioDownloadName, setQuickAudioDownloadName] = useState("omnivoice-admin-quick.mp3");
   const [quickRunning, setQuickRunning] = useState(false);
   const [voiceName, setVoiceName] = useState("");
   const [voiceRefText, setVoiceRefText] = useState("");
@@ -725,6 +726,7 @@ export function AdminApp() {
     if (!quickModel || (quickTaskType !== "VoiceDesign" && !quickVoice)) return;
     if (quickAudioUrl) URL.revokeObjectURL(quickAudioUrl);
     setQuickAudioUrl("");
+    setQuickAudioDownloadName("omnivoice-admin-quick.mp3");
     setQuickMetrics(null);
     setQuickRunning(true);
     setError("");
@@ -732,6 +734,7 @@ export function AdminApp() {
     const controller = new AbortController();
     let sampleRate = snapshot?.settings.sample_rate ?? 24000;
     const chunks: Int16Array[] = [];
+    let completedJobId = "";
     quickAbortRef.current = controller;
     const parsedSeed = quickSeed.trim() ? Number(quickSeed) : null;
 
@@ -750,18 +753,44 @@ export function AdminApp() {
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
         },
         onEvent: async (event: SynthStreamEvent) => {
+          if (event.type === "start") completedJobId = event.job_id;
           if (event.type === "chunk") {
             sampleRate = event.sample_rate;
             const decoded = decodePcm16Base64(event.pcm16_b64);
             chunks.push(decoded.int16);
             await queuePlayback(decoded.float32, event.sample_rate);
           }
-          if (event.type === "done") setQuickMetrics(event.result.metrics);
+          if (event.type === "done") {
+            completedJobId = event.result.job_id || completedJobId;
+            setQuickMetrics(event.result.metrics);
+          }
           if (event.type === "error") throw new Error(event.message);
         },
       });
-      if (chunks.length) setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
-      setMessage("Quick-Synthesis fertig.");
+      if (completedJobId) {
+        try {
+          const mp3Blob = await apiFetch<Blob>(
+            `/api/admin/jobs/${encodeURIComponent(completedJobId)}/audio?format=mp3`,
+            { adminKey, responseType: "blob" },
+          );
+          setQuickAudioDownloadName(`${completedJobId}.mp3`);
+          setQuickAudioUrl(URL.createObjectURL(mp3Blob));
+          setMessage("Quick-Synthesis fertig. MP3 ist bereit.");
+        } catch (mp3Error) {
+          if (chunks.length) {
+            setQuickAudioDownloadName(`${completedJobId || "omnivoice-admin-quick"}.wav`);
+            setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
+          }
+          setError(mp3Error instanceof Error ? `MP3-Export fehlgeschlagen: ${mp3Error.message}` : "MP3-Export fehlgeschlagen.");
+          setMessage("Quick-Synthesis fertig. WAV-Fallback ist bereit.");
+        }
+      } else if (chunks.length) {
+        setQuickAudioDownloadName("omnivoice-admin-quick.wav");
+        setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
+        setMessage("Quick-Synthesis fertig. WAV-Fallback ist bereit.");
+      } else {
+        setMessage("Quick-Synthesis fertig.");
+      }
     } catch (quickError) {
       if (!controller.signal.aborted) setError(quickError instanceof Error ? quickError.message : "Quick-Synthesis fehlgeschlagen.");
     } finally {
@@ -1149,7 +1178,7 @@ export function AdminApp() {
 
   async function handleLoadJobAudio(jobId: string) {
     if (!adminKey) return;
-    const blob = await apiFetch<Blob>(`/api/admin/jobs/${jobId}/audio`, { adminKey, responseType: "blob" });
+    const blob = await apiFetch<Blob>(`/api/admin/jobs/${jobId}/audio?format=mp3`, { adminKey, responseType: "blob" });
     setJobAudioUrls((current) => {
       if (current[jobId]) URL.revokeObjectURL(current[jobId]);
       return { ...current, [jobId]: URL.createObjectURL(blob) };
@@ -1541,10 +1570,17 @@ export function AdminApp() {
                           disabled={!item.job_id}
                           onClick={() => item.job_id && void handleLoadJobAudio(item.job_id)}
                         >
-                          Audio
+                          MP3
                         </button>
                       </div>
-                      {item.job_id && jobAudioUrls[item.job_id] ? <audio controls src={jobAudioUrls[item.job_id]} /> : null}
+                      {item.job_id && jobAudioUrls[item.job_id] ? (
+                        <>
+                          <audio controls src={jobAudioUrls[item.job_id]} />
+                          <div className="button-row compact">
+                            <a className="secondary-button" href={jobAudioUrls[item.job_id]} download={`${item.job_id}.mp3`}>MP3 herunterladen</a>
+                          </div>
+                        </>
+                      ) : null}
                       <div className="inline-pills">
                         <span className="pill">TTS {formatMs(item.synthesis_ms)}</span>
                         <span className="pill">ASR {formatMs(item.transcription_ms)}</span>
@@ -1587,7 +1623,16 @@ export function AdminApp() {
           ) : null}
           <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
           <div className="button-row"><button className="primary-button" type="button" onClick={handleQuickRun}>{quickRunning ? "Stoppen" : "Stream starten"}</button></div>
-          {quickAudioUrl ? <audio controls src={quickAudioUrl} /> : null}
+          {quickAudioUrl ? (
+            <>
+              <audio controls src={quickAudioUrl} />
+              <div className="button-row">
+                <a className="secondary-button" href={quickAudioUrl} download={quickAudioDownloadName}>
+                  {quickAudioDownloadName.endsWith(".mp3") ? "MP3 herunterladen" : "WAV herunterladen"}
+                </a>
+              </div>
+            </>
+          ) : null}
           {quickMetrics ? <div className="metric-list"><div className="metric-row"><span>TTFA</span><strong>{formatMs(quickMetrics.ttfa_ms)}</strong></div><div className="metric-row"><span>Realtime</span><strong>{formatRealtime(quickMetrics.realtime_x)}</strong></div><div className="metric-row"><span>Duration</span><strong>{formatSeconds((quickMetrics.audio_duration_ms || 0) / 1000)}</strong></div></div> : null}
         </section>
 
@@ -1633,7 +1678,7 @@ export function AdminApp() {
         </section>
 
         <section className="widget span-12"><div className="widget-header"><h2>History</h2></div>
-          <div className="job-list">{snapshot.jobs.map((job) => <article key={job.job_id} className="job-card"><strong>{job.input_preview}</strong><div className="inline-pills"><span className={`pill ${job.status === "completed" ? "active" : ""}`}>{job.status}</span><span className="pill">{job.model || "-"}</span><span className="pill">{job.voice || "-"}</span><span className="pill">{formatMs(job.metrics.ttfa_ms)}</span></div><div className="button-row">{job.status === "completed" ? <button className="secondary-button" type="button" onClick={() => void handleLoadJobAudio(job.job_id)}>Audio</button> : null}<button className="ghost-button" type="button" onClick={() => void handleDeleteJob(job.job_id)}>{job.status === "completed" ? "Entfernen" : "Stornieren"}</button></div>{jobAudioUrls[job.job_id] ? <audio controls src={jobAudioUrls[job.job_id]} /> : null}</article>)}</div>
+          <div className="job-list">{snapshot.jobs.map((job) => <article key={job.job_id} className="job-card"><strong>{job.input_preview}</strong><div className="inline-pills"><span className={`pill ${job.status === "completed" ? "active" : ""}`}>{job.status}</span><span className="pill">{job.model || "-"}</span><span className="pill">{job.voice || "-"}</span><span className="pill">{formatMs(job.metrics.ttfa_ms)}</span></div><div className="button-row">{job.status === "completed" ? <button className="secondary-button" type="button" onClick={() => void handleLoadJobAudio(job.job_id)}>MP3</button> : null}<button className="ghost-button" type="button" onClick={() => void handleDeleteJob(job.job_id)}>{job.status === "completed" ? "Entfernen" : "Stornieren"}</button></div>{jobAudioUrls[job.job_id] ? <><audio controls src={jobAudioUrls[job.job_id]} /><div className="button-row"><a className="secondary-button" href={jobAudioUrls[job.job_id]} download={`${job.job_id}.mp3`}>MP3 herunterladen</a></div></> : null}</article>)}</div>
         </section>
       </section>
     </main>

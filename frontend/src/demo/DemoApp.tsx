@@ -62,7 +62,7 @@ const DEMO_HELP = {
   instructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wie 'calm neutral voice' wird von OmniVoice abgelehnt.",
   seed: "Gleicher Seed kann aehnlichere Ergebnisse erzeugen. Leer lassen fuer zufaellige Generierung.",
   customVoiceButton: "Wechselt automatisch auf OmniVoice-Base und waehlt die erste gespeicherte Custom Voice.",
-  streamButton: "Startet oder stoppt den Public-Streaming-Request. Audio wird als PCM gestreamt und danach als WAV gesammelt.",
+  streamButton: "Startet oder stoppt den Public-Streaming-Request. Audio wird live als PCM gestreamt und danach als MP3 bereitgestellt.",
 };
 
 export default function DemoApp() {
@@ -82,6 +82,7 @@ export default function DemoApp() {
   const [sampleRate, setSampleRate] = useState(24000);
   const [ttfaMs, setTtfaMs] = useState<number | null>(null);
   const [firstPlaybackMs, setFirstPlaybackMs] = useState<number | null>(null);
+  const [audioDownloadName, setAudioDownloadName] = useState("omnivoice-demo.mp3");
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextPlaybackTimeRef = useRef(0);
@@ -228,6 +229,7 @@ export default function DemoApp() {
       URL.revokeObjectURL(audioUrl);
       setAudioUrl("");
     }
+    setAudioDownloadName("omnivoice-demo.mp3");
 
     const startedAt = performance.now();
     const chunks: Int16Array[] = [];
@@ -235,6 +237,7 @@ export default function DemoApp() {
     let seenFirstChunk = false;
     let seenFirstPlayback = false;
     let resolvedSampleRate = sampleRate;
+    let completedJobId = "";
     abortRef.current = controller;
     const parsedSeed = seed.trim() ? Number(seed) : null;
 
@@ -255,6 +258,7 @@ export default function DemoApp() {
         onEvent: async (event: SynthStreamEvent) => {
           if (event.type === "start") {
             setQueuePosition(event.queue_position);
+            completedJobId = event.job_id;
             return;
           }
           if (event.type === "chunk") {
@@ -276,6 +280,7 @@ export default function DemoApp() {
           }
           if (event.type === "done") {
             setLastMetrics(event.result.metrics);
+            completedJobId = event.result.job_id || completedJobId;
             void refreshModels();
             return;
           }
@@ -285,11 +290,32 @@ export default function DemoApp() {
         },
       });
 
-      if (chunks.length) {
+      if (completedJobId) {
+        try {
+          const mp3Blob = await apiFetch<Blob>(
+            `/v1/jobs/${encodeURIComponent(completedJobId)}/audio?format=mp3`,
+            { responseType: "blob" },
+          );
+          setAudioDownloadName(`${completedJobId}.mp3`);
+          setAudioUrl(URL.createObjectURL(mp3Blob));
+          setMessage("Stream abgeschlossen. MP3 ist bereit.");
+        } catch (mp3Error) {
+          if (chunks.length) {
+            const wavBlob = createWavBlobFromInt16Chunks(chunks, resolvedSampleRate);
+            setAudioDownloadName(`${completedJobId}.wav`);
+            setAudioUrl(URL.createObjectURL(wavBlob));
+          }
+          setError(mp3Error instanceof Error ? `MP3-Export fehlgeschlagen: ${mp3Error.message}` : "MP3-Export fehlgeschlagen.");
+          setMessage("Stream abgeschlossen. WAV-Fallback ist bereit.");
+        }
+      } else if (chunks.length) {
         const wavBlob = createWavBlobFromInt16Chunks(chunks, resolvedSampleRate);
+        setAudioDownloadName("omnivoice-demo.wav");
         setAudioUrl(URL.createObjectURL(wavBlob));
+        setMessage("Stream abgeschlossen. WAV-Fallback ist bereit.");
+      } else {
+        setMessage("Stream abgeschlossen.");
       }
-      setMessage("Stream abgeschlossen.");
     } catch (streamError) {
       if (!controller.signal.aborted) {
         setError(streamError instanceof Error ? streamError.message : "Streaming fehlgeschlagen.");
@@ -469,7 +495,16 @@ export default function DemoApp() {
               <strong>{lastMetrics?.batch_count ?? "-"}</strong>
             </div>
           </div>
-          {audioUrl ? <audio controls src={audioUrl} /> : <p className="widget-copy">Hier landet das fertige WAV nach dem Stream.</p>}
+          {audioUrl ? (
+            <>
+              <audio controls src={audioUrl} />
+              <div className="button-row">
+                <a className="secondary-button" href={audioUrl} download={audioDownloadName}>
+                  {audioDownloadName.endsWith(".mp3") ? "MP3 herunterladen" : "WAV herunterladen"}
+                </a>
+              </div>
+            </>
+          ) : <p className="widget-copy">Hier landet die fertige MP3 nach dem Stream.</p>}
         </section>
 
         <section className="widget span-12">

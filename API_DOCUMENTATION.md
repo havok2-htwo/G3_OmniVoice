@@ -154,7 +154,8 @@ Notes:
 - `task_type` is inferred from the selected model when omitted.
 - `voice` is a saved custom voice id for `Base` clone requests.
 - `instructions` is used by `VoiceDesign`; invalid instruction terms are rejected.
-- `response_format` is WAV-first. MP3 is not implemented.
+- `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
+- Streaming still uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.
 - `metadata` overrides runtime generation settings for one request.
 
 ## Public API
@@ -356,7 +357,8 @@ Content type:
 
 Behavior:
 
-- `stream=false`: returns `audio/wav`
+- `stream=false` with `response_format="wav"`: returns `audio/wav`
+- `stream=false` with `response_format="mp3"`: returns `audio/mpeg`
 - `stream=true`: returns raw `audio/pcm` chunks
 - streaming PCM is 24 kHz, mono, signed 16-bit little-endian
 
@@ -734,12 +736,24 @@ Purpose:
 
 Purpose:
 
-- returns completed job audio as WAV bytes
+- returns completed job audio
+
+Query params:
+
+- `format=mp3`: returns `audio/mpeg`
+- omitted or any other value: returns `audio/wav`
 
 Notes:
 
 - completed audio is kept in memory only
 - it is not written under `data/`
+
+### `GET /v1/jobs/{job_id}/audio`
+
+Purpose:
+
+- public compatibility route for downloading completed public job audio
+- supports the same `format=mp3` query param as the admin job audio route
 
 ### `DELETE /api/admin/jobs/{job_id}`
 
@@ -953,8 +967,8 @@ Purpose:
 - `VoiceDesign` calls `model.generate(..., instruct=[...])`.
 - `Base` clone mode calls `model.generate(..., voice_clone_prompt=[...])`.
 - Saved clone voices require explicit consent and `ref_text`.
-- Non-streaming output is WAV-first.
-- MP3 is not implemented.
+- Non-streaming output can be returned as WAV or MP3.
+- MP3 export uses FFmpeg. The app first checks `ffmpeg` on `PATH`, then falls back to the bundled `imageio-ffmpeg` package.
 - Streaming is simulated by emitting PCM chunks after sentence/batch completion.
 - A first-audio fast path schedules the first sentence of streaming requests before larger follow-up batches.
 - `fp8` uses `transformers.FineGrainedFP8Config` when the compatible `kernels` package is installed.

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from omnivoice_tts_server.api import router_v2
 from omnivoice_tts_server.api.router_v2 import _normalize_vllm_base_url
 from omnivoice_tts_server.app import create_app
 from omnivoice_tts_server.config import Settings
@@ -277,6 +278,35 @@ def test_speech_returns_audio() -> None:
     assert response.status_code == 200
     assert response.headers['content-type'].startswith('audio/wav')
     assert len(response.content) > 44
+
+
+def test_speech_can_return_mp3(monkeypatch) -> None:
+    monkeypatch.setattr(router_v2, 'wav_to_mp3', lambda wav_bytes: b'ID3mock-mp3')
+    client = make_client()
+    response = client.post('/v1/audio/speech', json={'input': 'Hallo Welt', 'response_format': 'mp3'})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('audio/mpeg')
+    assert response.headers['content-disposition'].endswith('.mp3"')
+    assert response.content == b'ID3mock-mp3'
+
+
+def test_completed_job_audio_can_be_downloaded_as_mp3(monkeypatch) -> None:
+    monkeypatch.setattr(router_v2, 'wav_to_mp3', lambda wav_bytes: b'ID3job-mp3')
+    client = make_client()
+    create = client.post('/v1/jobs', json={'input': 'Download me'})
+    assert create.status_code == 200
+    job_id = create.json()['job_id']
+    wait_for_admin_job_status(client, job_id, {'completed'})
+
+    admin_audio = client.get(f'/api/admin/jobs/{job_id}/audio?format=mp3', headers=auth_headers())
+    assert admin_audio.status_code == 200
+    assert admin_audio.headers['content-type'].startswith('audio/mpeg')
+    assert admin_audio.content == b'ID3job-mp3'
+
+    public_audio = client.get(f'/v1/jobs/{job_id}/audio?format=mp3')
+    assert public_audio.status_code == 200
+    assert public_audio.headers['content-type'].startswith('audio/mpeg')
+    assert public_audio.content == b'ID3job-mp3'
 
 
 def test_sentence_chunks_are_reserved_as_real_batches() -> None:

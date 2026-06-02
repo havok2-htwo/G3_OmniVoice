@@ -14,6 +14,7 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
+from ..audio_export import wav_to_mp3
 from ..config import save_runtime_settings
 from ..domain.models import (
     AdminKeyMetadata,
@@ -99,6 +100,48 @@ MODEL_DOWNLOAD_META = {
         'approx_size_gb': None,
     },
 }
+
+
+def _wants_mp3(value: str | None) -> bool:
+    return (value or '').strip().lower() == 'mp3'
+
+
+def _audio_response(
+    audio: bytes,
+    *,
+    source_media_type: str | None,
+    requested_format: str | None,
+    filename_stem: str,
+) -> Response:
+    if _wants_mp3(requested_format):
+        try:
+            mp3 = wav_to_mp3(audio)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+        return Response(
+            content=mp3,
+            media_type='audio/mpeg',
+            headers={'Content-Disposition': f'attachment; filename="{filename_stem}.mp3"'},
+        )
+    return Response(
+        content=audio,
+        media_type=source_media_type or 'audio/wav',
+        headers={'Content-Disposition': f'attachment; filename="{filename_stem}.wav"'},
+    )
+
+
+def _completed_job_audio_response(request: Request, job_id: str, requested_format: str | None) -> Response:
+    job = request.app.state.store.jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
+    if not job.final_audio:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Audio not ready')
+    return _audio_response(
+        job.final_audio,
+        source_media_type=job.content_type or 'audio/wav',
+        requested_format=requested_format,
+        filename_stem=job.job_id,
+    )
 
 
 def _supported_task_types(model_id: str) -> list[TaskType]:
@@ -861,13 +904,8 @@ async def admin_job_detail(request: Request, job_id: str) -> JobDetailResponse:
 
 
 @admin.get('/jobs/{job_id}/audio')
-async def admin_job_audio(request: Request, job_id: str) -> Response:
-    job = request.app.state.store.jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
-    if not job.final_audio:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Audio not ready')
-    return Response(content=job.final_audio, media_type=job.content_type or 'audio/wav')
+async def admin_job_audio(request: Request, job_id: str, format: str | None = None) -> Response:
+    return _completed_job_audio_response(request, job_id, format)
 
 
 @admin.delete('/jobs/{job_id}')
@@ -1059,6 +1097,11 @@ async def synthesize(request: Request, payload: SpeechRequest) -> SynthesisResul
     )
 
 
+@router.get('/v1/jobs/{job_id}/audio')
+async def public_job_audio(request: Request, job_id: str, format: str | None = None) -> Response:
+    return _completed_job_audio_response(request, job_id, format)
+
+
 @router.post('/api/v1/synthesize/stream')
 async def synthesize_stream(request: Request, payload: SpeechRequest) -> StreamingResponse:
     queue: QueueService = request.app.state.queue_service
@@ -1126,7 +1169,12 @@ async def speech(request: Request, payload: SpeechRequest) -> Response | Streami
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=finished.error_message or 'Synthesis cancelled')
     if finished.status != JobStatus.completed or not finished.final_audio:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=finished.error_message or 'Synthesis failed')
-    return Response(content=finished.final_audio, media_type=finished.content_type or 'audio/wav')
+    return _audio_response(
+        finished.final_audio,
+        source_media_type=finished.content_type or 'audio/wav',
+        requested_format=payload.response_format,
+        filename_stem=finished.job_id,
+    )
 
 
 @router.post('/v1/jobs', response_model=SpeechJobCreateResponse)

@@ -47,6 +47,7 @@ httptools==0.7.1
 httpx==0.28.1
 huggingface_hub==1.16.1
 idna==3.16
+imageio-ffmpeg==0.6.0
 iniconfig==2.3.0
 Jinja2==3.1.6
 joblib==1.5.3

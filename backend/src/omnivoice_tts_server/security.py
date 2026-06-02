@@ -18,6 +18,13 @@ def generate_api_key() -> str:
     return f'omnivoice_tts_{secrets.token_urlsafe(24)}'
 
 
+def _bootstrap_admin_secret(settings: Settings) -> str:
+    raw = (settings.admin_api_key or '').strip()
+    if raw and raw != 'dev-admin-key':
+        return raw
+    return generate_api_key()
+
+
 def get_store(request: Request) -> InMemoryStore:
     return request.app.state.store
 
@@ -76,10 +83,11 @@ def bootstrap_admin_key(store: InMemoryStore, settings: Settings) -> ApiKeyRecor
     existing = next((record for record in store.api_keys.values() if record.name == 'admin'), None)
     if existing:
         return existing
+    raw_key = _bootstrap_admin_secret(settings)
     record = ApiKeyRecord(
         key_id=new_id('key'),
         name='admin',
-        key_hash=hash_key(settings.admin_api_key),
+        key_hash=hash_key(raw_key),
         created_at=utcnow(),
     )
     store.api_keys[record.key_id] = record

@@ -61,17 +61,13 @@ if exist "%STARTUP_ADMIN_KEY_FILE%" (
   set /p OMNIVOICE_TTS_STARTUP_ADMIN_KEY=<"%STARTUP_ADMIN_KEY_FILE%"
   del /q "%STARTUP_ADMIN_KEY_FILE%" > nul 2>&1
 )
-if not defined OMNIVOICE_TTS_ADMIN_API_KEY if defined OMNIVOICE_TTS_STARTUP_ADMIN_KEY (
-  set "OMNIVOICE_TTS_ADMIN_API_KEY=%OMNIVOICE_TTS_STARTUP_ADMIN_KEY%"
-)
-
 if defined OMNIVOICE_TTS_STARTUP_ADMIN_KEY (
   echo.
   echo ============================================================
   echo Temporary startup admin key ^(valid for %OMNIVOICE_TTS_STARTUP_ADMIN_KEY_TTL_SECONDS% seconds after server start^):
   echo %OMNIVOICE_TTS_STARTUP_ADMIN_KEY%
-  echo On a fresh data directory this also becomes the initial persisted admin key.
-  echo Copy it now if you need emergency admin access in the browser.
+  echo Use it now to rotate/create a persistent admin key in the browser.
+  echo Copy it now if you need emergency admin access.
   echo This screen clears automatically in %OMNIVOICE_TTS_STARTUP_ADMIN_KEY_DISPLAY_SECONDS% seconds...
   echo ============================================================
   timeout /t %OMNIVOICE_TTS_STARTUP_ADMIN_KEY_DISPLAY_SECONDS% /nobreak > nul

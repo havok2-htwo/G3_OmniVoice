@@ -26,9 +26,9 @@ or:
 Authorization: Bearer <admin-key>
 ```
 
-The startup batch file prints a temporary startup admin key. On a fresh
-`data/` directory this key also becomes the initial persisted admin key.
-Rotated keys are returned once and only their hash is stored under `data/`.
+The startup batch file prints a temporary startup admin key. Use it before it
+expires to rotate/create the persistent admin key. Rotated keys are returned
+once and only their hash is stored under `data/`.
 
 ## Models
 

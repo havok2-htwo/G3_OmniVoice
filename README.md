@@ -66,8 +66,8 @@ Open:
 - `http://127.0.0.1:8091/admin`
 
 The server prints a temporary startup admin key for emergency browser access.
-On a fresh `data/` directory this startup key also becomes the initial persisted
-admin key. Rotation stores only a hash under `data/`.
+Use it before it expires to rotate/create the persistent admin key. Rotation
+stores only a hash under `data/`; the returned token is shown once.
 
 ## API
 

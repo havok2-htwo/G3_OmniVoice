@@ -224,6 +224,53 @@ def test_admin_key_metadata_and_rotation() -> None:
     assert client.get('/api/admin/keys', headers={'X-Admin-Key': payload['token']}).status_code == 200
 
 
+def test_startup_admin_key_expires_without_becoming_persistent() -> None:
+    with tempfile.TemporaryDirectory() as data_dir:
+        app = create_app(
+            Settings(
+                admin_api_key='dev-admin-key',
+                startup_admin_key='startup-temp-key',
+                startup_admin_key_ttl_seconds=1,
+                runtime_backend='mock',
+                models_root_dir=TEST_MODELS_DIR,
+                data_dir=Path(data_dir),
+            )
+        )
+        with TestClient(app) as client:
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-temp-key'}).status_code == 200
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'dev-admin-key'}).status_code == 401
+            time.sleep(1.2)
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-temp-key'}).status_code == 401
+
+
+def test_rotated_admin_key_persists_across_restart() -> None:
+    def make_app(data_dir: Path, startup_key: str):
+        return create_app(
+            Settings(
+                admin_api_key='dev-admin-key',
+                startup_admin_key=startup_key,
+                startup_admin_key_ttl_seconds=60,
+                runtime_backend='mock',
+                models_root_dir=TEST_MODELS_DIR,
+                data_dir=data_dir,
+            )
+        )
+
+    with tempfile.TemporaryDirectory() as raw_data_dir:
+        data_dir = Path(raw_data_dir)
+        with TestClient(make_app(data_dir, 'startup-one')) as client:
+            rotated = client.post('/api/admin/keys', headers={'X-Admin-Key': 'startup-one'})
+            assert rotated.status_code == 200
+            token = rotated.json()['token']
+            assert token.startswith('omnivoice_tts_')
+
+        with TestClient(make_app(data_dir, 'startup-two')) as client:
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': token}).status_code == 200
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-one'}).status_code == 401
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'dev-admin-key'}).status_code == 401
+            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-two'}).status_code == 200
+
+
 def test_speech_returns_audio() -> None:
     client = make_client()
     response = client.post('/v1/audio/speech', json={'input': 'Hallo Welt', 'response_format': 'wav'})

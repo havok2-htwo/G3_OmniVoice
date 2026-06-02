@@ -66,4 +66,4 @@ All notable changes to G3_OmniVoice are recorded here.
 
 - `start_all.bat` launcher starts the backend (:8091) and the frontend dev
   server (:5181) in named windows, with clean window titles.
-- Diagnostic benchmark scripts (`bench_*.py`).
+- Diagnostic benchmark scripts under `tools/benchmarks/`.

@@ -15,6 +15,7 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 - `docs/API.md` - compact endpoint reference with request/response examples
 - `backend/` - Python service
 - `frontend/` - React/Vite UI
+- `tools/` - local operator utilities, including benchmark scripts
 - `models/` - default local model directory, ignored by git
 - `data/` - runtime settings, admin key hashes, voice profiles, ignored by git
 - `.conda-env/` - project-local Conda environment, ignored by git
@@ -90,6 +91,14 @@ The dev server proxies `/api` and `/v1` to `http://127.0.0.1:8091`.
 ```powershell
 & .\.conda-env\python.exe -m pip install -e .\backend[dev]
 & .\.conda-env\python.exe -m pytest backend\tests -q -p no:cacheprovider
+```
+
+## Operator Tools
+
+Diagnostic benchmark scripts live under `tools\benchmarks`:
+
+```powershell
+& .\.conda-env\python.exe .\tools\benchmarks\bench_batchsize.py
 ```
 
 Pinned Windows/CUDA runtime versions are recorded in `docs/RUNTIME_VERSIONS.md`.

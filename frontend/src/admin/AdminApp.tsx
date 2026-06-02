@@ -20,6 +20,8 @@ import {
   type ModelDownloadListResponse,
   type ModelDownloadStatus,
   type ModelOperationResponse,
+  type RuntimeDeviceInfo,
+  type RuntimeDeviceListResponse,
   type ServerSettings,
   type SynthStreamEvent,
   type TaskType,
@@ -123,6 +125,8 @@ const ADMIN_HELP = {
   vllmBaseUrl: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.",
   vllmModel: "Optionales vLLM Modell fuer WER-Saetze. Leer lassen nutzt das erste Modell aus /v1/models.",
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
+  preferredDevice: "CUDA-Geraet fuer OmniVoice. Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload oder Server-Neustart aktiv.",
+  refreshRuntimeDevices: "Liest CPU/CUDA-Geraete neu ein.",
   werConcurrency: "TTS-Wellengroesse fuer WER-Benchmarks. Eine Welle wird zusammen in die Queue gelegt, damit OmniVoice echte Batches sieht.",
   werTranscriptionConcurrency: "Whisper-Parallelitaet nach der Audio-Erzeugung. Auf demselben GPU-System meist 1 lassen, damit ASR die TTS-Batches nicht ausbremst.",
   dtype: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig. fp8 = experimentell (RTX 50xx fp8-Tensor-Cores, weniger VRAM); faellt bei Fehler automatisch auf bf16 zurueck. Erst nach Reload aktiv; Audioqualitaet unbedingt per WER-Benchmark pruefen.",
@@ -277,6 +281,19 @@ function resolveModelPath(model: ModelDownloadStatus) {
   return model.local_path || model.cache_path || model.storage_root || "-";
 }
 
+function fallbackRuntimeDevice(deviceId: string): RuntimeDeviceInfo {
+  return {
+    id: deviceId,
+    label: `${deviceId} - configured`,
+    kind: deviceId.startsWith("cuda") ? "cuda" : "other",
+    name: "Configured device",
+    index: null,
+    memory_total_mb: null,
+    available: false,
+    selected: true,
+  };
+}
+
 function MiniGraph({ label, values, color, suffix = "" }: { label: string; values: number[]; color: string; suffix?: string }) {
   const chartValues = values.slice(-80).map((value) => Math.max(0, Number(value) || 0));
   const max = Math.max(1, ...chartValues);
@@ -344,6 +361,7 @@ export function AdminApp() {
   const [benchmarks, setBenchmarks] = useState<BenchmarkRunResponse[]>([]);
   const [werBenchmarks, setWerBenchmarks] = useState<WerBenchmarkRunResponse[]>([]);
   const [modelDownloads, setModelDownloads] = useState<ModelDownloadStatus[]>([]);
+  const [runtimeDevices, setRuntimeDevices] = useState<RuntimeDeviceInfo[]>([]);
   const [vllmModels, setVllmModels] = useState<string[]>([]);
   const [vllmModelsError, setVllmModelsError] = useState("");
   const [vllmModelsLoading, setVllmModelsLoading] = useState(false);
@@ -416,6 +434,7 @@ export function AdminApp() {
     void loadBenchmarks(key);
     void loadWerBenchmarks(key);
     void loadModelDownloads(key, data.settings.model_directory);
+    void loadRuntimeDevices(key);
     void loadVllmModels(key, data.settings.vllm_base_url);
   }
 
@@ -446,6 +465,16 @@ export function AdminApp() {
       setModelDownloads(payload.models || []);
     } catch {
       // Model status is an ops aid; the rest of the admin panel should stay usable.
+    }
+  }
+
+  async function loadRuntimeDevices(key = adminKey) {
+    if (!key) return;
+    try {
+      const payload = await apiFetch<RuntimeDeviceListResponse>("/api/admin/runtime/devices", { adminKey: key });
+      setRuntimeDevices(payload.devices || []);
+    } catch {
+      setRuntimeDevices([]);
     }
   }
 
@@ -504,6 +533,7 @@ export function AdminApp() {
     void loadBenchmarks(adminKey);
     void loadWerBenchmarks(adminKey);
     void loadPresets(adminKey);
+    void loadRuntimeDevices(adminKey);
   }, [adminKey]);
 
   // Poll the benchmark endpoints ONLY while a run is actually in progress, and at the
@@ -548,6 +578,20 @@ export function AdminApp() {
   const quickVoices = useMemo(() => voiceOptionsForTask(voices, quickTaskType), [quickTaskType, voices]);
   const defaultTaskType = useMemo(() => inferTaskType(settingsDraft?.default_model || ""), [settingsDraft?.default_model]);
   const defaultVoiceOptions = useMemo(() => voiceOptionsForTask(voices, defaultTaskType), [defaultTaskType, voices]);
+  const runtimeDeviceOptions = useMemo(() => {
+    const byId = new Map<string, RuntimeDeviceInfo>();
+    runtimeDevices.forEach((device) => byId.set(device.id, device));
+    if (settingsDraft?.preferred_device && !byId.has(settingsDraft.preferred_device)) {
+      byId.set(settingsDraft.preferred_device, fallbackRuntimeDevice(settingsDraft.preferred_device));
+    }
+    if (!byId.size) {
+      byId.set("cuda:0", fallbackRuntimeDevice("cuda:0"));
+    }
+    return Array.from(byId.values());
+  }, [runtimeDevices, settingsDraft?.preferred_device]);
+  const selectedRuntimeDeviceLabel = useMemo(() => {
+    return runtimeDeviceOptions.find((device) => device.id === settingsDraft?.preferred_device)?.label || settingsDraft?.preferred_device || "-";
+  }, [runtimeDeviceOptions, settingsDraft?.preferred_device]);
   const selectedDefaultVoice = useMemo(() => {
     const match = defaultVoiceOptions.find((voice) => voiceMatchesValue(voice, settingsDraft?.default_voice || ""));
     if (!match) return "";
@@ -792,12 +836,17 @@ export function AdminApp() {
 
   async function handleSaveSettings() {
     if (!adminKey || !settingsDraft) return;
+    const previousDevice = snapshot?.settings.preferred_device;
     try {
       const updated = await apiFetch<ServerSettings>("/api/admin/settings", { method: "PUT", adminKey, body: settingsDraft });
       setSettingsDraft(applyOmniVoiceDefaults(updated));
       await loadSnapshot(adminKey);
       await loadModelDownloads(adminKey, updated.model_directory);
-      setMessage("Settings gespeichert.");
+      setMessage(
+        previousDevice && previousDevice !== updated.preferred_device
+          ? "Settings gespeichert. GPU-Wechsel wird nach Model Reload oder Server-Neustart aktiv."
+          : "Settings gespeichert.",
+      );
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Settings konnten nicht gespeichert werden.");
     }
@@ -1218,7 +1267,7 @@ export function AdminApp() {
           </div>
           <div className="metric-list compact model-control-summary">
             <div className="metric-row"><span>Storage</span><strong className="mono path-cell">{settingsDraft.model_directory || "-"}</strong></div>
-            <div className="metric-row"><span>Runtime</span><strong>{settingsDraft.runtime_backend} / {settingsDraft.preferred_device} / {settingsDraft.torch_dtype}</strong></div>
+            <div className="metric-row"><span>Runtime</span><strong title={selectedRuntimeDeviceLabel}>{settingsDraft.runtime_backend} / {settingsDraft.preferred_device} / {settingsDraft.torch_dtype}</strong></div>
             <div className="metric-row"><span>VRAM</span><strong>{snapshot.overview.gpu_memory_used_mb} / {snapshot.overview.gpu_memory_total_mb} MB</strong></div>
             <div className="metric-row"><span>Compile</span><strong>{settingsDraft.compile_model ? "llm on" : "llm off"}</strong></div>
           </div>
@@ -1276,6 +1325,9 @@ export function AdminApp() {
               {defaultTaskType !== "VoiceDesign" && !defaultVoiceOptions.length ? <option value="">Keine passende Stimme</option> : null}
               {defaultVoiceOptions.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name}</option>)}
             </select></label>
+            <label className="with-help" title={ADMIN_HELP.preferredDevice}>GPU<select value={settingsDraft.preferred_device} onChange={(event) => setSettingsDraft({ ...settingsDraft, preferred_device: event.target.value })}>
+              {runtimeDeviceOptions.map((device) => <option key={device.id} value={device.id}>{device.label}{device.available ? "" : " (nicht verfuegbar)"}</option>)}
+            </select></label>
             <label className="with-help" title={ADMIN_HELP.modelDirectory}>Model directory<input value={settingsDraft.model_directory} onChange={(event) => setSettingsDraft({ ...settingsDraft, model_directory: event.target.value })} /></label>
             <label className="with-help" title={ADMIN_HELP.whisperUrl}>Whisper URL<input value={settingsDraft.whisper_base_url || ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, whisper_base_url: event.target.value, whisper_path: "" })} placeholder="http://192.168.0.200:7861" /></label>
             <label className="with-help" title={ADMIN_HELP.vllmBaseUrl}>vLLM Base URL<input value={settingsDraft.vllm_base_url} onChange={(event) => setSettingsDraft({ ...settingsDraft, vllm_base_url: event.target.value })} placeholder="http://192.168.20.126:8000" /></label>
@@ -1319,6 +1371,8 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.audioChunkThreshold}>Chunk threshold sec<input type="number" step="0.1" value={settingsDraft.audio_chunk_threshold ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, audio_chunk_threshold: event.target.value ? Number(event.target.value) : null })} /></label>
           </div>
           <div className="inline-pills">
+            <button className="link-chip" type="button" title={ADMIN_HELP.refreshRuntimeDevices} onClick={() => void loadRuntimeDevices(adminKey)}>GPU-Liste aktualisieren</button>
+            <span className={`pill ${runtimeDeviceOptions.some((device) => device.id === settingsDraft.preferred_device && device.available) ? "active" : ""}`}>{selectedRuntimeDeviceLabel}</span>
             <button className="link-chip" type="button" title={ADMIN_HELP.refreshVllmModels} onClick={() => void loadVllmModels(adminKey, settingsDraft.vllm_base_url)} disabled={vllmModelsLoading}>{vllmModelsLoading ? "vLLM laedt..." : "vLLM Modelle aktualisieren"}</button>
             <span className={`pill ${vllmModels.length ? "active" : ""}`}>{vllmModels.length ? `${vllmModels.length} vLLM Modelle` : "keine vLLM Modelle"}</span>
             {vllmModelsError ? <span className="pill">{vllmModelsError}</span> : null}

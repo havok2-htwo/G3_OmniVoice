@@ -172,6 +172,7 @@ def test_admin_snapshot_and_settings_roundtrip() -> None:
             'wer_transcription_concurrency': 2,
             'num_step': 8,
             'guidance_scale': 1.5,
+            'preferred_device': 'cpu',
             'torch_dtype': 'bf16',
             'compile_cudagraphs': True,
             'cudagraph_skip_dynamic_graphs': True,
@@ -189,11 +190,21 @@ def test_admin_snapshot_and_settings_roundtrip() -> None:
     assert payload['wer_concurrency'] == 9
     assert payload['wer_transcription_concurrency'] == 2
     assert payload['num_step'] == 8
+    assert payload['preferred_device'] == 'cpu'
     assert payload['torch_dtype'] == 'bfloat16'
     assert payload['compile_cudagraphs'] is True
     assert payload['cudagraph_skip_dynamic_graphs'] is True
     assert payload['cuda_memory_trim_after_batch'] is True
     assert payload['model_directory'].endswith('raid-cache')
+
+    devices = client.get('/api/admin/runtime/devices', headers=auth_headers())
+    assert devices.status_code == 200
+    device_payload = devices.json()
+    assert device_payload['preferred_device'] == 'cpu'
+    assert any(device['id'] == 'cpu' for device in device_payload['devices'])
+
+    invalid_device = client.put('/api/admin/settings', headers=auth_headers(), json={'preferred_device': 'intel'})
+    assert invalid_device.status_code == 400
 
     vllm_models = client.get('/api/admin/vllm/models?base_url=mock', headers=auth_headers())
     assert vllm_models.status_code == 200

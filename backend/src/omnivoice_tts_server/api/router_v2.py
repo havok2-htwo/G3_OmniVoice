@@ -36,6 +36,8 @@ from ..domain.models import (
     ModelOperationRequest,
     ModelOperationResponse,
     ModelInfo,
+    RuntimeDeviceInfo,
+    RuntimeDeviceListResponse,
     ServerSettingsResponse,
     ServerSettingsUpdateRequest,
     SettingsPresetItem,
@@ -54,7 +56,7 @@ from ..domain.models import (
     WerBenchmarkRunResponse,
 )
 from ..domain.state import VoiceProfileRecord, new_id, utcnow
-from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID
+from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID, normalize_runtime_device, query_runtime_devices
 from ..security import get_admin_record, require_admin_key, rotate_admin_key
 from ..capacity import capacity_summary as _capacity_summary
 from ..presets import delete_preset as _delete_preset
@@ -585,7 +587,10 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
     if payload.allow_model_downloads is not None:
         settings.allow_model_downloads = payload.allow_model_downloads
     if payload.preferred_device is not None:
-        settings.preferred_device = payload.preferred_device
+        try:
+            settings.preferred_device = normalize_runtime_device(payload.preferred_device)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if payload.attention_implementation is not None:
         settings.attention_implementation = payload.attention_implementation
     if payload.torch_dtype is not None:
@@ -653,6 +658,17 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
 
     save_runtime_settings(settings)
     return _settings_response(settings)
+
+
+@admin.get('/runtime/devices', response_model=RuntimeDeviceListResponse)
+async def list_runtime_devices(request: Request) -> RuntimeDeviceListResponse:
+    settings = request.app.state.settings
+    try:
+        preferred_device = normalize_runtime_device(settings.preferred_device)
+    except ValueError:
+        preferred_device = 'cuda:0'
+    devices = [RuntimeDeviceInfo(**device) for device in query_runtime_devices(preferred_device)]
+    return RuntimeDeviceListResponse(preferred_device=preferred_device, devices=devices)
 
 
 @admin.get('/settings/presets', response_model=SettingsPresetListResponse)

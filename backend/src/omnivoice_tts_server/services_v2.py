@@ -979,6 +979,9 @@ class QueueService:
 
 
 class StatsService:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
     @staticmethod
     def _avg(values: list[float]) -> float | None:
         return statistics.mean(values) if values else None
@@ -1009,9 +1012,8 @@ class StatsService:
             global_=global_stats,
         )
 
-    @staticmethod
-    def build_gpu_stats() -> GpuStatsResponse:
-        return GpuStatsResponse(**query_nvidia_smi())
+    def build_gpu_stats(self) -> GpuStatsResponse:
+        return GpuStatsResponse(**query_nvidia_smi(self.settings.preferred_device))
 
 
 class TranscriptionService:

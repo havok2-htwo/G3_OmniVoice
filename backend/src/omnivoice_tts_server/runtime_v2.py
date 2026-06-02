@@ -26,6 +26,50 @@ OMNIVOICE_BASE_ALIAS = 'k2-fsa/OmniVoice-Base'
 logger = logging.getLogger('omnivoice_tts_server.runtime')
 
 
+def normalize_runtime_device(value: str | None) -> str:
+    device = (value or 'cuda:0').strip().lower()
+    if device == 'cuda':
+        return 'cuda:0'
+    if device == 'cpu':
+        return 'cpu'
+    if device.startswith('cuda:'):
+        raw_index = device.split(':', maxsplit=1)[1]
+        if not raw_index.isdigit():
+            raise ValueError('CUDA device must look like cuda:0, cuda:1, ...')
+        index = int(raw_index)
+        if index < 0:
+            raise ValueError('CUDA device index must be >= 0')
+        return f'cuda:{index}'
+    raise ValueError('Unsupported runtime device. Use cpu or cuda:<index>.')
+
+
+def _cuda_index_for_device(device: str | None) -> int | None:
+    normalized = normalize_runtime_device(device)
+    if not normalized.startswith('cuda:'):
+        return None
+    return int(normalized.split(':', maxsplit=1)[1])
+
+
+def _parse_nvidia_smi_int(value: str) -> int:
+    value = value.strip()
+    if not value or value.upper() in {'N/A', '[N/A]'}:
+        return 0
+    digits = ''.join(char for char in value if char.isdigit() or char == '-')
+    if not digits or digits == '-':
+        return 0
+    return int(digits)
+
+
+def _unavailable_gpu_stats() -> dict[str, int | str | None]:
+    return {
+        'name': 'Unavailable',
+        'memory_used_mb': 0,
+        'memory_total_mb': 0,
+        'utilization_percent': 0,
+        'temperature_c': None,
+    }
+
+
 @dataclass
 class BatchSynthesisItem:
     job_id: str
@@ -268,10 +312,21 @@ class OmniVoiceSynthesizer:
                 'OmniVoice runtime dependencies are missing. Install CUDA PyTorch plus omnivoice, numpy, and soundfile.'
             ) from exc
 
-        if self.settings.preferred_device.startswith('cuda') and not torch.cuda.is_available():
+        preferred_device = normalize_runtime_device(self.settings.preferred_device)
+        self.settings.preferred_device = preferred_device
+        cuda_index = _cuda_index_for_device(preferred_device)
+
+        if cuda_index is not None and not torch.cuda.is_available():
             raise RuntimeError('No CUDA-capable NVIDIA GPU is available for the configured runtime.')
 
-        if torch.cuda.is_available() and self.settings.preferred_device.startswith('cuda'):
+        if cuda_index is not None:
+            device_count = torch.cuda.device_count()
+            if cuda_index >= device_count:
+                raise RuntimeError(
+                    f'Configured CUDA device {preferred_device} does not exist. '
+                    f'Available CUDA device count: {device_count}.'
+                )
+            torch.cuda.set_device(cuda_index)
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.set_float32_matmul_precision('high')
@@ -349,11 +404,11 @@ class OmniVoiceSynthesizer:
         return set(self.settings.supported_models)
 
     def _free_memory_sync(self) -> dict[str, int | str | bool | None]:
-        before = query_nvidia_smi()
+        before = query_nvidia_smi(self.settings.preferred_device)
         before_used = int(before.get('memory_used_mb') or 0)
         self.store.prompt_cache.clear()
         self._trim_cuda_cache_sync(reset_compile_cache=True)
-        after = query_nvidia_smi()
+        after = query_nvidia_smi(self.settings.preferred_device)
         after_used = int(after.get('memory_used_mb') or 0)
         return {
             'ok': True,
@@ -383,10 +438,19 @@ class OmniVoiceSynthesizer:
                     torch._dynamo.reset()
                 except Exception:
                     pass
-        if not self.settings.preferred_device.startswith('cuda'):
+        try:
+            cuda_index = _cuda_index_for_device(self.settings.preferred_device)
+        except ValueError:
+            return
+        if cuda_index is None:
             return
         if not self._torch.cuda.is_available():
             return
+        try:
+            if cuda_index < self._torch.cuda.device_count():
+                self._torch.cuda.set_device(cuda_index)
+        except Exception:
+            pass
         for cuda_call in (
             self._torch.cuda.synchronize,
             self._torch.cuda.empty_cache,
@@ -672,12 +736,12 @@ def build_synthesizer(settings: Settings, store: InMemoryStore) -> Any:
     return OmniVoiceSynthesizer(settings=settings, store=store)
 
 
-def query_nvidia_smi() -> dict[str, int | str | None]:
+def query_nvidia_smi_all() -> list[dict[str, int | str | None]]:
     try:
         result = subprocess.run(
             [
                 'nvidia-smi',
-                '--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu',
+                '--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu',
                 '--format=csv,noheader,nounits',
             ],
             capture_output=True,
@@ -686,29 +750,127 @@ def query_nvidia_smi() -> dict[str, int | str | None]:
             timeout=3,
         )
     except Exception:
-        return {
-            'name': 'Unavailable',
-            'memory_used_mb': 0,
-            'memory_total_mb': 0,
-            'utilization_percent': 0,
-            'temperature_c': None,
-        }
+        return []
 
-    line = next((entry.strip() for entry in result.stdout.splitlines() if entry.strip()), '')
-    if not line:
-        return {
-            'name': 'Unavailable',
-            'memory_used_mb': 0,
-            'memory_total_mb': 0,
-            'utilization_percent': 0,
-            'temperature_c': None,
-        }
+    gpus: list[dict[str, int | str | None]] = []
+    for line in (entry.strip() for entry in result.stdout.splitlines() if entry.strip()):
+        parts = [part.strip() for part in line.split(',', maxsplit=5)]
+        if len(parts) != 6:
+            continue
+        index, name, memory_used, memory_total, utilization, temperature = parts
+        gpus.append(
+            {
+                'index': _parse_nvidia_smi_int(index),
+                'name': name,
+                'memory_used_mb': _parse_nvidia_smi_int(memory_used),
+                'memory_total_mb': _parse_nvidia_smi_int(memory_total),
+                'utilization_percent': _parse_nvidia_smi_int(utilization),
+                'temperature_c': _parse_nvidia_smi_int(temperature) if temperature else None,
+            }
+        )
+    return gpus
 
-    name, memory_used, memory_total, utilization, temperature = [part.strip() for part in line.split(',', maxsplit=4)]
+
+def query_nvidia_smi(preferred_device: str | None = None) -> dict[str, int | str | None]:
+    gpus = query_nvidia_smi_all()
+    if not gpus:
+        return _unavailable_gpu_stats()
+
+    try:
+        cuda_index = _cuda_index_for_device(preferred_device)
+    except ValueError:
+        cuda_index = None
+
+    selected = None
+    if cuda_index is not None:
+        selected = next((gpu for gpu in gpus if gpu.get('index') == cuda_index), None)
+        if selected is None and 0 <= cuda_index < len(gpus):
+            selected = gpus[cuda_index]
+    selected = selected or gpus[0]
     return {
-        'name': name,
-        'memory_used_mb': int(memory_used),
-        'memory_total_mb': int(memory_total),
-        'utilization_percent': int(utilization),
-        'temperature_c': int(temperature) if temperature else None,
+        'name': str(selected.get('name') or 'Unavailable'),
+        'memory_used_mb': int(selected.get('memory_used_mb') or 0),
+        'memory_total_mb': int(selected.get('memory_total_mb') or 0),
+        'utilization_percent': int(selected.get('utilization_percent') or 0),
+        'temperature_c': selected.get('temperature_c') if selected.get('temperature_c') is not None else None,
     }
+
+
+def query_runtime_devices(preferred_device: str | None = None) -> list[dict[str, Any]]:
+    selected_device = normalize_runtime_device(preferred_device)
+    devices: list[dict[str, Any]] = [
+        {
+            'id': 'cpu',
+            'label': 'CPU',
+            'kind': 'cpu',
+            'name': 'CPU',
+            'index': None,
+            'memory_total_mb': None,
+            'available': True,
+            'selected': selected_device == 'cpu',
+        }
+    ]
+
+    cuda_devices: list[dict[str, Any]] = []
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            for index in range(torch.cuda.device_count()):
+                name = torch.cuda.get_device_name(index)
+                properties = torch.cuda.get_device_properties(index)
+                memory_total_mb = int(getattr(properties, 'total_memory', 0) // (1024 * 1024))
+                label = f'cuda:{index} - {name}'
+                if memory_total_mb:
+                    label += f' ({memory_total_mb // 1024} GB)'
+                cuda_devices.append(
+                    {
+                        'id': f'cuda:{index}',
+                        'label': label,
+                        'kind': 'cuda',
+                        'name': name,
+                        'index': index,
+                        'memory_total_mb': memory_total_mb,
+                        'available': True,
+                        'selected': selected_device == f'cuda:{index}',
+                    }
+                )
+    except Exception:
+        cuda_devices = []
+
+    if not cuda_devices:
+        for gpu in query_nvidia_smi_all():
+            index = int(gpu.get('index') or 0)
+            name = str(gpu.get('name') or f'NVIDIA GPU {index}')
+            memory_total_mb = int(gpu.get('memory_total_mb') or 0)
+            label = f'cuda:{index} - {name}'
+            if memory_total_mb:
+                label += f' ({memory_total_mb // 1024} GB)'
+            cuda_devices.append(
+                {
+                    'id': f'cuda:{index}',
+                    'label': label,
+                    'kind': 'cuda',
+                    'name': name,
+                    'index': index,
+                    'memory_total_mb': memory_total_mb,
+                    'available': True,
+                    'selected': selected_device == f'cuda:{index}',
+                }
+            )
+
+    devices.extend(cuda_devices)
+    if selected_device not in {device['id'] for device in devices}:
+        devices.append(
+            {
+                'id': selected_device,
+                'label': f'{selected_device} - configured, unavailable',
+                'kind': 'cuda' if selected_device.startswith('cuda:') else 'other',
+                'name': 'Configured device',
+                'index': _cuda_index_for_device(selected_device) if selected_device.startswith('cuda:') else None,
+                'memory_total_mb': None,
+                'available': False,
+                'selected': True,
+            }
+        )
+    return devices

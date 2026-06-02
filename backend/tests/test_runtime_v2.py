@@ -19,6 +19,7 @@ from omnivoice_tts_server.runtime_v2 import (
     OMNIVOICE_DESIGN_ALIAS,
     BatchSynthesisItem,
     OmniVoiceSynthesizer,
+    normalize_runtime_device,
 )
 from omnivoice_tts_server.voice_design import (
     DEFAULT_VOICE_DESIGN_INSTRUCT,
@@ -92,6 +93,14 @@ def install_fake_omnivoice(monkeypatch) -> None:
 
 def run_render(synthesizer: OmniVoiceSynthesizer, items: list[BatchSynthesisItem]):
     return asyncio.run(synthesizer.render_batch(items))
+
+
+def test_runtime_device_normalization() -> None:
+    assert normalize_runtime_device('cuda') == 'cuda:0'
+    assert normalize_runtime_device('CUDA:1') == 'cuda:1'
+    assert normalize_runtime_device(' cpu ') == 'cpu'
+    with pytest.raises(ValueError):
+        normalize_runtime_device('intel')
 
 
 def test_voice_design_instruct_normalization_and_errors() -> None:

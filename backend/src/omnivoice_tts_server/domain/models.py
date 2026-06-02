@@ -173,6 +173,22 @@ class GpuStatsResponse(BaseModel):
     temperature_c: int | None = None
 
 
+class RuntimeDeviceInfo(BaseModel):
+    id: str
+    label: str
+    kind: str
+    name: str
+    index: int | None = None
+    memory_total_mb: int | None = None
+    available: bool = True
+    selected: bool = False
+
+
+class RuntimeDeviceListResponse(BaseModel):
+    preferred_device: str
+    devices: list[RuntimeDeviceInfo] = Field(default_factory=list)
+
+
 class TranscriptionResponse(BaseModel):
     transcription: str
     voice_vector: list[float] | None = None

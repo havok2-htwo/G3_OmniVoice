@@ -243,6 +243,22 @@ export interface MemoryCleanupResponse {
   released_mb?: number | null;
 }
 
+export interface RuntimeDeviceInfo {
+  id: string;
+  label: string;
+  kind: string;
+  name: string;
+  index?: number | null;
+  memory_total_mb?: number | null;
+  available: boolean;
+  selected: boolean;
+}
+
+export interface RuntimeDeviceListResponse {
+  preferred_device: string;
+  devices: RuntimeDeviceInfo[];
+}
+
 export interface VllmModelsResponse {
   ok: boolean;
   base_url: string;

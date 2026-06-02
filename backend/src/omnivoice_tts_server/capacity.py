@@ -18,7 +18,8 @@ from __future__ import annotations
 
 # Measured constants (intentionally a little conservative so estimates over- not
 # under-shoot real VRAM, i.e. we batch slightly less rather than risk OOM).
-MODEL_RESIDENT_MB = 11500          # idle VRAM with the model loaded (~11.3 GB measured)
+MODEL_RESIDENT_MB = 3000           # model params+tokenizer+CUDA ctx (~2.4-2.9 GB measured; the
+                                   # old 11500 was reserved-cache, not resident, and over-chunked long texts)
 MB_PER_AUDIO_SECOND = 42.0         # ~2.5 GB/min (measured ~2.3 GB/min)
 EST_AUDIO_SECONDS_PER_CHAR = 0.06  # measured ~0.05-0.06 s of speech per input char
 

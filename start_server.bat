@@ -89,5 +89,8 @@ if exist "%~dp0frontend\dist\index.html" (
   echo Frontend build missing. Run install.bat to generate frontend\dist.
   echo API: http://127.0.0.1:8091
 )
+REM Shrink the CUDA caching-allocator reserved pool (less fragmentation -> lower idle VRAM,
+REM leaves room for Whisper + Ollama). expandable_segments is Linux-only / ignored on Windows.
+set "PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256"
 "%PYTHON_EXE%" -u -m omnivoice_tts_server.main
 pause

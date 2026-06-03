@@ -21,6 +21,7 @@ import {
   voiceDesignInstructOrDefault,
   voiceDesignValueForGroup,
 } from "../shared/voiceDesign";
+import { SYNTH_LANGUAGE_OPTIONS } from "../shared/languages";
 
 function inferTaskType(modelId: string): TaskType {
   if (modelId.endsWith("VoiceDesign")) {
@@ -59,6 +60,7 @@ const DEMO_HELP = {
   model: "Waehlt den OmniVoice-Modus: AutoVoice fuer freie Stimmen, VoiceDesign fuer Instructs, Base fuer gespeicherte Clone-Stimmen.",
   voice: "Waehlt die Stimme fuer AutoVoice oder Base. Bei VoiceDesign wird die Stimme ueber Instructions beschrieben.",
   text: "Der Text wird in Saetze zerlegt, in die Queue gestellt und je nach Settings gebatcht.",
+  language: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache aus dem Text erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
   instructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wie 'calm neutral voice' wird von OmniVoice abgelehnt.",
   seed: "Gleicher Seed kann aehnlichere Ergebnisse erzeugen. Leer lassen fuer zufaellige Generierung.",
   customVoiceButton: "Wechselt automatisch auf OmniVoice-Base und waehlt die erste gespeicherte Custom Voice.",
@@ -71,6 +73,7 @@ export default function DemoApp() {
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedVoice, setSelectedVoice] = useState("");
   const [text, setText] = useState("Hallo! Das ist die neue offene OmniVoice-Demo mit Batch-Scheduler und Live-Streaming.");
+  const [language, setLanguage] = useState("Auto");
   const [instructions, setInstructions] = useState("");
   const [seed, setSeed] = useState("");
   const [message, setMessage] = useState("");
@@ -250,7 +253,7 @@ export default function DemoApp() {
           voice: taskType === "VoiceDesign" ? null : selectedVoice,
           task_type: taskType,
           instructions: taskType === "VoiceDesign" ? voiceDesignInstructOrDefault(instructions) : instructions,
-          language: "Auto",
+          language,
           stream: true,
           response_format: "pcm",
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
@@ -402,6 +405,14 @@ export default function DemoApp() {
               </select>
             </label>
           </div>
+          <label className="with-help" title={DEMO_HELP.language}>
+            Sprache
+            <select value={language} onChange={(event) => setLanguage(event.target.value)}>
+              {SYNTH_LANGUAGE_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </label>
           {customVoices.length > 0 && taskType !== "Base" ? (
             <div className="button-row">
               <button

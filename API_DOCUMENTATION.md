@@ -153,6 +153,7 @@ Notes:
 - `model` defaults to the active runtime model.
 - `task_type` is inferred from the selected model when omitted.
 - `voice` is a saved custom voice id for `Base` clone requests.
+- `language` is an optional synthesis hint. `Auto` (the default) and any unrecognized value let OmniVoice auto-detect the language from the text. The curated UI labels (`Deutsch`, `English`, `Français`, …) are mapped to OmniVoice language codes (`de`, `en`, `fr`, …) before generation; specifying the language can slightly improve pronunciation/quality. The label list is served by `GET /api/v1/languages` and surfaced as a dropdown in both the Demo and Admin Quick Synthesis UIs.
 - `instructions` is used by `VoiceDesign`; invalid instruction terms are rejected.
 - `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
 - Streaming still uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.

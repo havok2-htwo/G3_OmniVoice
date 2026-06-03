@@ -24,6 +24,28 @@ OMNIVOICE_AUTO_ALIAS = 'k2-fsa/OmniVoice-AutoVoice'
 OMNIVOICE_DESIGN_ALIAS = 'k2-fsa/OmniVoice-VoiceDesign'
 OMNIVOICE_BASE_ALIAS = 'k2-fsa/OmniVoice-Base'
 
+# Maps the curated UI language labels to ISO codes that OmniVoice.generate()
+# resolves. OmniVoice only recognizes English names ("German") or ISO codes
+# ("de"); the localized labels shown in the UI ("Deutsch") are otherwise
+# unknown to the model and silently fall back to language-agnostic mode.
+# 'Auto', empty, and unknown values map to None so the model auto-detects.
+LANGUAGE_LABEL_TO_CODE: dict[str, str] = {
+    'deutsch': 'de',
+    'english': 'en',
+    'français': 'fr',
+    'español': 'es',
+    'italiano': 'it',
+    'nederlands': 'nl',
+    'polski': 'pl',
+    'português': 'pt',
+    'türkçe': 'tr',
+    'русский': 'ru',
+    'українська': 'uk',
+    '中文': 'zh',
+    '日本語': 'ja',
+    '한국어': 'ko',
+}
+
 logger = logging.getLogger('omnivoice_tts_server.runtime')
 
 
@@ -616,7 +638,11 @@ class OmniVoiceSynthesizer:
     @staticmethod
     def _normalize_language(language: str | None) -> str | None:
         value = (language or '').strip()
-        return value if value and value.lower() != 'auto' else None
+        if not value or value.lower() == 'auto':
+            return None
+        # Translate curated UI labels (e.g. "Deutsch") to codes the model
+        # resolves; pass anything else through for OmniVoice to resolve itself.
+        return LANGUAGE_LABEL_TO_CODE.get(value.lower(), value)
 
     def _clone_prompt(self, request: SpeechRequest) -> Any:
         voice_profile = self._resolve_voice_profile(request.voice)

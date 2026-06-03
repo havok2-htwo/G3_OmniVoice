@@ -35,6 +35,7 @@ import {
   voiceDesignInstructOrDefault,
   voiceDesignValueForGroup,
 } from "../shared/voiceDesign";
+import { SYNTH_LANGUAGE_OPTIONS } from "../shared/languages";
 
 function inferTaskType(modelId: string): TaskType {
   if (modelId.endsWith("VoiceDesign")) return "VoiceDesign";
@@ -108,6 +109,7 @@ const ADMIN_HELP = {
   quickModel: "Modell fuer die schnelle Admin-Synthese. AutoVoice, VoiceDesign und Base haben unterschiedliche Voice-Regeln.",
   quickVoice: "Stimme fuer Quick Synthesis. Custom Voices laufen mit OmniVoice-Base, VoiceDesign braucht keine feste Stimme.",
   quickText: "Text fuer den Streaming-Test. Der erste Satz bekommt einen Fast-Path, danach werden kompatible Saetze wieder gebatcht.",
+  quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
   quickInstructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wird von OmniVoice abgelehnt.",
   quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
   defaultModel: "Default-Modell fuer neue Jobs, Model Ops und den naechsten Serverstart.",
@@ -345,6 +347,7 @@ export function AdminApp() {
   const [quickVoice, setQuickVoice] = useState("");
   const [modelOpsModel, setModelOpsModel] = useState("");
   const [quickText, setQuickText] = useState("Das neue Adminpanel nutzt dieselbe Streaming-Pipeline wie die offene Demo.");
+  const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
   const [quickSeed, setQuickSeed] = useState("");
   const [quickMetrics, setQuickMetrics] = useState<JobMetrics | null>(null);
@@ -747,7 +750,7 @@ export function AdminApp() {
           voice: quickTaskType === "VoiceDesign" ? null : quickVoice,
           task_type: quickTaskType,
           instructions: quickTaskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickInstructions,
-          language: "Auto",
+          language: quickLanguage,
           stream: true,
           response_format: "pcm",
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
@@ -1602,6 +1605,7 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)} disabled={quickTaskType === "VoiceDesign"}>{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
           </div>
           <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
+          <label className="with-help" title={ADMIN_HELP.quickLanguage}>Sprache<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
           <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} readOnly={quickTaskType === "VoiceDesign"} /></label>
           {quickTaskType === "VoiceDesign" ? (
             <div className="voice-design-builder" title={ADMIN_HELP.quickInstructions}>

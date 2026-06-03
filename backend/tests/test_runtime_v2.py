@@ -232,7 +232,8 @@ def test_voice_design_uses_instruct_batch(tmp_path, monkeypatch) -> None:
 
     call = FakeOmniVoiceModel.instances[-1].calls[-1]
     assert call['instruct'] == ['female, young adult, low pitch']
-    assert call['language'] == ['English']
+    # UI label 'English' is now normalized to the ISO code 'en' that generate() resolves.
+    assert call['language'] == ['en']
 
 
 def test_base_clone_uses_saved_profile_and_prompt_cache(tmp_path, monkeypatch) -> None:

@@ -137,6 +137,10 @@ $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
 - **MP3 downloads** - Demo and Admin history/quick synthesis expose completed
   audio as MP3 for easy sharing; export uses system FFmpeg or the bundled
   `imageio-ffmpeg` fallback.
+- **Synthesis language hint** - Demo and Admin Quick Synthesis expose a language
+  dropdown (default `Auto`). The labels are mapped to OmniVoice language codes
+  server-side, so a fixed choice actually reaches the model instead of silently
+  falling back to auto-detection.
 
 ## Notes
 

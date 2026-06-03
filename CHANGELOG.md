@@ -10,6 +10,16 @@ All notable changes to G3_OmniVoice are recorded here.
   supported synthesis languages (`Auto` + the curated language set), parallel to
   `GET /v1/audio/voices`. Stops clients that probe this endpoint from getting 404s.
 
+### Synthesis language
+
+- Demo and Admin Quick Synthesis now expose a language dropdown (default `Auto`)
+  instead of always sending `language: "Auto"`. Options come from the shared
+  `SYNTH_LANGUAGE_OPTIONS` set that mirrors `GET /api/v1/languages`.
+- Backend now maps the curated UI labels (`Deutsch`, `Français`, …) to the ISO
+  codes OmniVoice's `generate(language=...)` resolves (`de`, `fr`, …). Previously
+  only `Auto` and `English` took effect; the other localized labels were unknown
+  to the model and silently fell back to language-agnostic mode.
+
 ### Hardening / Stability
 
 - Alias-reload fix: loaded models are cached on the resolved checkpoint instead

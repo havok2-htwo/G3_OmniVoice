@@ -215,19 +215,40 @@ Purpose:
 
 - OpenAI-style voice list alias
 
-Behavior:
+Response shape:
 
-- returns the voice list directly instead of wrapping it in `{ "voices": ... }`
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "auto voice", "object": "voice", "name": "Auto Voice", "source": "built-in" }
+  ],
+  "voices": [
+    { "id": "auto voice", "object": "voice", "name": "Auto Voice", "source": "built-in" }
+  ]
+}
+```
 
 ### `GET /v1/audio/voices`
 
 Purpose:
 
-- compatibility alias for audio voice clients
+- Open WebUI compatibility: voice list for OpenAI-compatible TTS endpoints
 
 Behavior:
 
-- returns the voice list directly
+- Open WebUI reads the `voices` key from `{base}/audio/voices`
+
+Response shape:
+
+```json
+{
+  "voices": [
+    { "id": "auto voice", "object": "voice", "name": "Auto Voice", "source": "built-in" },
+    { "id": "voice_abc123", "object": "voice", "name": "Demo Voice", "source": "custom" }
+  ]
+}
+```
 
 ### `GET /api/v1/languages`
 
@@ -241,11 +262,11 @@ Purpose:
 
 - compatibility alias for the supported language list
 
-### `GET /v1/models`
+### `GET /api/v1/models`
 
 Purpose:
 
-- lists supported OmniVoice model aliases and current loaded/active state
+- lists supported OmniVoice model aliases and current loaded/active state (used by the demo UI)
 
 Response shape:
 
@@ -258,6 +279,50 @@ Response shape:
     "task_types": ["CustomVoice"]
   }
 ]
+```
+
+### `GET /v1/models`
+
+Purpose:
+
+- OpenAI-compatible model list
+
+Response shape:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "k2-fsa/OmniVoice-AutoVoice",
+      "object": "model",
+      "created": 0,
+      "owned_by": "omnivoice-local",
+      "name": "k2-fsa/OmniVoice-AutoVoice",
+      "active": true
+    }
+  ]
+}
+```
+
+### `GET /v1/audio/models`
+
+Purpose:
+
+- Open WebUI compatibility: model list for OpenAI-compatible TTS endpoints
+
+Behavior:
+
+- Open WebUI reads the `models` key from `{base}/audio/models`
+
+Response shape:
+
+```json
+{
+  "models": [
+    { "id": "k2-fsa/OmniVoice-AutoVoice", "object": "model", "created": 0, "owned_by": "omnivoice-local", "name": "k2-fsa/OmniVoice-AutoVoice", "active": true }
+  ]
+}
 ```
 
 ### `POST /api/v1/synthesize`
@@ -350,7 +415,7 @@ Event examples:
 
 Purpose:
 
-- OpenAI-compatible speech endpoint for TTS clients
+- OpenAI-compatible speech endpoint for TTS clients (Open WebUI, OpenAI SDKs)
 
 Content type:
 
@@ -362,6 +427,13 @@ Behavior:
 - `stream=false` with `response_format="mp3"`: returns `audio/mpeg`
 - `stream=true`: returns raw `audio/pcm` chunks
 - streaming PCM is 24 kHz, mono, signed 16-bit little-endian
+
+OpenAI-client tolerance:
+
+- `model`: exact supported model ids (case-insensitive) are used as-is; OpenAI aliases (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, ...) and unknown ids fall back to the active model
+- `voice`: resolved case-insensitively against built-in voices and saved voice profiles (by id or name); standard OpenAI voice names (`alloy`, `echo`, `fable`, ...) fall back to the default voice; anything else returns `404`
+- a resolved custom voice profile automatically routes the request to the `k2-fsa/OmniVoice-Base` (voice clone) alias
+- the `Authorization: Bearer ...` header sent by OpenAI clients is accepted and ignored (the endpoint stays public, like all synthesis endpoints)
 
 Example:
 

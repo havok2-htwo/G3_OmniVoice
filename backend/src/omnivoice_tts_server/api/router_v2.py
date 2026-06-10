@@ -254,6 +254,82 @@ def _model_items(request: Request) -> list[ModelInfo]:
     ]
 
 
+# OpenAI voice names that clients like Open WebUI send by default; they map to
+# the server default voice instead of failing, so a stock client config works.
+OPENAI_STANDARD_VOICES = {'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'nova', 'sage', 'shimmer', 'verse'}
+
+
+def _resolve_openai_model(request: Request, raw_model: str | None) -> str | None:
+    settings = request.app.state.settings
+    requested = (raw_model or '').strip()
+    if not requested:
+        return None
+    lowered = requested.casefold()
+    for model_id in settings.supported_models:
+        if lowered == model_id.casefold():
+            return model_id
+    # OpenAI aliases (tts-1, tts-1-hd, gpt-4o-mini-tts, ...) and unknown ids fall
+    # back to the active model instead of failing at load time.
+    return None
+
+
+def _resolve_openai_voice(request: Request, raw_voice: str | None) -> tuple[str | None, VoiceProfileRecord | None]:
+    settings = request.app.state.settings
+    store = request.app.state.store
+    requested = (raw_voice or '').strip()
+    if not requested:
+        return None, None
+    lowered = requested.casefold()
+    for name in settings.built_in_voices:
+        if lowered == name.casefold():
+            return name, None
+    for profile in store.voice_profiles.values():
+        if requested in (profile.voice_id, profile.name):
+            return profile.voice_id, profile
+    for profile in store.voice_profiles.values():
+        if lowered in (str(profile.voice_id).casefold(), str(profile.name or '').casefold()):
+            return profile.voice_id, profile
+    if lowered in OPENAI_STANDARD_VOICES:
+        return None, None
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Voice '{requested}' was not found.")
+
+
+def _coerce_openai_speech_request(request: Request, payload: SpeechRequest) -> SpeechRequest:
+    settings = request.app.state.settings
+    voice, profile = _resolve_openai_voice(request, payload.voice)
+    model = _resolve_openai_model(request, payload.model)
+    if profile is not None:
+        # Custom voice profiles only synthesize through the Base (voice clone) alias.
+        model = next((m for m in settings.supported_models if m.endswith('Base')), model)
+    return payload.model_copy(update={'model': model, 'voice': voice})
+
+
+def _openai_model_entries(request: Request) -> list[dict[str, Any]]:
+    return [
+        {
+            'id': item.model_id,
+            'object': 'model',
+            'created': 0,
+            'owned_by': 'omnivoice-local',
+            'name': item.model_id,
+            'active': item.active,
+        }
+        for item in _model_items(request)
+    ]
+
+
+def _openai_voice_entries(request: Request) -> list[dict[str, Any]]:
+    return [
+        {
+            'id': item.voice_id,
+            'object': 'voice',
+            'name': item.name,
+            'source': item.source,
+        }
+        for item in _voice_items(request)
+    ]
+
+
 def _model_download_storage_root(settings: Any, storage_path: str | None = None) -> Path:
     raw = (storage_path or '').strip()
     if not raw:
@@ -1052,14 +1128,16 @@ async def list_public_voices(request: Request) -> VoiceCatalogResponse:
     return VoiceCatalogResponse(voices=_voice_items(request))
 
 
-@router.get('/v1/voices', response_model=list[VoiceProfileListItem])
-async def list_voices_alias(request: Request) -> list[VoiceProfileListItem]:
-    return _voice_items(request)
+@router.get('/v1/voices')
+async def list_voices_alias(request: Request) -> dict[str, Any]:
+    entries = _openai_voice_entries(request)
+    return {'object': 'list', 'data': entries, 'voices': entries}
 
 
-@router.get('/v1/audio/voices', response_model=list[VoiceProfileListItem])
-async def list_audio_voices(request: Request) -> list[VoiceProfileListItem]:
-    return _voice_items(request)
+@router.get('/v1/audio/voices')
+async def list_audio_voices(request: Request) -> dict[str, Any]:
+    # Open WebUI reads the 'voices' key from {base}/audio/voices.
+    return {'voices': _openai_voice_entries(request)}
 
 
 @router.get('/v1/audio/languages', response_model=list[str])
@@ -1072,9 +1150,20 @@ async def list_languages_alias() -> list[str]:
     return SUPPORTED_LANGUAGES
 
 
-@router.get('/v1/models', response_model=list[ModelInfo])
+@router.get('/api/v1/models', response_model=list[ModelInfo])
 async def list_models(request: Request) -> list[ModelInfo]:
     return _model_items(request)
+
+
+@router.get('/v1/models')
+async def list_openai_models(request: Request) -> dict[str, Any]:
+    return {'object': 'list', 'data': _openai_model_entries(request)}
+
+
+@router.get('/v1/audio/models')
+async def list_openai_audio_models(request: Request) -> dict[str, Any]:
+    # Open WebUI reads the 'models' key from {base}/audio/models.
+    return {'models': _openai_model_entries(request)}
 
 
 @router.post('/api/v1/synthesize', response_model=SynthesisResultResponse)
@@ -1137,6 +1226,7 @@ async def synthesize_stream(request: Request, payload: SpeechRequest) -> Streami
 @router.post('/v1/audio/speech', response_model=None)
 async def speech(request: Request, payload: SpeechRequest) -> Response | StreamingResponse:
     queue: QueueService = request.app.state.queue_service
+    payload = _coerce_openai_speech_request(request, payload)
     if payload.stream:
         job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public')
 

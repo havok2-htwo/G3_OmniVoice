@@ -128,12 +128,17 @@ GET /v1/audio/voices
 }
 ```
 
-The `/v1/...` aliases return the list directly.
+The `/v1/...` aliases return OpenAI/Open-WebUI-compatible objects:
+
+```http
+GET /v1/voices        -> { "object": "list", "data": [...], "voices": [...] }
+GET /v1/audio/voices  -> { "voices": [ { "id": "...", "object": "voice", "name": "...", "source": "..." } ] }
+```
 
 ### Models
 
 ```http
-GET /v1/models
+GET /api/v1/models
 ```
 
 Response:
@@ -147,6 +152,13 @@ Response:
     "task_types": ["CustomVoice"]
   }
 ]
+```
+
+OpenAI/Open-WebUI-compatible aliases:
+
+```http
+GET /v1/models        -> { "object": "list", "data": [ { "id": "...", "object": "model", ... } ] }
+GET /v1/audio/models  -> { "models": [ { "id": "...", "object": "model", ... } ] }
 ```
 
 ### Synthesize Metadata
@@ -234,6 +246,13 @@ Content-Type: application/json
 
 Non-streaming requests return audio bytes. Use `response_format="wav"` for
 `audio/wav` or `response_format="mp3"` for `audio/mpeg`.
+
+OpenAI clients (e.g. Open WebUI with API base `http://<host>:8091/v1`) work out
+of the box: alias models (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, ...) fall back
+to the active model, voices resolve case-insensitively by built-in/profile id or
+name (standard OpenAI voices like `alloy` map to the default voice), and a
+resolved custom voice profile automatically routes to the
+`k2-fsa/OmniVoice-Base` voice-clone alias.
 
 ```powershell
 Invoke-WebRequest `

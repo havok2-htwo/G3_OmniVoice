@@ -76,6 +76,25 @@ stores only a hash under `data/`; the returned token is shown once.
 - Interactive docs: `http://127.0.0.1:8091/docs`
 - OpenAPI JSON: `http://127.0.0.1:8091/openapi.json`
 
+## Open WebUI / OpenAI-Compatible TTS
+
+The server exposes an OpenAI-compatible TTS surface under `/v1`, in the same
+shape the previous G3_TADA3B endpoint used. In Open WebUI
+(Admin Settings -> Audio -> TTS):
+
+- TTS Engine: `OpenAI`
+- API Base URL: `http://<server-ip>:8091/v1`
+- API Key: any value (the endpoint is public; the Bearer header is ignored)
+- TTS Model: any supported model id, or just `tts-1` (aliases fall back to the
+  active model)
+- TTS Voice: a built-in voice (`Auto Voice`) or a saved voice profile by name
+  or id; standard OpenAI voices like `alloy` map to the default voice
+
+Open WebUI's model/voice dropdowns are fed by `GET /v1/audio/models`
+(`{ "models": [...] }`) and `GET /v1/audio/voices` (`{ "voices": [...] }`).
+Selecting a saved custom voice profile automatically routes synthesis through
+the `k2-fsa/OmniVoice-Base` voice-clone alias.
+
 ## Frontend Dev
 
 ```powershell

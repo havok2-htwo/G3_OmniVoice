@@ -2,7 +2,28 @@
 
 All notable changes to G3_OmniVoice are recorded here.
 
-## [Unreleased] - 2026-06-02
+## [0.2.0] - 2026-06-10
+
+### Open WebUI / OpenAI compatibility
+
+- `POST /v1/audio/speech` now tolerates stock OpenAI client configs: alias
+  models (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, ...) and unknown ids fall
+  back to the active model instead of failing at load time; supported model
+  ids match case-insensitively.
+- Voices resolve case-insensitively against built-in voices and saved voice
+  profiles (by id or name). Standard OpenAI voice names (`alloy`, `echo`,
+  `fable`, ...) map to the default voice; unknown voices return 404.
+- A resolved custom voice profile automatically routes the request to the
+  `k2-fsa/OmniVoice-Base` voice-clone alias, so Open WebUI can use saved
+  voices without knowing OmniVoice model aliases.
+- `GET /v1/audio/models` (new) returns `{ "models": [...] }` and
+  `GET /v1/audio/voices` returns `{ "voices": [...] }` — the exact shapes
+  Open WebUI reads from custom OpenAI-compatible TTS endpoints.
+- `GET /v1/models` now returns the OpenAI list shape
+  `{ "object": "list", "data": [...] }`; the previous plain
+  `ModelInfo[]` list moved to `GET /api/v1/models` (demo UI updated).
+- `GET /v1/voices` returns an OpenAI-style list object with both `data` and
+  `voices` keys.
 
 ### API
 

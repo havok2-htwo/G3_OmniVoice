@@ -95,7 +95,7 @@ export default function DemoApp() {
     let cancelled = false;
     void Promise.all([
       apiFetch<{ voices: VoiceItem[] }>("/api/v1/voices"),
-      apiFetch<ModelInfo[]>("/v1/models"),
+      apiFetch<ModelInfo[]>("/api/v1/models"),
     ])
       .then(([voicePayload, nextModels]) => {
         if (cancelled) {
@@ -167,7 +167,7 @@ export default function DemoApp() {
 
   async function refreshModels() {
     try {
-      setModels(await apiFetch<ModelInfo[]>("/v1/models"));
+      setModels(await apiFetch<ModelInfo[]>("/api/v1/models"));
     } catch {
       // The stream itself is the primary result; stale model badges are non-fatal.
     }

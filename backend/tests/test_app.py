@@ -290,6 +290,63 @@ def test_speech_can_return_mp3(monkeypatch) -> None:
     assert response.content == b'ID3mock-mp3'
 
 
+def test_openai_compat_listings_match_open_webui_shapes() -> None:
+    client = make_client()
+
+    models = client.get('/v1/models').json()
+    assert models['object'] == 'list'
+    model_ids = [entry['id'] for entry in models['data']]
+    assert 'k2-fsa/OmniVoice-AutoVoice' in model_ids
+
+    audio_models = client.get('/v1/audio/models').json()
+    assert [entry['id'] for entry in audio_models['models']] == model_ids
+
+    audio_voices = client.get('/v1/audio/voices').json()
+    assert {'id': 'auto voice', 'object': 'voice', 'name': 'Auto Voice', 'source': 'built-in'} in audio_voices['voices']
+
+    voices = client.get('/v1/voices').json()
+    assert voices['object'] == 'list'
+    assert voices['data'] == voices['voices'] == audio_voices['voices']
+
+    plain_models = client.get('/api/v1/models').json()
+    assert [entry['model_id'] for entry in plain_models] == model_ids
+
+
+def test_openai_compat_speech_accepts_alias_model_and_standard_voice() -> None:
+    client = make_client()
+    response = client.post('/v1/audio/speech', json={'model': 'tts-1', 'input': 'Hallo Welt', 'voice': 'alloy'})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('audio/wav')
+    assert len(response.content) > 44
+
+
+def test_openai_compat_speech_rejects_unknown_voice() -> None:
+    client = make_client()
+    response = client.post('/v1/audio/speech', json={'input': 'Hallo Welt', 'voice': 'does-not-exist'})
+    assert response.status_code == 404
+
+
+def test_openai_compat_speech_routes_custom_profile_to_base_alias() -> None:
+    client = make_client()
+    created = client.post(
+        '/api/admin/voices',
+        headers=auth_headers(),
+        files={'audio_sample': ('sample.wav', make_wav_bytes(), 'audio/wav')},
+        data={'name': 'Open WebUI Voice', 'consent': 'true', 'ref_text': 'Hallo, das ist eine Teststimme.'},
+    )
+    assert created.status_code == 200
+    voice_id = created.json()['voice_id']
+
+    listed = client.get('/v1/audio/voices').json()['voices']
+    assert any(entry['id'] == voice_id for entry in listed)
+
+    # Case-insensitive profile name resolves and auto-routes to the Base alias.
+    response = client.post('/v1/audio/speech', json={'model': 'tts-1', 'input': 'Hallo Welt', 'voice': 'open webui voice'})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('audio/wav')
+    assert len(response.content) > 44
+
+
 def test_completed_job_audio_can_be_downloaded_as_mp3(monkeypatch) -> None:
     monkeypatch.setattr(router_v2, 'wav_to_mp3', lambda wav_bytes: b'ID3job-mp3')
     client = make_client()

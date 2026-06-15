@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     vllm_model: str = ''
     wer_concurrency: int = Field(default=4, ge=1, le=64)
     wer_transcription_concurrency: int = Field(default=16, ge=1, le=64)
+    # Audio codec tokenizer used by the finetune preprocess step (extract_audio_tokens).
+    # Defaults to the same Higgs-Audio-V2 tokenizer the runtime uses for voice cloning;
+    # point at a local snapshot dir to stay fully offline.
+    finetune_audio_tokenizer: str = 'eustlb/higgs-audio-v2-tokenizer'
     active_model: str = 'k2-fsa/OmniVoice-AutoVoice'
     default_voice: str = 'Auto Voice'
     supported_models: list[str] = Field(

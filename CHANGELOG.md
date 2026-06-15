@@ -2,6 +2,41 @@
 
 All notable changes to G3_OmniVoice are recorded here.
 
+## [Unreleased]
+
+### Finetune panel — self-generated training data + trainer (admin-only)
+
+Two new admin-gated tabs ("Data Generation" and "Training") for nudging the
+OmniVoice model on cases it stumbles on (e.g. German abbreviations like "GmbH").
+
+- **Data Generation:** a persisted domain list (topics), manual or LLM-generated
+  ("N more, exclude existing"); per-domain batched sentence generation with dedup;
+  a self-generation run that, per (voice, sentence), synthesizes with a seed,
+  transcribes via the configured Whisper/ASR server, scores WER, and retries with a
+  new seed until it passes or hits `max_attempts` (default 10). Accepted clips land
+  under `data/finetune/train/<voice>/` as `clip_NNNN.wav` + matching `.txt`
+  (+ `voice_sample_<name>.wav`). Voices per run are selectable: cloned saved voices
+  (Base), AutoVoice, or both. A human-eval browser plays clips and deletes wrong
+  ones (removing audio + transcript). Reuses the existing vLLM/Whisper clients and
+  WER scorer from the WER benchmark.
+- **Training:** a CPU/GPU preprocess step (audio → Higgs codec-token cache via the
+  bundled `omnivoice` `extract_audio_tokens`), then a full finetune via the bundled
+  `omnivoice` trainer launched as a subprocess (`init_from_checkpoint` from the base,
+  `sdpa` attention by default, bf16, low LR), with live loss/step/ETA progress.
+  Resulting checkpoints can be promoted to `models/Custom-<name>/` and become
+  selectable models (`local/Custom-<name>`) loadable via the existing model-ops.
+- New admin endpoints under `POST/GET/DELETE /api/admin/finetune/*` (domains,
+  sentence/domain generation, generate run + SSE/status, clip browser, preprocess +
+  train + status/stream/cancel, checkpoints + promote). New setting
+  `OMNIVOICE_TTS_FINETUNE_AUDIO_TOKENIZER` (default `eustlb/higgs-audio-v2-tokenizer`).
+- Conservative path adds no new dependencies (`omnivoice`, `accelerate`,
+  `webdataset`, `transformers` already present).
+
+### Fixed
+
+- `apiFetch` (frontend) now types its `body` as `unknown`, clearing the
+  pre-existing TypeScript errors at JSON-body call sites; `tsc --noEmit` is clean.
+
 ## [0.2.0] - 2026-06-10
 
 ### Open WebUI / OpenAI compatibility

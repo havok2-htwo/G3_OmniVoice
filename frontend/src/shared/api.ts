@@ -413,7 +413,7 @@ function buildHeaders(adminKey?: string, headers: HeadersInit = {}) {
   return nextHeaders;
 }
 
-export async function apiFetch<T>(url: string, options: RequestInit & { adminKey?: string; responseType?: "json" | "blob" | "text" } = {}): Promise<T> {
+export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"> & { adminKey?: string; responseType?: "json" | "blob" | "text"; body?: unknown } = {}): Promise<T> {
   const { adminKey, responseType = "json", headers = {}, body, ...rest } = options;
   const nextHeaders = buildHeaders(adminKey, headers);
   const requestInit: RequestInit = {

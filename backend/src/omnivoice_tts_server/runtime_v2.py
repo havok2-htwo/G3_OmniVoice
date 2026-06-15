@@ -411,6 +411,17 @@ class OmniVoiceSynthesizer:
 
     def _resolve_model_source(self, model_id: str) -> tuple[str, dict[str, Any]]:
         self.settings.models_root_dir.mkdir(parents=True, exist_ok=True)
+        # Custom finetuned checkpoints are addressed as 'local/<dirname>' and live under
+        # models_root_dir/<dirname> (a full HF-format dir written by the omnivoice trainer's
+        # save_pretrained). Resolving to that dir forces ensure_model() to reload real weights
+        # instead of reusing the resident base checkpoint.
+        if model_id.startswith('local/'):
+            custom_dir = self.settings.models_root_dir / model_id[len('local/'):]
+            if (custom_dir / 'config.json').exists():
+                return str(custom_dir), {}
+            raise RuntimeError(
+                f'Custom model {model_id} not found at {custom_dir} (missing config.json).'
+            )
         local_dir = self.settings.models_root_dir / 'OmniVoice'
         if local_dir.exists():
             return str(local_dir), {}

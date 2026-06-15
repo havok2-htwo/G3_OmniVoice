@@ -15,6 +15,8 @@ from .api.router_v2 import router as api_router
 from .capacity import capacity_summary
 from .config import Settings, get_settings
 from .domain.state import InMemoryStore
+from .finetune import FinetuneService, FinetuneTrainer
+from .finetune.registry import seed_supported_models
 from .runtime_v2 import build_synthesizer
 from .security import bootstrap_admin_key, setup_startup_admin_key
 from .services_v2 import (
@@ -123,6 +125,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         transcription_service = TranscriptionService(settings)
         benchmark_service = BenchmarkService(store, queue_service, events, settings)
         wer_benchmark_service = WerBenchmarkService(store, queue_service, transcription_service, events, settings)
+        finetune_service = FinetuneService(store, queue_service, transcription_service, wer_benchmark_service, events, settings)
+        # Re-seed the model list with any promoted custom finetune checkpoints so they are
+        # selectable and the existing model-ops endpoints can load them.
+        seed_supported_models(settings)
+        finetune_trainer = FinetuneTrainer(store, settings, events, synthesizer)
         app.state.settings = settings
         app.state.store = store
         app.state.events = events
@@ -132,6 +139,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.transcription_service = transcription_service
         app.state.benchmark_service = benchmark_service
         app.state.wer_benchmark_service = wer_benchmark_service
+        app.state.finetune_service = finetune_service
+        app.state.finetune_trainer = finetune_trainer
         bootstrap_admin_key(store, settings)
         store.save_secrets(settings.data_dir)
         setup_startup_admin_key(app, settings)

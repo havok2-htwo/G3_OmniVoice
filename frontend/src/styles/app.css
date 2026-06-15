@@ -963,3 +963,40 @@ input[type="checkbox"] {
     font-size: clamp(2.1rem, 11vw, 3.3rem);
   }
 }
+
+/* Finetune admin tabs + progress (data generation / training) */
+.ft-tab-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 4px;
+}
+.ft-tab {
+  padding: 9px 18px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+.ft-tab:hover { color: var(--text); }
+.ft-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.ft-progress {
+  width: 100%;
+  height: 18px;
+  background: var(--panel-strong);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.ft-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ffbe7b, var(--accent));
+  transition: width 220ms ease;
+}

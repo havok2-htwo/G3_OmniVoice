@@ -36,6 +36,10 @@ import {
   voiceDesignValueForGroup,
 } from "../shared/voiceDesign";
 import { SYNTH_LANGUAGE_OPTIONS } from "../shared/languages";
+import { DataGenerationPanel } from "./DataGenerationPanel";
+import { TrainingPanel } from "./TrainingPanel";
+
+type AdminTab = "overview" | "finetune_data" | "finetune_train";
 
 function inferTaskType(modelId: string): TaskType {
   if (modelId.endsWith("VoiceDesign")) return "VoiceDesign";
@@ -346,6 +350,7 @@ export function AdminApp() {
   const [quickModel, setQuickModel] = useState("");
   const [quickVoice, setQuickVoice] = useState("");
   const [modelOpsModel, setModelOpsModel] = useState("");
+  const [adminTab, setAdminTab] = useState<AdminTab>("overview");
   const [quickText, setQuickText] = useState("Das neue Adminpanel nutzt dieselbe Streaming-Pipeline wie die offene Demo.");
   const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
@@ -1246,9 +1251,24 @@ export function AdminApp() {
         </div>
       </section>
 
+      <nav className="ft-tab-rail">
+        <button type="button" className={`ft-tab ${adminTab === "overview" ? "active" : ""}`} onClick={() => setAdminTab("overview")}>Overview</button>
+        <button type="button" className={`ft-tab ${adminTab === "finetune_data" ? "active" : ""}`} onClick={() => setAdminTab("finetune_data")}>Data Generation</button>
+        <button type="button" className={`ft-tab ${adminTab === "finetune_train" ? "active" : ""}`} onClick={() => setAdminTab("finetune_train")}>Training</button>
+      </nav>
+
       {message ? <div className="message success">{message}</div> : null}
       {error ? <div className="message error">{error}</div> : null}
 
+      {adminTab === "finetune_data" ? (
+        <DataGenerationPanel adminKey={adminKey} voices={voices} onMessage={setMessage} onError={setError} />
+      ) : null}
+
+      {adminTab === "finetune_train" ? (
+        <TrainingPanel adminKey={adminKey} onMessage={setMessage} onError={setError} />
+      ) : null}
+
+      {adminTab === "overview" ? (
       <section className="widget-grid">
         <section className="widget span-12"><div className="widget-header"><h2>Performance Graph</h2></div>
           <div className="field-grid four">
@@ -1685,6 +1705,7 @@ export function AdminApp() {
           <div className="job-list">{snapshot.jobs.map((job) => <article key={job.job_id} className="job-card"><strong>{job.input_preview}</strong><div className="inline-pills"><span className={`pill ${job.status === "completed" ? "active" : ""}`}>{job.status}</span><span className="pill">{job.model || "-"}</span><span className="pill">{job.voice || "-"}</span><span className="pill">{formatMs(job.metrics.ttfa_ms)}</span></div><div className="button-row">{job.status === "completed" ? <button className="secondary-button" type="button" onClick={() => void handleLoadJobAudio(job.job_id)}>MP3</button> : null}<button className="ghost-button" type="button" onClick={() => void handleDeleteJob(job.job_id)}>{job.status === "completed" ? "Entfernen" : "Stornieren"}</button></div>{jobAudioUrls[job.job_id] ? <><audio controls src={jobAudioUrls[job.job_id]} /><div className="button-row"><a className="secondary-button" href={jobAudioUrls[job.job_id]} download={`${job.job_id}.mp3`}>MP3 herunterladen</a></div></> : null}</article>)}</div>
         </section>
       </section>
+      ) : null}
     </main>
   );
 }

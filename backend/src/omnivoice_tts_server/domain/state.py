@@ -143,6 +143,10 @@ class InMemoryStore:
         self.benchmark_runs: dict[str, Any] = {}
         self.wer_benchmark_runs: dict[str, Any] = {}
         self.wer_sentence_cache: dict[str, dict[str, Any]] = {}
+        # Finetune data-generation + training runs (kept in-memory like benchmark_runs;
+        # the heavy artifacts live on disk under data/finetune/, not here).
+        self.finetune_runs: dict[str, Any] = {}
+        self.finetune_train_runs: dict[str, Any] = {}
         self.model_download_jobs: dict[tuple[str, str], dict[str, Any]] = {}
         self.model_download_lock = threading.RLock()
         self.file_lock = threading.RLock()

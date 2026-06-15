@@ -72,10 +72,33 @@ from ..services_v2 import (
     TranscriptionService,
     WerBenchmarkService,
 )
+from ..finetune import FinetuneService, FinetuneTrainer
+from ..finetune.schemas import (
+    CheckpointItem,
+    CheckpointListResponse,
+    ClipDeleteResponse,
+    ClipListResponse,
+    DatagenRunResponse,
+    DatagenStartRequest,
+    DatasetSummaryResponse,
+    DomainCreateRequest,
+    DomainGenerateRequest,
+    DomainGenerateResponse,
+    DomainItem,
+    DomainListResponse,
+    DomainUpdateRequest,
+    OkResponse,
+    PromoteRequest,
+    SentenceGenerateRequest,
+    SentenceGenerateResponse,
+    TrainRunResponse,
+    TrainStartRequest,
+)
 
 router = APIRouter()
 health = APIRouter()
 admin = APIRouter(prefix='/api/admin', dependencies=[Depends(require_admin_key)])
+finetune = APIRouter(prefix='/api/admin/finetune', dependencies=[Depends(require_admin_key)])
 
 # Languages OmniVoice can synthesize (the curated UI/WER set); 'Auto' lets the model detect.
 SUPPORTED_LANGUAGES: list[str] = [
@@ -1274,5 +1297,232 @@ async def create_job(request: Request, payload: SpeechRequest) -> SpeechJobCreat
     return SpeechJobCreateResponse(job_id=job.job_id, status=job.status, queue_position=job.queue_position, eta_ms=job.eta_ms)
 
 
+# --- Finetune (admin-gated): data generation + human-eval (phase 1) ---------
+
+def _finetune(request: Request) -> FinetuneService:
+    return request.app.state.finetune_service
+
+
+@finetune.get('/domains', response_model=DomainListResponse)
+async def finetune_list_domains(request: Request) -> DomainListResponse:
+    return DomainListResponse(domains=_finetune(request).list_domains())
+
+
+@finetune.get('/domains/{domain_id}', response_model=DomainItem)
+async def finetune_domain_detail(request: Request, domain_id: str) -> DomainItem:
+    try:
+        return _finetune(request).get_domain_detail(domain_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Domain not found') from exc
+
+
+@finetune.post('/domains', response_model=DomainItem)
+async def finetune_create_domain(request: Request, payload: DomainCreateRequest) -> DomainItem:
+    try:
+        return _finetune(request).create_domain(payload.name, payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@finetune.put('/domains/{domain_id}', response_model=DomainItem)
+async def finetune_update_domain(request: Request, domain_id: str, payload: DomainUpdateRequest) -> DomainItem:
+    try:
+        return _finetune(request).update_domain(domain_id, payload.name, payload.description)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Domain not found') from exc
+
+
+@finetune.delete('/domains/{domain_id}', response_model=OkResponse)
+async def finetune_delete_domain(request: Request, domain_id: str) -> OkResponse:
+    if not _finetune(request).delete_domain(domain_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Domain not found')
+    return OkResponse(ok=True)
+
+
+@finetune.post('/domains/generate', response_model=DomainGenerateResponse)
+async def finetune_generate_domains(request: Request, payload: DomainGenerateRequest) -> DomainGenerateResponse:
+    return await _finetune(request).generate_domains(payload)
+
+
+@finetune.post('/domains/{domain_id}/sentences', response_model=SentenceGenerateResponse)
+async def finetune_generate_sentences(request: Request, domain_id: str, payload: SentenceGenerateRequest) -> SentenceGenerateResponse:
+    try:
+        return await _finetune(request).generate_sentences(domain_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Domain not found') from exc
+
+
+@finetune.post('/generate', response_model=DatagenRunResponse)
+async def finetune_start_generate(request: Request, payload: DatagenStartRequest) -> DatagenRunResponse:
+    try:
+        return await _finetune(request).start_datagen(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@finetune.get('/generate/status', response_model=DatagenRunResponse)
+async def finetune_generate_status(request: Request, run_id: str | None = None) -> DatagenRunResponse:
+    run = _finetune(request).get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No finetune run found')
+    return run
+
+
+@finetune.post('/generate/{run_id}/cancel', response_model=OkResponse)
+async def finetune_cancel_generate(request: Request, run_id: str) -> OkResponse:
+    if not _finetune(request).cancel_run(run_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Run not found')
+    return OkResponse(ok=True, detail='Cancellation requested.')
+
+
+@finetune.get('/generate/stream')
+async def finetune_generate_stream(request: Request) -> StreamingResponse:
+    events: EventHub = request.app.state.events
+    service = _finetune(request)
+    queue = await events.subscribe()
+
+    async def iterator() -> Any:
+        try:
+            run = service.get_run()
+            if run is not None:
+                yield EventHub.encode_sse('finetune.progress', run.model_dump(mode='json'))
+            while True:
+                if await request.is_disconnected():
+                    break
+                interval_seconds = max(0.25, min(float(request.app.state.settings.frontend_poll_interval_ms) / 1000.0, 5.0))
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                run = service.get_run()
+                if run is not None:
+                    yield EventHub.encode_sse('finetune.progress', run.model_dump(mode='json'))
+        finally:
+            events.unsubscribe(queue)
+
+    return StreamingResponse(iterator(), media_type='text/event-stream')
+
+
+@finetune.get('/clips', response_model=ClipListResponse)
+async def finetune_list_clips(request: Request, voice: str | None = None) -> ClipListResponse:
+    return _finetune(request).list_clips(voice)
+
+
+@finetune.get('/clips/{clip_id}/audio')
+async def finetune_clip_audio(request: Request, clip_id: str, format: str | None = None) -> Response:
+    service = _finetune(request)
+    try:
+        path = service.clip_wav_path(clip_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid clip id') from exc
+    if not path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Clip not found')
+    return _audio_response(path.read_bytes(), source_media_type='audio/wav', requested_format=format, filename_stem=path.stem)
+
+
+@finetune.delete('/clips/{clip_id}', response_model=ClipDeleteResponse)
+async def finetune_delete_clip(request: Request, clip_id: str) -> ClipDeleteResponse:
+    service = _finetune(request)
+    try:
+        removed = service.delete_clip(clip_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid clip id') from exc
+    if not removed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Clip not found')
+    return ClipDeleteResponse(ok=True, removed=removed)
+
+
+@finetune.get('/dataset/summary', response_model=DatasetSummaryResponse)
+async def finetune_dataset_summary(request: Request) -> DatasetSummaryResponse:
+    return _finetune(request).dataset_summary()
+
+
+# --- Finetune training (phase 2) -------------------------------------------
+
+def _trainer(request: Request) -> FinetuneTrainer:
+    return request.app.state.finetune_trainer
+
+
+@finetune.post('/train', response_model=TrainRunResponse)
+async def finetune_start_training(request: Request, payload: TrainStartRequest) -> TrainRunResponse:
+    try:
+        return await _trainer(request).start_training(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@finetune.get('/train/status', response_model=TrainRunResponse)
+async def finetune_train_status(request: Request, run_id: str | None = None) -> TrainRunResponse:
+    run = _trainer(request).get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No training run found')
+    return run
+
+
+@finetune.post('/train/{run_id}/cancel', response_model=OkResponse)
+async def finetune_cancel_training(request: Request, run_id: str) -> OkResponse:
+    if not _trainer(request).cancel_run(run_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Run not found')
+    return OkResponse(ok=True, detail='Cancellation requested.')
+
+
+@finetune.post('/train/{run_id}/promote', response_model=CheckpointItem)
+async def finetune_promote_training(request: Request, run_id: str, payload: PromoteRequest) -> CheckpointItem:
+    trainer = _trainer(request)
+    try:
+        item = trainer.promote_run(run_id, payload.name)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Run or checkpoint not found') from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    # The registry is the source of truth for custom models and reseeds supported_models on
+    # startup; no runtime-settings write needed here (supported_models is not a persisted field).
+    await request.app.state.events.publish('dashboard.snapshot', {'reason': 'finetune.promoted', 'model': item.model_id})
+    return item
+
+
+@finetune.get('/train/stream')
+async def finetune_train_stream(request: Request) -> StreamingResponse:
+    events: EventHub = request.app.state.events
+    trainer = _trainer(request)
+    queue = await events.subscribe()
+
+    async def iterator() -> Any:
+        try:
+            run = trainer.get_run()
+            if run is not None:
+                yield EventHub.encode_sse('finetune.train', run.model_dump(mode='json'))
+            while True:
+                if await request.is_disconnected():
+                    break
+                interval_seconds = max(0.25, min(float(request.app.state.settings.frontend_poll_interval_ms) / 1000.0, 5.0))
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=interval_seconds)
+                except asyncio.TimeoutError:
+                    pass
+                run = trainer.get_run()
+                if run is not None:
+                    yield EventHub.encode_sse('finetune.train', run.model_dump(mode='json'))
+        finally:
+            events.unsubscribe(queue)
+
+    return StreamingResponse(iterator(), media_type='text/event-stream')
+
+
+@finetune.get('/checkpoints', response_model=CheckpointListResponse)
+async def finetune_list_checkpoints(request: Request) -> CheckpointListResponse:
+    return _trainer(request).list_checkpoints()
+
+
+@finetune.delete('/checkpoints/{checkpoint_id}', response_model=OkResponse)
+async def finetune_delete_checkpoint(request: Request, checkpoint_id: str) -> OkResponse:
+    if not _trainer(request).delete_checkpoint(checkpoint_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Checkpoint not found')
+    save_runtime_settings(request.app.state.settings)
+    await request.app.state.events.publish('dashboard.snapshot', {'reason': 'finetune.checkpoint_deleted'})
+    return OkResponse(ok=True)
+
+
 router.include_router(health)
 router.include_router(admin)
+router.include_router(finetune)

@@ -1,0 +1,48 @@
+# --- VCS / IDE ---
+.git
+.gitignore
+.vscode
+.idea
+
+# --- Local Python / conda envs & caches ---
+.conda/
+.conda-env/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.uv-cache/
+
+# --- Frontend deps & prebuilt output (rebuilt inside the image) ---
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.vite/
+
+# --- Large binaries: models are volume-mounted, never baked in ---
+models/
+test-models/
+
+# --- Runtime state (mounted as a volume) ---
+data/
+artifacts/
+uploads/
+.tmp/
+tmp/
+temp/
+*.log
+
+# --- Windows launchers / local setup not used in the container ---
+*.bat
+install.ps1
+
+# --- Docs / misc ---
+docs/
+*.md
+!backend/README.md
+.DS_Store
+Thumbs.db

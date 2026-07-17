@@ -405,12 +405,10 @@ export class ApiError extends Error {
   }
 }
 
-function buildHeaders(adminKey?: string, headers: HeadersInit = {}) {
-  const nextHeaders = new Headers(headers);
-  if (adminKey?.trim()) {
-    nextHeaders.set("X-Admin-Key", adminKey.trim());
-  }
-  return nextHeaders;
+// Admin auth is a same-origin httpOnly session cookie now. The adminKey argument is kept
+// for signature compatibility with existing callers but no longer sets a header.
+function buildHeaders(_adminKey?: string, headers: HeadersInit = {}) {
+  return new Headers(headers);
 }
 
 export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"> & { adminKey?: string; responseType?: "json" | "blob" | "text"; body?: unknown } = {}): Promise<T> {
@@ -418,6 +416,7 @@ export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"
   const nextHeaders = buildHeaders(adminKey, headers);
   const requestInit: RequestInit = {
     ...rest,
+    credentials: "include",
     headers: nextHeaders,
   };
 
@@ -467,6 +466,7 @@ export async function streamNdjson(
 
   const response = await fetch(url, {
     method: "POST",
+    credentials: "include",
     headers,
     body: JSON.stringify(options.body ?? {}),
     signal: options.signal,
@@ -525,7 +525,7 @@ export async function streamSse(
   },
 ) {
   const headers = buildHeaders(options.adminKey);
-  const response = await fetch(url, { headers, signal: options.signal });
+  const response = await fetch(url, { credentials: "include", headers, signal: options.signal });
   if (!response.ok) {
     const text = await response.text();
     throw new ApiError(text || "SSE request failed", response.status);
@@ -672,4 +672,61 @@ export function clearStoredAdminKey() {
   } catch {
     // ignore storage errors
   }
+}
+
+// --- Auth (username/password session) + client API keys ---
+export interface WhoAmI {
+  username: string;
+  must_change_password: boolean;
+}
+
+export interface ApiKeyUsage {
+  total_seconds_processed: number;
+  request_count: number;
+  last_used_at: string | null;
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  alias: string;
+  created_at: string | null;
+  usage: ApiKeyUsage;
+}
+
+export interface CreatedApiKey {
+  id: string;
+  alias: string;
+  created_at: string;
+  token: string;
+}
+
+export async function login(username: string, password: string) {
+  return apiFetch<WhoAmI>("/api/admin/auth/login", { method: "POST", body: { username, password } });
+}
+
+export async function logout() {
+  return apiFetch<{ ok: boolean }>("/api/admin/auth/logout", { method: "POST" });
+}
+
+export async function whoami() {
+  return apiFetch<WhoAmI>("/api/admin/auth/whoami", { method: "GET" });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string) {
+  return apiFetch<{ ok: boolean; must_change_password: boolean }>("/api/admin/auth/change-password", {
+    method: "POST",
+    body: { current_password: currentPassword, new_password: newPassword },
+  });
+}
+
+export async function listApiKeys() {
+  return apiFetch<{ keys: ApiKeyInfo[] }>("/api/admin/api-keys", { method: "GET" });
+}
+
+export async function createApiKey(alias: string) {
+  return apiFetch<CreatedApiKey>("/api/admin/api-keys", { method: "POST", body: { alias } });
+}
+
+export async function deleteApiKey(id: string) {
+  return apiFetch<{ ok: boolean }>(`/api/admin/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

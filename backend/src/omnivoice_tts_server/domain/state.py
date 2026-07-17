@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import secrets
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -10,7 +12,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..passwords import build_pbkdf2_hash, verify_pbkdf2_hash
 from .models import JobStatus, SpeechRequest
+
+# --- auth configuration ---
+SESSION_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin"
+API_KEY_PREFIX = "omnivoice_tts"
+SECRETS_VERSION = 2
+
 
 def _json_load(path: Path) -> dict[str, Any] | list[Any]:
     if not path.exists():
@@ -27,6 +38,23 @@ def utcnow() -> datetime:
 def new_id(prefix: str) -> str:
     return f'{prefix}_{uuid4().hex[:12]}'
 
+def hash_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+def generate_api_key() -> str:
+    return f'{API_KEY_PREFIX}_{secrets.token_urlsafe(24)}'
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
 
 @dataclass
 class ApiKeyRecord:
@@ -36,6 +64,9 @@ class ApiKeyRecord:
     created_at: datetime
     last_used_at: datetime | None = None
     disabled: bool = False
+    alias: str = ""
+    total_seconds_processed: float = 0.0
+    request_count: int = 0
 
 
 @dataclass
@@ -108,6 +139,7 @@ class JobRecord:
     sample_rate: int = 24_000
     sentences_total: int = 0
     owner_scope: str = 'public'
+    api_key_id: str | None = None
 
     def preview(self, length: int = 80) -> str:
         text = (self.request.input or '').strip()
@@ -131,6 +163,9 @@ class InMemoryStore:
         self.models_loaded: set[str] = set()
         self.active_model: str | None = None
         self.api_keys: dict[str, ApiKeyRecord] = {}
+        self.users: dict[str, dict[str, Any]] = {}
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.data_dir: Path | None = None
         self.voice_profiles: dict[str, VoiceProfileRecord] = {}
         self.event_subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
         self.completed_job_metrics: deque[dict[str, float]] = deque(maxlen=128)
@@ -151,39 +186,260 @@ class InMemoryStore:
         self.model_download_lock = threading.RLock()
         self.file_lock = threading.RLock()
 
+    def _load_api_key(self, item: dict[str, Any]) -> None:
+        usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
+        self.api_keys[item["key_id"]] = ApiKeyRecord(
+            key_id=item["key_id"],
+            name=item.get("name", "client"),
+            key_hash=item["key_hash"],
+            created_at=_parse_iso(item.get("created_at")) or utcnow(),
+            last_used_at=_parse_iso(usage.get("last_used_at")) or _parse_iso(item.get("last_used_at")),
+            disabled=item.get("disabled", False),
+            alias=item.get("alias") or item.get("name") or "",
+            total_seconds_processed=float(usage.get("total_seconds_processed") or 0.0),
+            request_count=int(usage.get("request_count") or 0),
+        )
+
+    @staticmethod
+    def _load_user(username: str, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "username": item.get("username") or username,
+            "password_hash": item.get("password_hash", ""),
+            "must_change_password": bool(item.get("must_change_password", False)),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+            "last_login_at": item.get("last_login_at"),
+        }
+
     def load_secrets(self, data_dir: Path) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = data_dir
         secrets_path = data_dir / "server_secrets.json"
         with self.file_lock:
             payload = _json_load(secrets_path)
-            if isinstance(payload, dict):
-                for key, item in payload.items():
+            if not isinstance(payload, dict):
+                payload = {}
+            self.users = {}
+            self.sessions = {}
+            self.api_keys = {}
+
+            if "version" not in payload:
+                # Legacy flat {key_id: ApiKeyRecord}: drop the implicit admin record (its
+                # token is obsolete; admin is now a user) and keep the rest as client keys.
+                for item in payload.values():
+                    if isinstance(item, dict) and "key_id" in item and item.get("name") != "admin":
+                        self._load_api_key(item)
+            else:
+                for username, item in (payload.get("users") or {}).items():
+                    if isinstance(item, dict):
+                        self.users[username] = self._load_user(username, item)
+                for token_hash, item in (payload.get("sessions") or {}).items():
+                    if isinstance(item, dict):
+                        self.sessions[token_hash] = {
+                            "username": item.get("username"),
+                            "created_at": item.get("created_at"),
+                            "expires_at": item.get("expires_at"),
+                            "last_seen_at": item.get("last_seen_at"),
+                        }
+                for item in (payload.get("api_keys") or {}).values():
                     if isinstance(item, dict) and "key_id" in item:
-                        last_used = item.get("last_used_at")
-                        self.api_keys[item["key_id"]] = ApiKeyRecord(
-                            key_id=item["key_id"],
-                            name=item["name"],
-                            key_hash=item["key_hash"],
-                            created_at=datetime.fromisoformat(item["created_at"]),
-                            last_used_at=datetime.fromisoformat(last_used) if last_used else None,
-                            disabled=item.get("disabled", False)
-                        )
+                        self._load_api_key(item)
+
+            if not self.users:
+                self._seed_default_admin()
+            self._prune_sessions()
+            self.save_secrets(data_dir)
 
     def save_secrets(self, data_dir: Path) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
         secrets_path = data_dir / "server_secrets.json"
         with self.file_lock:
-            payload = {}
-            for record in self.api_keys.values():
-                payload[record.key_id] = {
-                    "key_id": record.key_id,
-                    "name": record.name,
-                    "key_hash": record.key_hash,
-                    "created_at": record.created_at.isoformat(),
-                    "last_used_at": record.last_used_at.isoformat() if record.last_used_at else None,
-                    "disabled": record.disabled
-                }
+            payload = {
+                "version": SECRETS_VERSION,
+                "users": dict(self.users),
+                "sessions": dict(self.sessions),
+                "api_keys": {
+                    rec.key_id: {
+                        "key_id": rec.key_id,
+                        "name": rec.name,
+                        "key_hash": rec.key_hash,
+                        "alias": rec.alias,
+                        "created_at": rec.created_at.isoformat(),
+                        "usage": {
+                            "total_seconds_processed": round(float(rec.total_seconds_processed), 3),
+                            "request_count": int(rec.request_count),
+                            "last_used_at": rec.last_used_at.isoformat() if rec.last_used_at else None,
+                        },
+                    }
+                    for rec in self.api_keys.values()
+                },
+            }
             _json_dump(secrets_path, payload)
+
+    # ---- auth: users, sessions, client api keys ----
+    def _persist(self) -> None:
+        if self.data_dir is not None:
+            self.save_secrets(self.data_dir)
+
+    @staticmethod
+    def _make_user(username: str, password: str, *, must_change: bool) -> dict[str, Any]:
+        stamp = utcnow().isoformat()
+        return {
+            "username": username,
+            "password_hash": build_pbkdf2_hash(password),
+            "must_change_password": must_change,
+            "created_at": stamp,
+            "updated_at": stamp,
+            "last_login_at": None,
+        }
+
+    def _seed_default_admin(self) -> None:
+        self.users[DEFAULT_ADMIN_USERNAME] = self._make_user(
+            DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD, must_change=True
+        )
+
+    def _prune_sessions(self) -> None:
+        now = utcnow()
+        expired = [
+            th for th, s in self.sessions.items()
+            if (_parse_iso(s.get("expires_at")) is not None and now > _parse_iso(s.get("expires_at")))
+        ]
+        for th in expired:
+            self.sessions.pop(th, None)
+
+    def verify_user(self, username: str, password: str) -> dict[str, Any] | None:
+        username = (username or "").strip().lower()
+        if not username or not password:
+            return None
+        with self.file_lock:
+            user = self.users.get(username)
+            if not user or not verify_pbkdf2_hash(password, user.get("password_hash", "")):
+                return None
+            return dict(user)
+
+    def touch_login(self, username: str) -> None:
+        with self.file_lock:
+            user = self.users.get(username)
+            if user:
+                user["last_login_at"] = utcnow().isoformat()
+                self._persist()
+
+    def set_password(self, username: str, new_password: str) -> bool:
+        username = (username or "").strip().lower()
+        with self.file_lock:
+            user = self.users.get(username)
+            if not user:
+                return False
+            user["password_hash"] = build_pbkdf2_hash(new_password)
+            user["must_change_password"] = False
+            user["updated_at"] = utcnow().isoformat()
+            for th in [t for t, s in self.sessions.items() if s.get("username") == username]:
+                self.sessions.pop(th, None)
+            self._persist()
+            return True
+
+    def create_session(self, username: str) -> str:
+        raw = secrets.token_urlsafe(32)
+        with self.file_lock:
+            self.sessions[hash_token(raw)] = {
+                "username": username,
+                "created_at": utcnow().isoformat(),
+                "expires_at": (utcnow() + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat(),
+                "last_seen_at": utcnow().isoformat(),
+            }
+            self._persist()
+        return raw
+
+    def get_session(self, raw_token: str | None) -> dict[str, Any] | None:
+        if not raw_token:
+            return None
+        token_hash = hash_token(raw_token)
+        with self.file_lock:
+            session = self.sessions.get(token_hash)
+            if not session:
+                return None
+            expires = _parse_iso(session.get("expires_at"))
+            if expires is not None and utcnow() > expires:
+                self.sessions.pop(token_hash, None)
+                self._persist()
+                return None
+            user = self.users.get(session.get("username"))
+            if not user:
+                return None
+            return {"username": user["username"], "must_change_password": bool(user.get("must_change_password"))}
+
+    def delete_session(self, raw_token: str | None) -> None:
+        if not raw_token:
+            return
+        with self.file_lock:
+            if self.sessions.pop(hash_token(raw_token), None) is not None:
+                self._persist()
+
+    def list_api_keys(self) -> list[dict[str, Any]]:
+        with self.file_lock:
+            out = [
+                {
+                    "id": rec.key_id,
+                    "alias": rec.alias or rec.name,
+                    "created_at": rec.created_at.isoformat(),
+                    "usage": {
+                        "total_seconds_processed": round(float(rec.total_seconds_processed), 3),
+                        "request_count": int(rec.request_count),
+                        "last_used_at": rec.last_used_at.isoformat() if rec.last_used_at else None,
+                    },
+                }
+                for rec in self.api_keys.values()
+            ]
+        out.sort(key=lambda r: r["created_at"])
+        return out
+
+    def has_api_keys(self) -> bool:
+        return len(self.api_keys) > 0
+
+    def create_api_key(self, alias: str) -> dict[str, Any]:
+        alias = (alias or "").strip() or "Unnamed key"
+        raw = generate_api_key()
+        key_id = new_id("key")
+        created = utcnow()
+        with self.file_lock:
+            self.api_keys[key_id] = ApiKeyRecord(
+                key_id=key_id,
+                name="client",
+                key_hash=hash_token(raw),
+                created_at=created,
+                alias=alias,
+            )
+            self._persist()
+        return {"id": key_id, "alias": alias, "created_at": created.isoformat(), "token": raw}
+
+    def delete_api_key(self, key_id: str) -> bool:
+        with self.file_lock:
+            removed = self.api_keys.pop(key_id, None) is not None
+            if removed:
+                self._persist()
+            return removed
+
+    def match_api_key(self, raw_key: str | None) -> str | None:
+        if not raw_key:
+            return None
+        provided = hash_token(raw_key.strip())
+        with self.file_lock:
+            for rec in self.api_keys.values():
+                if not rec.disabled and secrets.compare_digest(rec.key_hash or "", provided):
+                    return rec.key_id
+        return None
+
+    def record_api_key_usage(self, key_id: str | None, audio_seconds: float) -> None:
+        if not key_id:
+            return
+        with self.file_lock:
+            rec = self.api_keys.get(key_id)
+            if not rec:
+                return
+            rec.total_seconds_processed = round(float(rec.total_seconds_processed) + float(audio_seconds or 0.0), 3)
+            rec.request_count = int(rec.request_count) + 1
+            rec.last_used_at = utcnow()
+            self._persist()
 
     def load_voices(self, data_dir: Path) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)

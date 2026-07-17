@@ -66,9 +66,6 @@ class Settings(BaseSettings):
     app_name: str = 'G3_OmniVoice Server'
     host: str = '0.0.0.0'
     port: int = 8091
-    admin_api_key: str = Field(default='dev-admin-key')
-    startup_admin_key: str = ''
-    startup_admin_key_ttl_seconds: int = Field(default=300, ge=1, le=3600)
     whisper_base_url: str | None = 'http://192.168.0.200:7861'
     whisper_path: str = ''
     vllm_base_url: str = 'http://192.168.20.126:8000'

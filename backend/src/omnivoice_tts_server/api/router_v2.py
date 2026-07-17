@@ -13,13 +13,11 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from ..audio_export import wav_to_mp3
 from ..config import save_runtime_settings
 from ..domain.models import (
-    AdminKeyMetadata,
-    AdminKeyResponse,
-    AdminKeyRotateResponse,
     BatchSnapshot,
     BenchmarkRunCreateRequest,
     BenchmarkRunResponse,
@@ -58,7 +56,14 @@ from ..domain.models import (
 )
 from ..domain.state import VoiceProfileRecord, new_id, utcnow
 from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID, normalize_runtime_device, query_runtime_devices
-from ..security import get_admin_record, require_admin_key, rotate_admin_key
+from ..security import (
+    SESSION_COOKIE_NAME,
+    authorize_api_key,
+    clear_session_cookie,
+    require_admin,
+    require_session,
+    set_session_cookie,
+)
 from ..capacity import capacity_summary as _capacity_summary
 from ..presets import delete_preset as _delete_preset
 from ..presets import list_presets as _list_presets
@@ -97,8 +102,22 @@ from ..finetune.schemas import (
 
 router = APIRouter()
 health = APIRouter()
-admin = APIRouter(prefix='/api/admin', dependencies=[Depends(require_admin_key)])
-finetune = APIRouter(prefix='/api/admin/finetune', dependencies=[Depends(require_admin_key)])
+admin = APIRouter(prefix='/api/admin', dependencies=[Depends(require_admin)])
+finetune = APIRouter(prefix='/api/admin/finetune', dependencies=[Depends(require_admin)])
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordPayload(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class CreateApiKeyPayload(BaseModel):
+    alias: str = ''
 
 # Languages OmniVoice can synthesize (the curated UI/WER set); 'Auto' lets the model detect.
 SUPPORTED_LANGUAGES: list[str] = [
@@ -575,16 +594,6 @@ def _job_detail(request: Request, job_id: str) -> JobDetailResponse:
     )
 
 
-def _admin_key_metadata(request: Request) -> AdminKeyMetadata:
-    record = get_admin_record(request.app.state.store)
-    return AdminKeyMetadata(
-        key_id=record.key_id,
-        label='Master Admin Key',
-        created_at=record.created_at,
-        last_used_at=record.last_used_at,
-    )
-
-
 def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
     store = request.app.state.store
     stats = request.app.state.stats_service.build_stats(store)
@@ -642,15 +651,14 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
         models=_model_items(request),
         voices=_voice_items(request, include_details=True),
         jobs=jobs,
-        admin_key=_admin_key_metadata(request),
         current_batch=current_batch,
         recent_batches=recent_batches,
     )
 
 
-async def _submit_or_429(queue: QueueService, payload: SpeechRequest, *, owner_scope: str = 'public'):
+async def _submit_or_429(queue: QueueService, payload: SpeechRequest, *, owner_scope: str = 'public', api_key_id: str | None = None):
     try:
-        return await queue.submit(payload, owner_scope=owner_scope)
+        return await queue.submit(payload, owner_scope=owner_scope, api_key_id=api_key_id)
     except QueueSaturatedError as exc:
         # Genuine rate limit -> retryable.
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
@@ -671,23 +679,62 @@ async def healthcheck_api() -> dict[str, bool]:
     return await healthcheck()
 
 
-@admin.get('/keys', response_model=AdminKeyResponse)
-async def get_admin_keys(request: Request) -> AdminKeyResponse:
-    return AdminKeyResponse(admin_key=_admin_key_metadata(request))
+# --- Auth: username/password login backed by an httpOnly session cookie ---
+@router.post('/api/admin/auth/login')
+async def admin_login(payload: LoginPayload, request: Request, response: Response) -> dict[str, Any]:
+    store = request.app.state.store
+    user = store.verify_user(payload.username, payload.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid username or password.')
+    token = store.create_session(user['username'])
+    store.touch_login(user['username'])
+    set_session_cookie(response, request, token)
+    return {'username': user['username'], 'must_change_password': bool(user.get('must_change_password'))}
 
 
-@admin.post('/keys', response_model=AdminKeyRotateResponse)
-async def rotate_keys(request: Request) -> AdminKeyRotateResponse:
-    record, token = rotate_admin_key(request.app.state.store, request.app.state.settings)
-    return AdminKeyRotateResponse(
-        admin_key=AdminKeyMetadata(
-            key_id=record.key_id,
-            label='Master Admin Key',
-            created_at=record.created_at,
-            last_used_at=record.last_used_at,
-        ),
-        token=token,
-    )
+@router.post('/api/admin/auth/logout')
+async def admin_logout(request: Request, response: Response, _: dict = Depends(require_session)) -> dict[str, bool]:
+    request.app.state.store.delete_session(request.cookies.get(SESSION_COOKIE_NAME))
+    clear_session_cookie(response)
+    return {'ok': True}
+
+
+@router.get('/api/admin/auth/whoami')
+async def admin_whoami(ctx: dict = Depends(require_session)) -> dict[str, Any]:
+    return {'username': ctx['username'], 'must_change_password': ctx['must_change_password']}
+
+
+@router.post('/api/admin/auth/change-password')
+async def admin_change_password(
+    payload: ChangePasswordPayload, request: Request, response: Response, ctx: dict = Depends(require_session)
+) -> dict[str, Any]:
+    store = request.app.state.store
+    if not store.verify_user(ctx['username'], payload.current_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Current password is incorrect.')
+    if len(payload.new_password or '') < 4:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Password must be at least 4 characters.')
+    store.set_password(ctx['username'], payload.new_password)
+    token = store.create_session(ctx['username'])
+    set_session_cookie(response, request, token)
+    return {'ok': True, 'must_change_password': False}
+
+
+# --- Client API keys (admin-managed; authorize the public synthesis endpoints) ---
+@admin.get('/api-keys')
+async def list_admin_api_keys(request: Request) -> dict[str, Any]:
+    return {'keys': request.app.state.store.list_api_keys()}
+
+
+@admin.post('/api-keys')
+async def create_admin_api_key(payload: CreateApiKeyPayload, request: Request) -> dict[str, Any]:
+    return request.app.state.store.create_api_key(payload.alias)
+
+
+@admin.delete('/api-keys/{key_id}')
+async def delete_admin_api_key(key_id: str, request: Request) -> dict[str, bool]:
+    if not request.app.state.store.delete_api_key(key_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='API key not found.')
+    return {'ok': True}
 
 
 @admin.get('/settings', response_model=ServerSettingsResponse)
@@ -1190,9 +1237,9 @@ async def list_openai_audio_models(request: Request) -> dict[str, Any]:
 
 
 @router.post('/api/v1/synthesize', response_model=SynthesisResultResponse)
-async def synthesize(request: Request, payload: SpeechRequest) -> SynthesisResultResponse:
+async def synthesize(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> SynthesisResultResponse:
     queue: QueueService = request.app.state.queue_service
-    job = await _submit_or_429(queue, payload.model_copy(update={'stream': False}), owner_scope='public')
+    job = await _submit_or_429(queue, payload.model_copy(update={'stream': False}), owner_scope='public', api_key_id=api_key_id)
     finished = await queue.wait_for_completion(job.job_id)
     if finished.status == JobStatus.cancelled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=finished.error_message or 'Synthesis cancelled')
@@ -1215,9 +1262,9 @@ async def public_job_audio(request: Request, job_id: str, format: str | None = N
 
 
 @router.post('/api/v1/synthesize/stream')
-async def synthesize_stream(request: Request, payload: SpeechRequest) -> StreamingResponse:
+async def synthesize_stream(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> StreamingResponse:
     queue: QueueService = request.app.state.queue_service
-    job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public')
+    job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public', api_key_id=api_key_id)
 
     async def iterator() -> Any:
         disconnected = False
@@ -1247,11 +1294,11 @@ async def synthesize_stream(request: Request, payload: SpeechRequest) -> Streami
 
 
 @router.post('/v1/audio/speech', response_model=None)
-async def speech(request: Request, payload: SpeechRequest) -> Response | StreamingResponse:
+async def speech(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> Response | StreamingResponse:
     queue: QueueService = request.app.state.queue_service
     payload = _coerce_openai_speech_request(request, payload)
     if payload.stream:
-        job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public')
+        job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public', api_key_id=api_key_id)
 
         async def stream_job() -> Any:
             disconnected = False
@@ -1276,7 +1323,7 @@ async def speech(request: Request, payload: SpeechRequest) -> Response | Streami
 
         return StreamingResponse(stream_job(), media_type='audio/pcm')
 
-    job = await _submit_or_429(queue, payload.model_copy(update={'stream': False}), owner_scope='public')
+    job = await _submit_or_429(queue, payload.model_copy(update={'stream': False}), owner_scope='public', api_key_id=api_key_id)
     finished = await queue.wait_for_completion(job.job_id)
     if finished.status == JobStatus.cancelled:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=finished.error_message or 'Synthesis cancelled')
@@ -1291,9 +1338,9 @@ async def speech(request: Request, payload: SpeechRequest) -> Response | Streami
 
 
 @router.post('/v1/jobs', response_model=SpeechJobCreateResponse)
-async def create_job(request: Request, payload: SpeechRequest) -> SpeechJobCreateResponse:
+async def create_job(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> SpeechJobCreateResponse:
     queue: QueueService = request.app.state.queue_service
-    job = await _submit_or_429(queue, payload, owner_scope='public')
+    job = await _submit_or_429(queue, payload, owner_scope='public', api_key_id=api_key_id)
     return SpeechJobCreateResponse(job_id=job.job_id, status=job.status, queue_position=job.queue_position, eta_ms=job.eta_ms)
 
 

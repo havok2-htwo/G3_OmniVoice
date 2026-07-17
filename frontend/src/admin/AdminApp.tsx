@@ -2,18 +2,27 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   apiFetch,
+  changePassword,
   clearStoredAdminKey,
+  createApiKey,
   createWavBlobFromInt16Chunks,
   decodePcm16Base64,
+  deleteApiKey,
   formatDate,
   formatMs,
   formatRealtime,
   formatSeconds,
+  listApiKeys,
+  login,
+  logout,
   readStoredAdminKey,
   streamNdjson,
   streamSse,
+  whoami,
   writeStoredAdminKey,
+  type ApiKeyInfo,
   type BenchmarkRunResponse,
+  type CreatedApiKey,
   type DashboardSnapshot,
   type JobMetrics,
   type MemoryCleanupResponse,
@@ -338,8 +347,19 @@ function MiniGraph({ label, values, color, suffix = "" }: { label: string; value
 }
 
 export function AdminApp() {
-  const [adminKeyInput, setAdminKeyInput] = useState(() => readStoredAdminKey());
-  const [adminKey, setAdminKey] = useState(() => readStoredAdminKey());
+  const [adminKeyInput, setAdminKeyInput] = useState("");
+  const [adminKey, setAdminKey] = useState("");
+  const [bootLoading, setBootLoading] = useState(true);
+  const [loginUsername, setLoginUsername] = useState("admin");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [currentUser, setCurrentUser] = useState("");
+  const [mustChange, setMustChange] = useState(false);
+  const [pwCurrent, setPwCurrent] = useState("");
+  const [pwNew, setPwNew] = useState("");
+  const [pwConfirm, setPwConfirm] = useState("");
+  const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([]);
+  const [newKeyAlias, setNewKeyAlias] = useState("");
+  const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ServerSettings | null>(null);
   const [presets, setPresets] = useState<SettingsPreset[]>([]);
@@ -432,6 +452,40 @@ export function AdminApp() {
       if (audioContextRef.current) void audioContextRef.current.close().catch(() => undefined);
     };
   }, []);
+
+  // Bootstrap: resolve the admin session cookie on mount.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await whoami();
+        if (cancelled) return;
+        setCurrentUser(me.username);
+        setMustChange(me.must_change_password);
+        setAdminKey("session");
+      } catch {
+        if (!cancelled) setAdminKey("");
+      } finally {
+        if (!cancelled) setBootLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (adminKey === "session" && !mustChange) void refreshApiKeys();
+  }, [adminKey, mustChange]);
+
+  async function refreshApiKeys() {
+    try {
+      const result = await listApiKeys();
+      setApiKeys(result.keys);
+    } catch {
+      // ignore (surfaced elsewhere)
+    }
+  }
 
   async function loadSnapshot(key: string) {
     const data = await apiFetch<DashboardSnapshot>("/api/admin/snapshot", { adminKey: key });
@@ -683,18 +737,66 @@ export function AdminApp() {
   }
 
   async function handleAuthenticate() {
-    if (!adminKeyInput.trim()) return;
     setAuthLoading(true);
     setError("");
     try {
-      await loadSnapshot(adminKeyInput.trim());
-      writeStoredAdminKey(adminKeyInput.trim());
-      setAdminKey(adminKeyInput.trim());
+      const me = await login(loginUsername.trim(), loginPassword);
+      setCurrentUser(me.username);
+      setMustChange(me.must_change_password);
+      setLoginPassword("");
+      setAdminKey("session");
       setMessage("Adminpanel verbunden.");
     } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Authentifizierung fehlgeschlagen.");
+      setError(authError instanceof Error ? authError.message : "Login fehlgeschlagen.");
     } finally {
       setAuthLoading(false);
+    }
+  }
+
+  async function handleChangePassword() {
+    setError("");
+    if (pwNew.length < 4) {
+      setError("Passwort muss mindestens 4 Zeichen haben.");
+      return;
+    }
+    if (pwNew !== pwConfirm) {
+      setError("Passwoerter stimmen nicht ueberein.");
+      return;
+    }
+    try {
+      await changePassword(pwCurrent, pwNew);
+      setPwCurrent("");
+      setPwNew("");
+      setPwConfirm("");
+      setMustChange(false);
+      setMessage("Passwort aktualisiert.");
+    } catch (pwError) {
+      setError(pwError instanceof Error ? pwError.message : "Passwortwechsel fehlgeschlagen.");
+    }
+  }
+
+  async function handleCreateApiKey() {
+    setError("");
+    try {
+      const created = await createApiKey(newKeyAlias.trim());
+      setCreatedKey(created);
+      setNewKeyAlias("");
+      setMessage(`API-Key "${created.alias}" erstellt — jetzt kopieren, er wird nur einmal gezeigt.`);
+      await refreshApiKeys();
+    } catch (keyError) {
+      setError(keyError instanceof Error ? keyError.message : "API-Key konnte nicht erstellt werden.");
+    }
+  }
+
+  async function handleDeleteApiKey(id: string, alias: string) {
+    setError("");
+    try {
+      await deleteApiKey(id);
+      setCreatedKey((current) => (current?.id === id ? null : current));
+      setMessage(`API-Key "${alias}" geloescht.`);
+      await refreshApiKeys();
+    } catch (keyError) {
+      setError(keyError instanceof Error ? keyError.message : "API-Key konnte nicht geloescht werden.");
     }
   }
 
@@ -804,20 +906,6 @@ export function AdminApp() {
     } finally {
       if (quickAbortRef.current === controller) quickAbortRef.current = null;
       setQuickRunning(false);
-    }
-  }
-
-  async function handleRotateKey() {
-    if (!adminKey) return;
-    try {
-      const payload = await apiFetch<{ token: string }>("/api/admin/keys", { method: "POST", adminKey });
-      writeStoredAdminKey(payload.token);
-      setAdminKey(payload.token);
-      setAdminKeyInput(payload.token);
-      await copyToClipboard(payload.token);
-      setMessage("Admin-Key rotiert und kopiert.");
-    } catch (rotateError) {
-      setError(rotateError instanceof Error ? rotateError.message : "Key-Rotation fehlgeschlagen.");
     }
   }
 
@@ -1199,30 +1287,94 @@ export function AdminApp() {
     await loadSnapshot(adminKey);
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await logout();
+    } catch {
+      // clear locally regardless
+    }
     clearStoredAdminKey();
     setAdminKey("");
-    setAdminKeyInput("");
+    setCurrentUser("");
+    setMustChange(false);
     setSnapshot(null);
   }
 
-  if (!adminKey || !snapshot || !settingsDraft) {
+  if (bootLoading) {
+    return (
+      <main className="gate-shell">
+        <section className="gate-card">
+          <p className="widget-copy">Laedt...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!adminKey) {
     return (
       <main className="gate-shell">
         <section className="gate-card">
           <p className="eyebrow">Private Access</p>
           <h1>G3_OmniVoice Adminpanel</h1>
-          <p className="widget-copy">Nur das Adminpanel ist geschuetzt. Die Demo bleibt offen.</p>
-          <label className="with-help" title={ADMIN_HELP.adminKey}>
-            Admin-Key
-            <input value={adminKeyInput} onChange={(event) => setAdminKeyInput(event.target.value)} placeholder="omnivoice_tts_..." />
+          <p className="widget-copy">
+            Login mit Benutzername und Passwort. Standardzugang <code>admin</code> / <code>admin</code> &ndash; das
+            Passwort muss beim ersten Login geaendert werden.
+          </p>
+          <label>
+            Benutzername
+            <input value={loginUsername} autoComplete="username" onChange={(event) => setLoginUsername(event.target.value)} placeholder="admin" />
+          </label>
+          <label>
+            Passwort
+            <input type="password" value={loginPassword} autoComplete="current-password" onChange={(event) => setLoginPassword(event.target.value)} placeholder="admin" />
           </label>
           <div className="button-row">
-            <button className="primary-button" type="button" onClick={handleAuthenticate} disabled={authLoading}>
-              {authLoading ? "Pruefe..." : "Adminpanel oeffnen"}
+            <button className="primary-button" type="button" onClick={handleAuthenticate} disabled={authLoading || !loginUsername.trim() || !loginPassword}>
+              {authLoading ? "Pruefe..." : "Anmelden"}
             </button>
-            <a className="ghost-button" href="/demo">Zur Demo</a>
           </div>
+          {error ? <div className="message error">{error}</div> : null}
+        </section>
+      </main>
+    );
+  }
+
+  if (mustChange) {
+    return (
+      <main className="gate-shell">
+        <section className="gate-card">
+          <p className="eyebrow">Security</p>
+          <h1>Passwort aendern</h1>
+          <p className="widget-copy">Angemeldet als {currentUser || "admin"}. Bitte ein neues Passwort setzen.</p>
+          <label>
+            Aktuelles Passwort
+            <input type="password" value={pwCurrent} autoComplete="current-password" onChange={(event) => setPwCurrent(event.target.value)} />
+          </label>
+          <label>
+            Neues Passwort
+            <input type="password" value={pwNew} autoComplete="new-password" onChange={(event) => setPwNew(event.target.value)} />
+          </label>
+          <label>
+            Neues Passwort bestaetigen
+            <input type="password" value={pwConfirm} autoComplete="new-password" onChange={(event) => setPwConfirm(event.target.value)} />
+          </label>
+          <div className="button-row">
+            <button className="primary-button" type="button" onClick={handleChangePassword} disabled={!pwCurrent || !pwNew || !pwConfirm}>
+              Speichern
+            </button>
+            <button className="ghost-button" type="button" onClick={handleLogout}>Abmelden</button>
+          </div>
+          {error ? <div className="message error">{error}</div> : null}
+        </section>
+      </main>
+    );
+  }
+
+  if (!snapshot || !settingsDraft) {
+    return (
+      <main className="gate-shell">
+        <section className="gate-card">
+          <p className="widget-copy">Dashboard laedt...</p>
           {error ? <div className="message error">{error}</div> : null}
         </section>
       </main>
@@ -1245,9 +1397,59 @@ export function AdminApp() {
         </div>
         <div className="button-row">
           <a className="ghost-button" href="/">Landing</a>
-          <a className="secondary-button" href="/demo">Demo</a>
-          <button className="secondary-button" type="button" onClick={handleRotateKey}>Rotate API Key</button>
           <button className="ghost-button" type="button" onClick={handleLogout}>Logout</button>
+        </div>
+      </section>
+
+      <section className="hero-card">
+        <div className="hero-copy" style={{ display: "grid", gap: "24px", gridTemplateColumns: "1fr 1.4fr" }}>
+          <div style={{ display: "grid", gap: "10px", alignContent: "start" }}>
+            <p className="eyebrow">Account</p>
+            <h2>Admin-Zugang</h2>
+            <p className="widget-copy">Angemeldet als <strong>{currentUser || "admin"}</strong>.</p>
+            <label>Aktuelles Passwort<input type="password" value={pwCurrent} onChange={(event) => setPwCurrent(event.target.value)} /></label>
+            <label>Neues Passwort<input type="password" value={pwNew} onChange={(event) => setPwNew(event.target.value)} /></label>
+            <label>Bestaetigen<input type="password" value={pwConfirm} onChange={(event) => setPwConfirm(event.target.value)} /></label>
+            <div className="button-row">
+              <button className="secondary-button" type="button" onClick={handleChangePassword} disabled={!pwCurrent || !pwNew || !pwConfirm}>Passwort aendern</button>
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: "10px", alignContent: "start" }}>
+            <p className="eyebrow">API Keys</p>
+            <h2>Public API</h2>
+            <p className="widget-copy">Ohne Key ist die oeffentliche TTS-API offen. Sobald ein Key existiert, ist <code>X-API-Key</code> Pflicht. Erzeugte Sekunden werden pro Key gezaehlt.</p>
+            {createdKey ? (
+              <div className="message success" style={{ wordBreak: "break-all" }}>
+                <strong>{createdKey.alias}</strong> &ndash; jetzt kopieren (nur einmal sichtbar): <code>{createdKey.token}</code>
+              </div>
+            ) : null}
+            <div className="button-row">
+              <input value={newKeyAlias} onChange={(event) => setNewKeyAlias(event.target.value)} placeholder="Alias, z.B. Key fuer Projekt X" />
+              <button className="secondary-button" type="button" onClick={handleCreateApiKey} disabled={!newKeyAlias.trim()}>Key erstellen</button>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Alias</th><th>Erstellt</th><th>Audio (s)</th><th>Requests</th><th>Zuletzt</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {apiKeys.length === 0 ? (
+                    <tr><td colSpan={6}>Keine API-Keys &ndash; oeffentliche API ist offen.</td></tr>
+                  ) : null}
+                  {apiKeys.map((key) => (
+                    <tr key={key.id}>
+                      <td>{key.alias}</td>
+                      <td>{formatDate(key.created_at)}</td>
+                      <td>{key.usage.total_seconds_processed.toFixed(1)}</td>
+                      <td>{key.usage.request_count}</td>
+                      <td>{formatDate(key.usage.last_used_at)}</td>
+                      <td><button className="ghost-button" type="button" onClick={() => handleDeleteApiKey(key.id, key.alias)}>Loeschen</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 

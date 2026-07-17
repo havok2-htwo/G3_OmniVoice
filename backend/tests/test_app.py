@@ -146,7 +146,7 @@ def test_frontend_dist_is_served() -> None:
     client = make_client(frontend_dist_dir=frontend_dist)
     assert client.get('/').status_code == 200
     assert client.get('/admin').status_code == 200
-    assert client.get('/demo').status_code == 200
+    assert client.get('/demo').status_code == 404
     assert client.get(f'/assets/{asset_file.name}').status_code == 200
     assert client.get('/v1/unknown').status_code == 404
     assert client.get('/api/admin/unknown', headers=auth_headers()).status_code == 404

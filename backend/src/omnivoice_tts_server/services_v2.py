@@ -130,7 +130,7 @@ class QueueService:
             except Exception:
                 pass
 
-    async def submit(self, request: SpeechRequest, *, owner_scope: str = 'public') -> JobRecord:
+    async def submit(self, request: SpeechRequest, *, owner_scope: str = 'public', api_key_id: str | None = None) -> JobRecord:
         text = (request.input or '').strip()
         if not text:
             raise RuntimeError('Missing input text')
@@ -159,6 +159,7 @@ class QueueService:
             created_at=now,
             updated_at=now,
             owner_scope=owner_scope,
+            api_key_id=api_key_id,
             sentences_total=len(sentences),
         )
         job.metrics['sentences_total'] = len(sentences)
@@ -842,6 +843,8 @@ class QueueService:
 
         self.store.total_jobs_completed += 1
         self.store.total_audio_seconds += duration_ms / 1000.0
+        if job.api_key_id:
+            self.store.record_api_key_usage(job.api_key_id, duration_ms / 1000.0)
         self.store.completed_job_metrics.append(job.metrics.copy())
 
         self.store.request_states.pop(job.job_id, None)

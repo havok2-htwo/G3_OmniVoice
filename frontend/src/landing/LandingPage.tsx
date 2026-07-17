@@ -6,15 +6,11 @@ export function LandingPage() {
           <p className="eyebrow">Powered by SONS</p>
           <h1>G3_OmniVoice</h1>
           <p>
-            Eine aufgeraeumte Front fuer OmniVoice mit offenem Demo-Client, Adminpanel
-            und API-Dokumentation.
+            Eine aufgeraeumte Front fuer OmniVoice mit Adminpanel und API-Dokumentation.
           </p>
           <div className="hero-actions">
             <a className="primary-button" href="/admin">
               Adminpanel
-            </a>
-            <a className="secondary-button" href="/demo">
-              Demo oeffnen
             </a>
             <a className="ghost-button" href="/docs">
               API Docs

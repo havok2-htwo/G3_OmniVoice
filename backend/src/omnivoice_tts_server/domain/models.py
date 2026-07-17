@@ -577,6 +577,5 @@ class DashboardSnapshot(BaseModel):
     models: list[ModelInfo] = Field(default_factory=list)
     voices: list[VoiceProfileListItem] = Field(default_factory=list)
     jobs: list[JobListItem] = Field(default_factory=list)
-    admin_key: AdminKeyMetadata
     current_batch: BatchSnapshot | None = None
     recent_batches: list[BatchSnapshot] = Field(default_factory=list)

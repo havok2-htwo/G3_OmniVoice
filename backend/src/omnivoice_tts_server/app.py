@@ -18,7 +18,6 @@ from .domain.state import InMemoryStore
 from .finetune import FinetuneService, FinetuneTrainer
 from .finetune.registry import seed_supported_models
 from .runtime_v2 import build_synthesizer
-from .security import bootstrap_admin_key, setup_startup_admin_key
 from .services_v2 import (
     BenchmarkService,
     EventHub,
@@ -58,7 +57,6 @@ def configure_frontend(app: FastAPI, settings: Settings) -> None:
     frontend_root = settings.frontend_dist_dir.resolve()
     index_file = frontend_root / 'index.html'
     admin_file = frontend_root / 'admin.html'
-    demo_file = frontend_root / 'demo.html'
     assets_dir = frontend_root / 'assets'
 
     if not index_file.exists():
@@ -85,10 +83,6 @@ def configure_frontend(app: FastAPI, settings: Settings) -> None:
     @app.get('/admin', include_in_schema=False)
     async def frontend_admin() -> FileResponse:
         return FileResponse(admin_file if admin_file.exists() else index_file)
-
-    @app.get('/demo', include_in_schema=False)
-    async def frontend_demo() -> FileResponse:
-        return FileResponse(demo_file if demo_file.exists() else index_file)
 
     @app.get('/{full_path:path}', include_in_schema=False)
     async def frontend_spa(full_path: str) -> FileResponse:
@@ -141,9 +135,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.wer_benchmark_service = wer_benchmark_service
         app.state.finetune_service = finetune_service
         app.state.finetune_trainer = finetune_trainer
-        bootstrap_admin_key(store, settings)
-        store.save_secrets(settings.data_dir)
-        setup_startup_admin_key(app, settings)
+        # Users/sessions/api_keys are seeded + pruned by store.load_secrets() above
+        # (default admin/admin on a fresh deploy, forced password change on first login).
         logger.info(
             'startup runtime_backend=%s host=%s port=%s models_root=%s active_model=%s allow_downloads=%s default_voice=%s supported_models=%s',
             settings.runtime_backend,

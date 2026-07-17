@@ -87,6 +87,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 COPY tools/ ./tools/
 
+# Entrypoint prints a temporary startup admin key on boot (like start_server.bat) so a
+# fresh deploy can reach the admin UI when no fixed OMNIVOICE_TTS_ADMIN_API_KEY is set.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 # Run as non-root; pre-own the volume mountpoints so named volumes inherit ownership.
 RUN useradd --create-home --uid 1000 app \
     && mkdir -p /app/models /app/data /app/frontend \
@@ -100,4 +105,5 @@ VOLUME ["/app/models", "/app/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=1800s --retries=5 \
     CMD curl -fsS http://localhost:8091/openapi.json >/dev/null || exit 1
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["python", "-u", "-m", "omnivoice_tts_server.main"]

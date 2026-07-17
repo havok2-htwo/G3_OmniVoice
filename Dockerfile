@@ -39,12 +39,16 @@ ENV PYTHONUNBUFFERED=1 \
     PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256
 
 # System libraries:
-#   ffmpeg      -> audio container decode (imageio-ffmpeg also bundles a binary)
-#   libsndfile1 -> soundfile
-#   curl        -> container HEALTHCHECK
+#   ffmpeg         -> audio container decode (imageio-ffmpeg also bundles a binary)
+#   libsndfile1    -> soundfile
+#   build-essential-> g++/gcc toolchain torch.compile / Inductor needs when compile_model is
+#                     enabled; without it compile silently falls back to eager (suppress_errors),
+#                     so ship it to get the real speedup on GPU.
+#   curl           -> container HEALTHCHECK
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libsndfile1 \
+        build-essential \
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*

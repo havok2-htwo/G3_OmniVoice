@@ -52,13 +52,6 @@ export interface JobRecord {
   error_message?: string | null;
 }
 
-export interface AdminKeyMeta {
-  key_id: string;
-  label: string;
-  created_at: string;
-  last_used_at?: string | null;
-}
-
 export interface ServerSettings {
   model_directory: string;
   default_model: string;
@@ -133,7 +126,6 @@ export interface DashboardSnapshot {
   models: ModelInfo[];
   voices: VoiceItem[];
   jobs: JobRecord[];
-  admin_key: AdminKeyMeta;
   current_batch?: {
     batch_id: string;
     model_id: string;

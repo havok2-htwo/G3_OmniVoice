@@ -15,11 +15,9 @@ import {
   listApiKeys,
   login,
   logout,
-  readStoredAdminKey,
   streamNdjson,
   streamSse,
   whoami,
-  writeStoredAdminKey,
   type ApiKeyInfo,
   type BenchmarkRunResponse,
   type CreatedApiKey,
@@ -226,12 +224,6 @@ function applyOmniVoiceDefaults(settings: ServerSettings): ServerSettings {
   };
 }
 
-async function copyToClipboard(value: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-  }
-}
-
 const SPARK_CHART = {
   width: 260,
   height: 112,
@@ -347,7 +339,6 @@ function MiniGraph({ label, values, color, suffix = "" }: { label: string; value
 }
 
 export function AdminApp() {
-  const [adminKeyInput, setAdminKeyInput] = useState("");
   const [adminKey, setAdminKey] = useState("");
   const [bootLoading, setBootLoading] = useState(true);
   const [loginUsername, setLoginUsername] = useState("admin");
@@ -475,7 +466,9 @@ export function AdminApp() {
   }, []);
 
   useEffect(() => {
-    if (adminKey === "session" && !mustChange) void refreshApiKeys();
+    if (adminKey !== "session" || mustChange) return;
+    void refreshApiKeys();
+    void loadSnapshot(adminKey);
   }, [adminKey, mustChange]);
 
   async function refreshApiKeys() {
@@ -563,7 +556,7 @@ export function AdminApp() {
   }
 
   useEffect(() => {
-    if (!adminKey) return;
+    if (!adminKey || mustChange) return;
     const controller = new AbortController();
     void streamSse("/api/admin/dashboard/stream", {
       adminKey,
@@ -581,30 +574,29 @@ export function AdminApp() {
       if ((streamError as { status?: number }).status === 401) {
         clearStoredAdminKey();
         setAdminKey("");
-        setAdminKeyInput("");
         setSnapshot(null);
       } else {
         setError(streamError instanceof Error ? streamError.message : "Dashboard-Stream getrennt.");
       }
     });
     return () => controller.abort();
-  }, [adminKey]);
+  }, [adminKey, mustChange]);
 
   // Load benchmark/WER history + settings presets once when the key changes (e.g. on page reload).
   useEffect(() => {
-    if (!adminKey) return;
+    if (!adminKey || mustChange) return;
     void loadBenchmarks(adminKey);
     void loadWerBenchmarks(adminKey);
     void loadPresets(adminKey);
     void loadRuntimeDevices(adminKey);
-  }, [adminKey]);
+  }, [adminKey, mustChange]);
 
   // Poll the benchmark endpoints ONLY while a run is actually in progress, and at the
   // configured poll interval. Previously this polled both list endpoints (which return
   // every run's full results[]) every 1000ms unconditionally for as long as a key was
   // set, which flooded the server with ~2 req/sec/tab even when idle.
   useEffect(() => {
-    if (!adminKey) return;
+    if (!adminKey || mustChange) return;
     const active =
       benchmarkBusy ||
       werBenchmarkBusy ||
@@ -617,23 +609,23 @@ export function AdminApp() {
       void loadWerBenchmarks(adminKey);
     }, pollMs);
     return () => window.clearInterval(timer);
-  }, [adminKey, benchmarkBusy, werBenchmarkBusy, benchmarks, werBenchmarks, snapshot?.settings.poll_interval_ms]);
+  }, [adminKey, mustChange, benchmarkBusy, werBenchmarkBusy, benchmarks, werBenchmarks, snapshot?.settings.poll_interval_ms]);
 
   useEffect(() => {
-    if (!adminKey || !modelDownloads.some((model) => model.status === "downloading")) return;
+    if (!adminKey || mustChange || !modelDownloads.some((model) => model.status === "downloading")) return;
     const timer = window.setInterval(() => {
       void loadModelDownloads(adminKey, settingsDraft?.model_directory || "");
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [adminKey, modelDownloads, settingsDraft?.model_directory]);
+  }, [adminKey, mustChange, modelDownloads, settingsDraft?.model_directory]);
 
   useEffect(() => {
-    if (!adminKey || !settingsDraft?.vllm_base_url) return;
+    if (!adminKey || mustChange || !settingsDraft?.vllm_base_url) return;
     const timer = window.setTimeout(() => {
       void loadVllmModels(adminKey, settingsDraft.vllm_base_url);
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [adminKey, settingsDraft?.vllm_base_url]);
+  }, [adminKey, mustChange, settingsDraft?.vllm_base_url]);
 
   const models = snapshot?.models ?? [];
   const voices = snapshot?.voices ?? [];
@@ -1500,15 +1492,6 @@ export function AdminApp() {
               ))}
             </div>
           ) : null}
-        </section>
-
-        <section className="widget span-6"><div className="widget-header"><h2>Admin Key</h2></div>
-          <div className="metric-list">
-            <div className="metric-row"><span>Created</span><strong>{formatDate(snapshot.admin_key.created_at)}</strong></div>
-            <div className="metric-row"><span>Last used</span><strong>{formatDate(snapshot.admin_key.last_used_at)}</strong></div>
-            <div className="metric-row"><span>Current</span><strong>{adminKey.slice(0, 14)}...</strong></div>
-          </div>
-          <div className="button-row"><button className="secondary-button" type="button" onClick={() => void copyToClipboard(adminKey)}>Copy</button></div>
         </section>
 
         <section className="widget span-12">

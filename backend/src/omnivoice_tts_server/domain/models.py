@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -470,6 +470,7 @@ class WerBenchmarkCreateRequest(BaseModel):
     completion_timeout_seconds: int = Field(default=180, ge=1, le=3600)
     random_seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     seed_range: int = Field(default=0, ge=0, le=1024)
+    seed_values: list[Annotated[int, Field(ge=0, le=2_147_483_647)]] | None = Field(default=None, max_length=1025)
     exclusive: bool = True
     request: SpeechRequest = Field(default_factory=SpeechRequest)
 
@@ -524,6 +525,7 @@ class WerBenchmarkRunResponse(BaseModel):
     transcription_concurrency: int
     seed_start: int | None = None
     seed_range: int = 0
+    seed_values: list[int | None] = Field(default_factory=list)
     vllm_base_url: str
     vllm_model: str | None = None
     whisper_base_url: str

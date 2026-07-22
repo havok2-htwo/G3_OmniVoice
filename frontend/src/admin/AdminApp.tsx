@@ -102,6 +102,45 @@ const WER_LANGUAGE_OPTIONS = [
   "한국어",
 ] as const;
 
+const MAX_TTS_SEED = 2_147_483_647;
+
+function parseWerSeedInput(value: string): { randomSeed: number | null; seedValues: number[] | null; error?: string } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { randomSeed: null, seedValues: null };
+  }
+  const parts = trimmed.split(",").map((part) => part.trim());
+  if (parts.length === 1) {
+    if (!/^\d+$/.test(parts[0])) {
+      return { randomSeed: null, seedValues: null, error: "Seed muss eine ganze Zahl sein." };
+    }
+    const seed = Number(parts[0]);
+    if (!Number.isSafeInteger(seed) || seed > MAX_TTS_SEED) {
+      return { randomSeed: null, seedValues: null, error: `Seed muss zwischen 0 und ${MAX_TTS_SEED} liegen.` };
+    }
+    return { randomSeed: seed, seedValues: null };
+  }
+  const seeds: number[] = [];
+  const seen = new Set<number>();
+  for (const part of parts) {
+    if (!part || !/^\d+$/.test(part)) {
+      return { randomSeed: null, seedValues: null, error: "Seed-Liste bitte als ganze Zahlen mit Kommas eingeben, z.B. 8888,8890,2912." };
+    }
+    const seed = Number(part);
+    if (!Number.isSafeInteger(seed) || seed > MAX_TTS_SEED) {
+      return { randomSeed: null, seedValues: null, error: `Alle Seeds muessen zwischen 0 und ${MAX_TTS_SEED} liegen.` };
+    }
+    if (!seen.has(seed)) {
+      seeds.push(seed);
+      seen.add(seed);
+    }
+  }
+  if (seeds.length > 1025) {
+    return { randomSeed: null, seedValues: null, error: "Seed-Liste darf maximal 1025 Werte enthalten." };
+  }
+  return { randomSeed: seeds[0] ?? null, seedValues: seeds };
+}
+
 const ADMIN_HELP = {
   adminKey: "Admin-Key fuer geschuetzte /api/admin Endpoints. Wird lokal im Browser gespeichert.",
   modelOpsModel: "Zielmodell fuer Download, Preload, Warmup, Reload und Default-Speicherung.",
@@ -178,8 +217,8 @@ const ADMIN_HELP = {
   werWords: "Wortbereich fuer vLLM-Saetze. Kuerzere Saetze machen Fehler leichter sichtbar.",
   werTolerance: "Levenshtein-Toleranz pro Wort. Bis zu 2 Buchstaben Unterschied gelten als Schreibweise, Einfuegungen/Loeschungen bleiben Fehler.",
   werTimeout: "Maximale Wartezeit pro TTS+Whisper Sample. Hilft, haengende Einzelrequests abzubrechen.",
-  werSeed: "TTS-Seed fuer den WER-Run. Der Satzpool bleibt gleich, damit Seeds fair vergleichbar sind.",
-  werSeedRange: "Wenn groesser 0, testet der WER-Benchmark alle Seeds von Seed bis Seed + Range und zeigt eine Bestenliste.",
+  werSeed: "TTS-Seed fuer den WER-Run. Einzelwert oder kommagetrennte Liste wie 8888,8890,2912. Bei einer Liste wird Seed range ignoriert.",
+  werSeedRange: "Wenn groesser 0, testet der WER-Benchmark alle Seeds von Seed bis Seed + Range. Wird ignoriert, wenn Seed eine kommagetrennte Liste ist.",
   werPrompt: "Optionaler eigener vLLM Prompt. Er sollte ein JSON-Array von Saetzen erzeugen.",
 };
 
@@ -1146,10 +1185,14 @@ export function AdminApp() {
 
   async function handleWerBenchmarkRun() {
     if (!adminKey || !settingsDraft) return;
-    setWerBenchmarkBusy(true);
     setError("");
     const taskType = inferTaskType(settingsDraft.default_model);
-    const parsedSeed = werSeed.trim() ? Number(werSeed) : null;
+    const parsedSeed = parseWerSeedInput(werSeed);
+    if (parsedSeed.error) {
+      setError(parsedSeed.error);
+      return;
+    }
+    setWerBenchmarkBusy(true);
     try {
       await apiFetch<WerBenchmarkRunResponse>("/api/admin/wer-benchmarks/runs", {
         method: "POST",
@@ -1169,8 +1212,9 @@ export function AdminApp() {
           max_words: Math.max(werMinWords, werMaxWords),
           tolerance_letters_per_word: werTolerance,
           completion_timeout_seconds: werTimeout,
-          random_seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
-          seed_range: werSeedRange,
+          random_seed: parsedSeed.randomSeed,
+          seed_range: parsedSeed.seedValues ? 0 : werSeedRange,
+          seed_values: parsedSeed.seedValues,
           exclusive: true,
           request: {
             model: settingsDraft.default_model,
@@ -1708,7 +1752,7 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.werWords}>Max words<input type="number" min="1" max="120" value={werMaxWords} onChange={(event) => setWerMaxWords(Number(event.target.value) || 1)} /></label>
             <label className="with-help" title={ADMIN_HELP.werTolerance}>Tolerance<input type="number" min="0" max="8" value={werTolerance} onChange={(event) => setWerTolerance(Number(event.target.value) || 0)} /></label>
             <label className="with-help" title={ADMIN_HELP.werTimeout}>Timeout sec<input type="number" min="1" max="3600" value={werTimeout} onChange={(event) => setWerTimeout(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="number" min="0" max="2147483647" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer = random" /></label>
+            <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer, 8888 oder 8888,8890,2912" /></label>
             <label className="with-help" title={ADMIN_HELP.werSeedRange}>Seed range<input type="number" min="0" max="1024" value={werSeedRange} onChange={(event) => setWerSeedRange(Number(event.target.value) || 0)} /></label>
           </div>
           <label className="with-help" title={ADMIN_HELP.werPrompt}>Optionaler vLLM Prompt<textarea value={werPrompt} onChange={(event) => setWerPrompt(event.target.value)} placeholder="Leer lassen fuer den eingebauten JSON-Satzgenerator." /></label>

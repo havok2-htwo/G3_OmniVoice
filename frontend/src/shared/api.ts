@@ -325,6 +325,7 @@ export interface WerBenchmarkRunResponse {
   transcription_concurrency: number;
   seed_start?: number | null;
   seed_range: number;
+  seed_values: Array<number | null>;
   vllm_base_url: string;
   vllm_model?: string | null;
   whisper_base_url: string;

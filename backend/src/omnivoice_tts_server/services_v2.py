@@ -1564,7 +1564,7 @@ class WerBenchmarkService:
             'count': payload.count,
             'concurrency': payload.concurrency,
             'seed_start': seed_values[0],
-            'seed_range': payload.seed_range,
+            'seed_range': 0 if payload.seed_values else payload.seed_range,
             'seed_values': seed_values,
             'vllm_base_url': payload.vllm_base_url,
             'vllm_model': payload.vllm_model,
@@ -1731,6 +1731,15 @@ class WerBenchmarkService:
 
     @staticmethod
     def _seed_values(payload: WerBenchmarkCreateRequest) -> list[int | None]:
+        if payload.seed_values:
+            unique: list[int] = []
+            seen: set[int] = set()
+            for seed in payload.seed_values:
+                if seed in seen:
+                    continue
+                unique.append(seed)
+                seen.add(seed)
+            return unique
         if payload.seed_range <= 0:
             return [payload.random_seed]
         base_seed = payload.random_seed if payload.random_seed is not None else 0
@@ -2083,6 +2092,7 @@ class WerBenchmarkService:
             transcription_concurrency=run.get('transcription_concurrency', 1),
             seed_start=run.get('seed_start'),
             seed_range=run.get('seed_range', 0),
+            seed_values=list(run.get('seed_values') or []),
             vllm_base_url=run.get('vllm_base_url', ''),
             vllm_model=run.get('vllm_model'),
             whisper_base_url=run.get('whisper_base_url', ''),

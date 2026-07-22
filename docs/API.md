@@ -14,21 +14,21 @@ http://127.0.0.1:8091/openapi.json
 ```
 
 Public synthesis routes are intentionally open for local demo and performance
-testing. Admin routes require either:
+testing until at least one client API key exists. After that, public synthesis
+callers send:
 
 ```http
-X-Admin-Key: <admin-key>
+X-API-Key: <client-api-key>
 ```
 
-or:
+Admin routes use username/password login and an httpOnly session cookie:
 
 ```http
-Authorization: Bearer <admin-key>
+POST /api/admin/auth/login
 ```
 
-The startup batch file prints a temporary startup admin key. Use it before it
-expires to rotate/create the persistent admin key. Rotated keys are returned
-once and only their hash is stored under `data/`.
+The default first-run login is `admin` / `admin`, and changing that password is
+required before protected admin actions are available.
 
 ## Models
 
@@ -293,26 +293,32 @@ GET /v1/jobs/{job_id}/audio?format=mp3
 
 ## Admin Routes
 
-All routes below require `X-Admin-Key` or a bearer token.
+Protected routes below require the admin session cookie.
 
-### Admin Key
+### Admin Auth
 
 ```http
-GET /api/admin/keys
-POST /api/admin/keys
+POST /api/admin/auth/login
+POST /api/admin/auth/logout
+GET /api/admin/auth/whoami
+POST /api/admin/auth/change-password
 ```
 
-`GET` returns key metadata. `POST` rotates the master admin key and returns the
-new token once:
+### Client API Keys
+
+```http
+GET /api/admin/api-keys
+POST /api/admin/api-keys
+DELETE /api/admin/api-keys/{key_id}
+```
+
+`POST` creates a client API key and returns the new token once:
 
 ```json
 {
-  "admin_key": {
-    "key_id": "key_abc123",
-    "label": "Master Admin Key",
-    "created_at": "2026-05-21T00:00:00Z",
-    "last_used_at": null
-  },
+  "id": "key_abc123",
+  "alias": "local-client",
+  "created_at": "2026-05-21T00:00:00Z",
   "token": "omnivoice_tts_..."
 }
 ```
@@ -566,7 +572,7 @@ Common responses:
 | --- | --- |
 | `200` | request accepted or completed |
 | `400` | invalid request, unsupported model, missing consent/ref text |
-| `401` | missing or invalid admin key |
+| `401` | missing or invalid admin session, or missing/invalid client API key |
 | `404` | job, voice, audio or API route not found |
 | `409` | synthesis job was cancelled |
 | `429` | queue saturated |

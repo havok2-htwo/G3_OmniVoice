@@ -142,7 +142,7 @@ function parseWerSeedInput(value: string): { randomSeed: number | null; seedValu
 }
 
 const ADMIN_HELP = {
-  adminKey: "Admin-Key fuer geschuetzte /api/admin Endpoints. Wird lokal im Browser gespeichert.",
+  adminSession: "Admin-Zugang laeuft ueber Login und httpOnly Session-Cookie.",
   modelOpsModel: "Zielmodell fuer Download, Preload, Warmup, Reload und Default-Speicherung.",
   allowDownloads: "Erlaubt dem Backend, k2-fsa/OmniVoice aus Hugging Face in das lokale models-Verzeichnis zu laden.",
   downloadPreload: "Schaltet Downloads frei, laedt fehlende Modelldateien und haelt das Modell im Speicher.",

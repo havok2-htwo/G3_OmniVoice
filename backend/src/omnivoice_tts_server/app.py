@@ -201,10 +201,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.info('shutdown complete')
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
-    # allow_origins='*' together with allow_credentials=True is unsafe: Starlette then
-    # reflects any caller's Origin and lets it send credentialed requests. This API
-    # authenticates via the X-Admin-Key / Authorization headers (not cookies), so we
-    # keep the wildcard origin for easy LAN access but disable credentials.
+    # Admin auth uses same-origin browser session cookies. Public API clients may be
+    # cross-origin, but they must not receive credentialed wildcard CORS responses.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=['*'],
@@ -221,6 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth = 'yes' if (
             request.headers.get('authorization')
             or request.headers.get('x-admin-key')
+            or request.cookies.get('g3_omnivoice_session')
         ) else 'no'
         logger.info(
             'request start method=%s path=%s client=%s origin=%s auth=%s',

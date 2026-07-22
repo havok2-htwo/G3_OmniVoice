@@ -37,7 +37,7 @@ export function AppShell({
   const activeModel = snapshot?.overview.activeModel || settings.defaultModel;
   const overview = snapshot?.overview;
   const activeModelInfo = models.find((model) => model.id === activeModel);
-  const accessState = adminRecord ? 'Admin Key Ready' : 'Key Required';
+  const accessState = adminRecord ? 'Session Ready' : 'Login Required';
 
   return (
     <div className={`app-shell theme-${settings.theme}`}>
@@ -55,7 +55,7 @@ export function AppShell({
               Refresh Snapshot
             </button>
             <button className="secondary-button" type="button" onClick={onRotateAdminKey}>
-              Rotate Admin Key
+              Manage API Keys
             </button>
             <button className="ghost-button" type="button" onClick={onOpenLanding}>
               Open Landing
@@ -126,8 +126,8 @@ export function AppShell({
             Access
             <InfoTip text="Shows which admin credential is active in this browser session and when it was last used." />
           </span>
-          <strong>{adminRecord?.name || 'Master Admin Key'}</strong>
-          <p>{adminRecord ? `Last used ${new Date(adminRecord.lastUsedAt).toLocaleString('en-US')}` : 'The browser keeps the admin key locally until you sign out.'}</p>
+          <strong>{adminRecord?.name || 'Admin Session'}</strong>
+          <p>{adminRecord ? `Last used ${new Date(adminRecord.lastUsedAt).toLocaleString('en-US')}` : 'The browser keeps the admin session until you sign out.'}</p>
         </article>
       </section>
 

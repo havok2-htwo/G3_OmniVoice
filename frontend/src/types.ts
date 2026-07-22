@@ -194,6 +194,6 @@ export const tabLabels: Record<TabKey, string> = {
   jobs: 'History',
   compose: 'Synthesis',
   voices: 'Voice Lab',
-  keys: 'Admin Key',
+  keys: 'API Keys',
   settings: 'Settings'
 };

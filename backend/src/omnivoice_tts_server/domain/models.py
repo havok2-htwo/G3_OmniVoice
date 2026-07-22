@@ -98,22 +98,6 @@ class JobDetailResponse(JobListItem):
     batch_count: int | None = None
 
 
-class AdminKeyMetadata(BaseModel):
-    key_id: str
-    label: str
-    created_at: datetime
-    last_used_at: datetime | None = None
-
-
-class AdminKeyResponse(BaseModel):
-    admin_key: AdminKeyMetadata
-
-
-class AdminKeyRotateResponse(BaseModel):
-    admin_key: AdminKeyMetadata
-    token: str
-
-
 class VoiceProfileCreateResponse(BaseModel):
     voice_id: str
     name: str

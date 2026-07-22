@@ -4,7 +4,8 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 
 - FastAPI backend for synthesis, queueing, admin auth, stats, settings, model ops, and benchmarks
 - React/Vite landing page, public demo, and private admin panel
-- Same local `X-Admin-Key` browser workflow as the existing G3 stack
+- Username/password admin login with httpOnly session cookies
+- Admin-managed client API keys for public synthesis endpoints
 - OmniVoice runtime adapter for `k2-fsa/OmniVoice`
 - Traffic benchmark mode for random user-like arrivals, sentence-count variation, TTFA percentiles, best/worst, and queue timing
 - Streaming requests use a first-audio fast path: the first sentence of each active stream is scheduled before larger follow-up batches
@@ -17,7 +18,7 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 - `frontend/` - React/Vite UI
 - `tools/` - local operator utilities, including benchmark scripts
 - `models/` - default local model directory, ignored by git
-- `data/` - runtime settings, admin key hashes, voice profiles, ignored by git
+- `data/` - runtime settings, admin users/sessions/client API key hashes, voice profiles, ignored by git
 - `.conda-env/` - project-local Conda environment, ignored by git
 - `.conda/` - project-local Conda package/cache state, ignored by git
 
@@ -66,9 +67,9 @@ Open:
 - `http://127.0.0.1:8091/demo`
 - `http://127.0.0.1:8091/admin`
 
-The server prints a temporary startup admin key for emergency browser access.
-Use it before it expires to rotate/create the persistent admin key. Rotation
-stores only a hash under `data/`; the returned token is shown once.
+Admin access uses username/password login at `/admin`. On first run the default
+login is `admin` / `admin`, and the dashboard requires changing that password
+before protected admin actions are available.
 
 ## API
 
@@ -163,7 +164,7 @@ $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
 
 ## Notes
 
-- Public demo and synthesis endpoints intentionally stay open for local performance parity.
-- Admin endpoints use `X-Admin-Key`.
+- Public demo and synthesis endpoints stay open until at least one client API key exists. Once keys exist, callers send `X-API-Key`.
+- Admin endpoints use the browser login session from `/api/admin/auth/login`.
 - Streaming is simulated PCM chunking after sentence/batch generation because OmniVoice does not expose an official native streaming hook.
 - Non-streaming output can be downloaded as WAV or MP3.

@@ -154,7 +154,7 @@ class QueueService:
 
         now = utcnow()
         job = JobRecord(
-            job_id=f'job_{now.timestamp():.0f}_{len(self.store.jobs):04d}',
+            job_id=f'job_{uuid.uuid4().hex}',
             request=request,
             created_at=now,
             updated_at=now,
@@ -1661,36 +1661,58 @@ class WerBenchmarkService:
                 )
 
     async def _generate_sentences(self, payload: WerBenchmarkCreateRequest) -> tuple[list[str], dict[str, Any]]:
-        if self.settings.runtime_backend.lower() == 'mock' or payload.vllm_base_url.strip().lower() == 'mock':
-            cache_key = self._sentence_cache_key(
-                count=payload.count,
-                language=payload.language,
-                min_words=payload.min_words,
-                max_words=payload.max_words,
-                prompt=payload.prompt or '',
-            )
-            cached = self._cached_sentences(cache_key, payload.count)
-            if cached is not None:
-                return cached, {'hit': True, 'key': cache_key}
-            sentences = [
-                f'Dies ist ein kurzer WER Testsatz Nummer {index} mit klaren deutschen Woertern.'
-                for index in range(1, payload.count + 1)
-            ]
-            self._store_sentence_cache(cache_key, sentences)
-            return list(sentences), {'hit': False, 'key': cache_key}
-
-        base_url = self._normalize_base_url(payload.vllm_base_url)
-        model = (payload.vllm_model or '').strip() or await self._resolve_vllm_model(base_url)
+        excluded_keys = self._sentence_keys(payload.exclude_sentences)
         cache_key = self._sentence_cache_key(
             count=payload.count,
             language=payload.language,
             min_words=payload.min_words,
             max_words=payload.max_words,
             prompt=payload.prompt or '',
+            exclude_sentences=payload.exclude_sentences,
         )
-        cached = self._cached_sentences(cache_key, payload.count)
+        cached = self._cached_sentences(
+            cache_key,
+            payload.count,
+            min_words=payload.min_words,
+            max_words=payload.max_words,
+            excluded_keys=excluded_keys,
+        )
         if cached is not None:
             return cached, {'hit': True, 'key': cache_key}
+
+        if self.settings.runtime_backend.lower() == 'mock' or payload.vllm_base_url.strip().lower() == 'mock':
+            sentences: list[str] = []
+            seen: set[str] = set()
+            candidate_count = payload.count + len(excluded_keys)
+            for index in range(1, candidate_count + 1):
+                sentence = f'Dies ist ein kurzer WER Testsatz Nummer {index} mit klaren deutschen Woertern.'
+                if not self._is_valid_wer_sentence(
+                    sentence,
+                    min_words=payload.min_words,
+                    max_words=payload.max_words,
+                ):
+                    continue
+                sentence_key = self._sentence_identity(sentence)
+                if not sentence_key or sentence_key in excluded_keys or sentence_key in seen:
+                    continue
+                sentences.append(sentence)
+                seen.add(sentence_key)
+                if len(sentences) >= payload.count:
+                    break
+            if len(sentences) < payload.count:
+                sentences.extend(
+                    self._fallback_sentences(
+                        payload,
+                        payload.count - len(sentences),
+                        offset=len(sentences),
+                        existing_sentences=sentences,
+                    )
+                )
+            self._store_sentence_cache(cache_key, sentences)
+            return list(sentences), {'hit': False, 'key': cache_key}
+
+        base_url = self._normalize_base_url(payload.vllm_base_url)
+        model = (payload.vllm_model or '').strip() or await self._resolve_vllm_model(base_url)
 
         parsed: list[str] = []
         seen: set[str] = set()
@@ -1710,8 +1732,14 @@ class WerBenchmarkService:
                     existing_count=len(parsed),
                 )
                 for sentence in candidates:
-                    normalized_key = re.sub(r'\s+', ' ', sentence).strip().lower()
-                    if not normalized_key or normalized_key in seen:
+                    if not self._is_valid_wer_sentence(
+                        sentence,
+                        min_words=payload.min_words,
+                        max_words=payload.max_words,
+                    ):
+                        continue
+                    normalized_key = self._sentence_identity(sentence)
+                    if not normalized_key or normalized_key in excluded_keys or normalized_key in seen:
                         continue
                     parsed.append(sentence)
                     seen.add(normalized_key)
@@ -1723,11 +1751,44 @@ class WerBenchmarkService:
                     break
                 chunk_index += 1
         if len(parsed) < payload.count:
-            parsed.extend(self._fallback_sentences(payload, payload.count - len(parsed), offset=len(parsed)))
+            parsed.extend(
+                self._fallback_sentences(
+                    payload,
+                    payload.count - len(parsed),
+                    offset=len(parsed),
+                    existing_sentences=parsed,
+                )
+            )
         run_count = payload.count
         sentences = parsed[:run_count]
         self._store_sentence_cache(cache_key, sentences)
         return list(sentences), {'hit': False, 'key': cache_key}
+
+    @staticmethod
+    def _is_valid_wer_sentence(sentence: str, *, min_words: int, max_words: int) -> bool:
+        normalized = re.sub(r'\s+', ' ', str(sentence or '')).strip()
+        if not normalized:
+            return False
+        if re.search(r'\b(?:cache[_ -]?key|chunk[_ -]?id|benchmark[_ -]?id)\b', normalized, re.IGNORECASE):
+            return False
+        if re.search(r'\b[0-9a-f]{16,}\b', normalized, re.IGNORECASE):
+            return False
+        word_count = len(re.findall(r'\b[^\W_]+\b', normalized, flags=re.UNICODE))
+        return min_words <= word_count <= max_words
+
+    @staticmethod
+    def _sentence_identity(sentence: str) -> str:
+        """Return the WER-normalized identity used for deduplication and exclusions."""
+        return ' '.join(WerBenchmarkService._normalize_words(str(sentence or '')))
+
+    @staticmethod
+    def _sentence_keys(sentences: list[str]) -> set[str]:
+        keys: set[str] = set()
+        for sentence in sentences:
+            key = WerBenchmarkService._sentence_identity(sentence)
+            if key:
+                keys.add(key)
+        return keys
 
     @staticmethod
     def _seed_values(payload: WerBenchmarkCreateRequest) -> list[int | None]:
@@ -1803,7 +1864,15 @@ class WerBenchmarkService:
         return self._parse_generated_sentences(content, chunk_count)
 
     @staticmethod
-    def _fallback_sentences(payload: WerBenchmarkCreateRequest, count: int, *, offset: int = 0) -> list[str]:
+    def _fallback_sentences(
+        payload: WerBenchmarkCreateRequest,
+        count: int,
+        *,
+        offset: int = 0,
+        existing_sentences: list[str] | None = None,
+    ) -> list[str]:
+        if count <= 0:
+            return []
         subjects = [
             'Die Nachbarin',
             'Ein ruhiger Besucher',
@@ -1813,6 +1882,10 @@ class WerBenchmarkService:
             'Das kleine Team',
             'Ein alter Freund',
             'Die Lehrerin',
+            'Mein Nachbar',
+            'Eine junge Familie',
+            'Der freundliche Verkaeufer',
+            'Unsere kleine Gruppe',
         ]
         verbs = [
             'beschreibt',
@@ -1823,6 +1896,10 @@ class WerBenchmarkService:
             'vergleicht',
             'beobachtet',
             'notiert',
+            'bespricht',
+            'prueft',
+            'erinnert',
+            'ordnet',
         ]
         objects = [
             'den hellen Morgen im Park',
@@ -1833,6 +1910,10 @@ class WerBenchmarkService:
             'die warmen Farben am Fenster',
             'ein klares Ergebnis nach dem Test',
             'den leisen Klang im leeren Raum',
+            'einen wichtigen Termin fuer morgen',
+            'die Einkaufsliste auf dem Tisch',
+            'eine kleine Aenderung im Tagesplan',
+            'den naechsten Ausflug am Wochenende',
         ]
         endings = [
             'mit sehr deutlicher Aussprache',
@@ -1841,24 +1922,87 @@ class WerBenchmarkService:
             'fuer einen fairen Vergleich',
             'mit einfachen und bekannten Woertern',
             'waehrend draussen der Abend beginnt',
+            'bei einer Tasse Tee',
+            'vor dem gemeinsamen Mittagessen',
+            'nach einem kurzen Telefonat',
+            'mit einem freundlichen Laecheln',
         ]
-        rng = random.Random(17 + offset)
+        total_combinations = len(subjects) * len(verbs) * len(objects) * len(endings)
+        seed_material = json.dumps(
+            {
+                'language': payload.language,
+                'prompt': payload.prompt or '',
+                'min_words': payload.min_words,
+                'max_words': payload.max_words,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        digest = hashlib.sha1(seed_material.encode('utf-8')).digest()
+        start = int.from_bytes(digest[:4], 'big') % total_combinations
+        step = (int.from_bytes(digest[4:8], 'big') % total_combinations) or 1
+        while math.gcd(step, total_combinations) != 1:
+            step = (step + 1) % total_combinations or 1
+        blocked_keys = WerBenchmarkService._sentence_keys(payload.exclude_sentences)
+        blocked_keys.update(WerBenchmarkService._sentence_keys(existing_sentences or []))
         sentences: list[str] = []
-        for index in range(count):
-            subject = subjects[(offset + index) % len(subjects)]
-            verb = rng.choice(verbs)
-            obj = objects[(offset * 3 + index) % len(objects)]
-            ending = rng.choice(endings)
-            sentences.append(f'{subject} {verb} {obj} {ending}.')
-        return sentences
+        for candidate_index in range(total_combinations):
+            combination = (start + (offset + candidate_index) * step) % total_combinations
+            ending = endings[combination % len(endings)]
+            combination //= len(endings)
+            obj = objects[combination % len(objects)]
+            combination //= len(objects)
+            verb = verbs[combination % len(verbs)]
+            combination //= len(verbs)
+            subject = subjects[combination % len(subjects)]
+            sentence = f'{subject} {verb} {obj} {ending}.'
+            if not WerBenchmarkService._is_valid_wer_sentence(
+                sentence,
+                min_words=payload.min_words,
+                max_words=payload.max_words,
+            ):
+                continue
+            sentence_key = WerBenchmarkService._sentence_identity(sentence)
+            if not sentence_key or sentence_key in blocked_keys:
+                continue
+            sentences.append(sentence)
+            blocked_keys.add(sentence_key)
+            if len(sentences) >= count:
+                return sentences
+        raise RuntimeError(
+            'WER fallback sentence pool cannot satisfy the request: '
+            f'needed {count} unique sentences with {payload.min_words}-{payload.max_words} words '
+            f'after exclusions, but only {len(sentences)} were available.'
+        )
 
-    def _cached_sentences(self, cache_key: str, count: int) -> list[str] | None:
+    def _cached_sentences(
+        self,
+        cache_key: str,
+        count: int,
+        *,
+        min_words: int,
+        max_words: int,
+        excluded_keys: set[str],
+    ) -> list[str] | None:
         cached = self.store.wer_sentence_cache.get(cache_key)
         if not cached:
             return None
         sentences = cached.get('sentences') or []
         if len(sentences) != count:
+            self.store.wer_sentence_cache.pop(cache_key, None)
             return None
+        seen: set[str] = set()
+        for sentence in sentences:
+            sentence_key = self._sentence_identity(sentence)
+            if (
+                not self._is_valid_wer_sentence(sentence, min_words=min_words, max_words=max_words)
+                or not sentence_key
+                or sentence_key in excluded_keys
+                or sentence_key in seen
+            ):
+                self.store.wer_sentence_cache.pop(cache_key, None)
+                return None
+            seen.add(sentence_key)
         cached['last_used_at'] = utcnow()
         cached['hits'] = int(cached.get('hits') or 0) + 1
         return list(sentences)
@@ -1887,14 +2031,16 @@ class WerBenchmarkService:
         min_words: int,
         max_words: int,
         prompt: str,
+        exclude_sentences: list[str] | None = None,
     ) -> str:
         payload = {
-            'generator_version': 4,
+            'generator_version': 5,
             'count': count,
             'language': (language or '').strip().lower(),
             'min_words': min_words,
             'max_words': max_words,
             'prompt': (prompt or '').strip(),
+            'exclude_sentence_keys': sorted(WerBenchmarkService._sentence_keys(exclude_sentences or [])),
         }
         digest = hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()[:16]
         return f'wer_sentences_{count}_{digest}'
@@ -2282,9 +2428,7 @@ class WerBenchmarkService:
         }
 
         def normalize_key(value: str) -> str:
-            normalized = value.lower().replace('\u00df', 'ss')
-            normalized = unicodedata.normalize('NFKD', normalized)
-            return ''.join(char for char in normalized if not unicodedata.combining(char))
+            return WerBenchmarkService._fold_german_orthography(value)
 
         def replace_word(match: re.Match[str]) -> str:
             raw = match.group(0)
@@ -2361,11 +2505,22 @@ class WerBenchmarkService:
     @staticmethod
     def _normalize_words(text: str) -> list[str]:
         normalized = WerBenchmarkService._replace_number_words(text)
-        normalized = normalized.lower().replace('\u00df', 'ss')
-        normalized = unicodedata.normalize('NFKD', normalized)
-        normalized = ''.join(char for char in normalized if not unicodedata.combining(char))
+        normalized = WerBenchmarkService._fold_german_orthography(normalized)
         normalized = re.sub(r'[^a-z0-9\s]+', ' ', normalized)
         return [WerBenchmarkService._normalize_wer_token(word) for word in normalized.split() if word]
+
+    @staticmethod
+    def _fold_german_orthography(text: str) -> str:
+        normalized = unicodedata.normalize('NFC', text.lower())
+        normalized = (
+            normalized
+            .replace('\u00e4', 'ae')
+            .replace('\u00f6', 'oe')
+            .replace('\u00fc', 'ue')
+            .replace('\u00df', 'ss')
+        )
+        normalized = unicodedata.normalize('NFKD', normalized)
+        return ''.join(char for char in normalized if not unicodedata.combining(char))
 
     @staticmethod
     def _normalize_wer_token(word: str) -> str:

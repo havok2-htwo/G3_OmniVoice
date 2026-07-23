@@ -1508,15 +1508,6 @@ export function AdminApp() {
 
       {adminTab === "overview" ? (
       <section className="widget-grid">
-        <section className="widget span-12"><div className="widget-header"><h2>Performance Graph</h2></div>
-          <div className="field-grid four">
-            <MiniGraph label="Realtime" values={overviewHistory.map((entry) => Number(entry.realtime_x_avg || 0))} color="#90f0b7" suffix="x" />
-            <MiniGraph label="TTFA" values={overviewHistory.map((entry) => Number(entry.ttfa_ms_avg || 0))} color="#ff9a46" suffix=" ms" />
-            <MiniGraph label="Queue" values={overviewHistory.map((entry) => Number(entry.queue_depth || 0))} color="#86c9ff" />
-            <MiniGraph label="GPU" values={overviewHistory.map((entry) => Number(entry.gpu_utilization_pct || 0))} color="#ff6e6e" suffix="%" />
-          </div>
-        </section>
-
         <section className="widget span-6"><div className="widget-header"><h2>Live Queue</h2></div>
           <div className="metric-list">
             <div className="metric-row"><span>Worker</span><strong>{snapshot.overview.worker_state}</strong></div>
@@ -1536,6 +1527,15 @@ export function AdminApp() {
               ))}
             </div>
           ) : null}
+        </section>
+
+        <section className="widget span-6"><div className="widget-header"><h2>Performance Graph</h2></div>
+          <div className="field-grid two">
+            <MiniGraph label="Realtime" values={overviewHistory.map((entry) => Number(entry.realtime_x_avg || 0))} color="#90f0b7" suffix="x" />
+            <MiniGraph label="TTFA" values={overviewHistory.map((entry) => Number(entry.ttfa_ms_avg || 0))} color="#ff9a46" suffix=" ms" />
+            <MiniGraph label="Queue" values={overviewHistory.map((entry) => Number(entry.queue_depth || 0))} color="#86c9ff" />
+            <MiniGraph label="GPU" values={overviewHistory.map((entry) => Number(entry.gpu_utilization_pct || 0))} color="#ff6e6e" suffix="%" />
+          </div>
         </section>
 
         <section className="widget span-12">

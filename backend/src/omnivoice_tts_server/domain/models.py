@@ -448,6 +448,7 @@ class WerBenchmarkCreateRequest(BaseModel):
     whisper_path: str | None = None
     language: str = 'Deutsch'
     prompt: str | None = None
+    exclude_sentences: list[str] = Field(default_factory=list, max_length=10_000)
     min_words: int = Field(default=5, ge=1, le=80)
     max_words: int = Field(default=16, ge=1, le=120)
     tolerance_letters_per_word: int = Field(default=2, ge=0, le=8)

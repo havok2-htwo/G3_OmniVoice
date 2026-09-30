@@ -140,9 +140,11 @@ Fresh installs start with these values (`backend/src/omnivoice_tts_server/config
 Values saved in the admin panel (`data/runtime_settings.json`) take precedence;
 an install that never saved settings picks these defaults up on its next start.
 
-- Model `k2-fsa/OmniVoice-Base` with default voice `Sonja`. Base clones a saved
-  voice profile, so create a profile named `Sonja` (or pick another default voice);
-  requests without a voice use it, and `Auto Voice` still renders as AutoVoice.
+- Model `k2-fsa/OmniVoice-Base` with default voice `Sonja`. The `Sonja` clone
+  profile ships with the server (`backend/src/omnivoice_tts_server/voice_presets/`)
+  and is added to the voice store on first start; requests without a voice use it,
+  and `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
+  (`data/voice_presets_seeded.json`).
 - `bfloat16`, `torch.compile` on, CUDA cache trim after each batch, warmup on start
 - Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
   VRAM budget 10000 MB, max 25000 input chars, stream prebuffer 0 ms

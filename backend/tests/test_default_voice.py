@@ -80,3 +80,12 @@ def test_built_in_voice_with_explicit_base_model_is_still_rejected(tmp_path) -> 
     queue, _ = make_queue(tmp_path, sonja_profile())
     with pytest.raises(RuntimeError, match='Base voice cloning requires'):
         asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.', voice='Auto Voice', model='k2-fsa/OmniVoice-Base')))
+
+
+def test_default_voice_matches_profile_name_ignoring_case(tmp_path) -> None:
+    lowercase = sonja_profile()
+    lowercase.voice_id = 'voice_own'
+    lowercase.name = 'sonja'
+    queue, _ = make_queue(tmp_path, lowercase)
+    job = asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.')))
+    assert job.request.voice == 'voice_own'

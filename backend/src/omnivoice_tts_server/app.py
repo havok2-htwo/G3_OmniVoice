@@ -27,6 +27,7 @@ from .services_v2 import (
     WerBenchmarkService,
     spawn_tracked_task,
 )
+from .voice_presets import seed_voice_presets
 
 logger = logging.getLogger('omnivoice_tts_server')
 
@@ -111,6 +112,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store = InMemoryStore(max_queue_size=settings.max_queue_size)
         store.load_secrets(settings.data_dir)
         store.load_voices(settings.data_dir)
+        try:
+            seed_voice_presets(store, settings.data_dir)
+        except (OSError, ValueError) as exc:
+            logger.warning('voice presets not seeded: %s', exc)
         store.active_model = settings.active_model
         events = EventHub(store)
         synthesizer = build_synthesizer(settings, store)

@@ -11,8 +11,7 @@ from the admin panel (`data/runtime_settings.json`) still win. Installs that nev
 saved settings (no such file, e.g. env-only Docker volumes) switch to these
 defaults on the next start and need a `Sonja` voice profile or another default voice.
 
-- Default model `k2-fsa/OmniVoice-Base` with default voice `Sonja` (a saved voice
-  profile with that name must exist).
+- Default model `k2-fsa/OmniVoice-Base` with default voice `Sonja`.
 - `bfloat16`, `compile_model` on, `cuda_memory_trim_after_batch` on,
   `allow_model_downloads` on (also in `start_server.bat`).
 - `max_parallel_requests` 8, `max_batch_size` 8, `batch_wait_ms` 0,
@@ -21,6 +20,13 @@ defaults on the next start and need a `Sonja` voice profile or another default v
   `position_temperature` 5.0, `class_temperature` 0.0, `audio_chunk_duration` 30.1,
   `audio_chunk_threshold` 30.0, `denoise`/`preprocess_prompt`/`postprocess_output` on.
 - WER `vllm_model` defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+
+### Added — shipped voice preset "Sonja"
+
+- The `Sonja` clone profile (24 kHz reference WAV + ref_text) ships in
+  `omnivoice_tts_server/voice_presets/` and is seeded into the voice store on
+  startup, once per data dir. A profile already named `Sonja` is left alone, and a
+  deleted preset stays deleted (`data/voice_presets_seeded.json`).
 
 ### Fixed — default voice for Base
 

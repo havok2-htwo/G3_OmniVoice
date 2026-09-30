@@ -950,10 +950,13 @@ class QueueService:
         default_voice = (self.settings.default_voice or '').strip()
         if not default_voice:
             return
-        for profile in self.store.voice_profiles.values():
-            if default_voice in (profile.voice_id, profile.name):
-                request.voice = profile.voice_id
-                return
+        profiles = list(self.store.voice_profiles.values())
+        lowered = default_voice.casefold()
+        profile = next((p for p in profiles if default_voice in (p.voice_id, p.name)), None) or next(
+            (p for p in profiles if lowered in (p.voice_id.casefold(), str(p.name or '').casefold())), None
+        )
+        if profile is not None:
+            request.voice = profile.voice_id
 
     def _validate_request_voice_model(self, request: SpeechRequest) -> None:
         task_type = self._task_type_for_request(request)

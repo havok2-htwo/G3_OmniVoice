@@ -18,6 +18,7 @@ def test_queue_job_ids_stay_unique_at_500_job_retention_limit(tmp_path, monkeypa
 
     settings = Settings(
         data_dir=tmp_path,
+        active_model='k2-fsa/OmniVoice-AutoVoice',
         max_queue_size=2,
         max_retained_jobs=500,
         sentence_chunking=False,

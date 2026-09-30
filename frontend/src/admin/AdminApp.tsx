@@ -62,7 +62,7 @@ function isRunActive(status: string | undefined): boolean {
 type SettingsPreset = { name: string; values: Partial<ServerSettings>; created_at?: string | null };
 
 // Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
-const VRAM_BASE_MB = 11500;
+const VRAM_BASE_MB = 3000;
 const VRAM_MB_PER_AUDIO_S = 42;
 const VRAM_EST_S_PER_CHAR = 0.06;
 function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number } | null {
@@ -73,13 +73,13 @@ function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; char
 }
 
 const OMNIVOICE_DEFAULTS = {
-  num_step: 32,
+  num_step: 18,
   guidance_scale: 2.0,
   t_shift: 0.1,
   denoise: true,
   preprocess_prompt: true,
   postprocess_output: true,
-  audio_chunk_duration: 15.0,
+  audio_chunk_duration: 30.1,
   audio_chunk_threshold: 30.0,
   position_temperature: 5.0,
   class_temperature: 0.0,
@@ -168,27 +168,27 @@ const ADMIN_HELP = {
   activeRequests: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.",
   batchSize: "Maximale Anzahl kompatibler Saetze/Requests pro echtem OmniVoice generate(text=[...]) Batch.",
   batchWait: "Wartezeit, um kompatible Queue-Items fuer einen groesseren Batch zu sammeln.",
-  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). RTX 5090: ~24000-28000 sinnvoll.",
+  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). Default: 10000; RTX 5090 allein: ~24000-28000 moeglich.",
   maxInputChars: "Harte Obergrenze fuer die Zeichenzahl eines einzelnen Requests. Darueber kommt 413. 0 = aus.",
-  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel: ~11,3 GB Modell + ~2,3 GB pro Audio-Minute.",
+  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel: ~3 GB Modell + ~2,3 GB pro Audio-Minute.",
   streamPrebuffer: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.",
   modelDirectory: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache.",
   whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://192.168.0.200:7861; ein voller Endpoint wie /transcribe/ geht auch.",
   vllmBaseUrl: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.",
-  vllmModel: "Optionales vLLM Modell fuer WER-Saetze. Leer lassen nutzt das erste Modell aus /v1/models.",
+  vllmModel: "vLLM Modell fuer WER-Saetze. Default: Qwen/Qwen3.6-35B-A3B-FP8. Leer lassen nutzt das erste Modell aus /v1/models.",
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
   preferredDevice: "CUDA-Geraet fuer OmniVoice. Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload oder Server-Neustart aktiv.",
   refreshRuntimeDevices: "Liest CPU/CUDA-Geraete neu ein.",
   werConcurrency: "TTS-Wellengroesse fuer WER-Benchmarks. Eine Welle wird zusammen in die Queue gelegt, damit OmniVoice echte Batches sieht.",
   werTranscriptionConcurrency: "Whisper-Parallelitaet nach der Audio-Erzeugung. Auf demselben GPU-System meist 1 lassen, damit ASR die TTS-Batches nicht ausbremst.",
   dtype: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig. fp8 = experimentell (RTX 50xx fp8-Tensor-Cores, weniger VRAM); faellt bei Fehler automatisch auf bf16 zurueck. Erst nach Reload aktiv; Audioqualitaet unbedingt per WER-Benchmark pruefen.",
-  numStep: "OmniVoice Diffusion-/Sampling-Schritte. Mehr kann Qualitaet verbessern, kostet Zeit. Default: 32.",
+  numStep: "OmniVoice Diffusion-/Sampling-Schritte. Mehr kann Qualitaet verbessern, kostet Zeit. Default: 18.",
   guidance: "Guidance Scale fuer die Steuerstaerke. Hoeher folgt Prompts staerker, kann aber Artefakte erzeugen. Default: 2.0.",
   duration: "Optionale Ziel-Dauer in Sekunden. Leer lassen fuer OmniVoice-Automatik. Default: auto.",
   tShift: "OmniVoice Zeitverschiebungsparameter. Nur aendern, wenn du gezielt Sampling-Verhalten testest. Default: 0.1.",
   positionTemperature: "Temperatur fuer die Positionsauswahl beim Token-Unmasking. Default: 5.0.",
   classTemperature: "Temperatur fuer die Token-Klassenwahl. 0 bedeutet greedy. Default: 0.0.",
-  audioChunkDuration: "Interne OmniVoice-Ziellaenge fuer lange Audio-Chunks in Sekunden. Default: 15.0.",
+  audioChunkDuration: "Interne OmniVoice-Ziellaenge fuer lange Audio-Chunks in Sekunden. Default: 30.1.",
   audioChunkThreshold: "Ab welcher geschaetzten Dauer (Sek.) OmniVoice intern in Stuecke schneidet. Fuer Hoerbuecher hoch setzen (z.B. 1800), damit der Text als EINE durchgehende Sequenz mit Betonung erzeugt wird. Grenze ist der VRAM (~7-9 min am Stueck). Default: 30.",
   sentenceChunking: "Zerlegt lange Texte in Saetze. Das macht Streaming frueher hoerbar und erlaubt Satz-Batching.",
   compileModel: "Aktiviert torch.compile fuer das LLM im OmniVoice-Modell. Erst nach Reload/Restart wirksam.",
@@ -255,7 +255,7 @@ function applyOmniVoiceDefaults(settings: ServerSettings): ServerSettings {
     denoise: settings.denoise ?? OMNIVOICE_DEFAULTS.denoise,
     preprocess_prompt: settings.preprocess_prompt ?? OMNIVOICE_DEFAULTS.preprocess_prompt,
     postprocess_output: settings.postprocess_output ?? OMNIVOICE_DEFAULTS.postprocess_output,
-    cuda_memory_trim_after_batch: settings.cuda_memory_trim_after_batch ?? false,
+    cuda_memory_trim_after_batch: settings.cuda_memory_trim_after_batch ?? true,
     audio_chunk_duration: settings.audio_chunk_duration ?? OMNIVOICE_DEFAULTS.audio_chunk_duration,
     audio_chunk_threshold: settings.audio_chunk_threshold ?? OMNIVOICE_DEFAULTS.audio_chunk_threshold,
     position_temperature: settings.position_temperature ?? OMNIVOICE_DEFAULTS.position_temperature,

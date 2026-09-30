@@ -69,15 +69,16 @@ class Settings(BaseSettings):
     whisper_base_url: str | None = 'http://192.168.0.200:7861'
     whisper_path: str = ''
     vllm_base_url: str = 'http://192.168.20.126:8000'
-    vllm_model: str = ''
+    vllm_model: str = 'Qwen/Qwen3.6-35B-A3B-FP8'
     wer_concurrency: int = Field(default=4, ge=1, le=64)
     wer_transcription_concurrency: int = Field(default=16, ge=1, le=64)
     # Audio codec tokenizer used by the finetune preprocess step (extract_audio_tokens).
     # Defaults to the same Higgs-Audio-V2 tokenizer the runtime uses for voice cloning;
     # point at a local snapshot dir to stay fully offline.
     finetune_audio_tokenizer: str = 'eustlb/higgs-audio-v2-tokenizer'
-    active_model: str = 'k2-fsa/OmniVoice-AutoVoice'
-    default_voice: str = 'Auto Voice'
+    active_model: str = 'k2-fsa/OmniVoice-Base'
+    # Base clones a saved voice profile; this one must exist (matched by name or voice_id).
+    default_voice: str = 'Sonja'
     supported_models: list[str] = Field(
         default_factory=lambda: [
             'k2-fsa/OmniVoice-AutoVoice',
@@ -92,16 +93,16 @@ class Settings(BaseSettings):
     frontend_dist_dir: Path = Field(default=DEFAULT_FRONTEND_DIST)
     data_dir: Path = Field(default=DEFAULT_DATA_DIR)
     runtime_backend: str = 'omnivoice'
-    allow_model_downloads: bool = False
+    allow_model_downloads: bool = True
     enable_cpu_offload: bool = False
-    compile_model: bool = False
+    compile_model: bool = True
     compile_cudagraphs: bool = False
     cudagraph_skip_dynamic_graphs: bool = True
-    cuda_memory_trim_after_batch: bool = False
+    cuda_memory_trim_after_batch: bool = True
     warmup_on_startup: bool = True
     preferred_device: str = 'cuda:0'
     attention_implementation: str = 'sdpa'
-    torch_dtype: str = 'float16'
+    torch_dtype: str = 'bfloat16'
     max_queue_size: int = 32
     sample_rate: int = 24_000
     channels: int = 1
@@ -114,27 +115,27 @@ class Settings(BaseSettings):
     sentence_chunking: bool = True
     short_sentence_merge_max_chars: int = 30
     following_sentence_merge_min_chars: int = 20
-    max_parallel_requests: int = 6
+    max_parallel_requests: int = 8
     max_batch_size: int = 8
-    batch_wait_ms: int = 35
-    vram_budget_mb: int = 24000        # 0 = disable VRAM budgeting (unbounded)
-    max_input_chars: int = 100000      # hard reject single requests above this (abuse guard)
+    batch_wait_ms: int = 0
+    vram_budget_mb: int = 10000        # 0 = disable VRAM budgeting (unbounded)
+    max_input_chars: int = 25000       # hard reject single requests above this (abuse guard)
     stream_chunk_ms: int = 140
     stream_prebuffer_ms: int = 0
-    num_step: int | None = Field(default=None, ge=1, le=256)
-    guidance_scale: float | None = Field(default=None, ge=0.0, le=20.0)
+    num_step: int | None = Field(default=18, ge=1, le=256)
+    guidance_scale: float | None = Field(default=2.0, ge=0.0, le=20.0)
     duration: float | None = Field(default=None, ge=0.1, le=120.0)
-    t_shift: float | None = Field(default=None, ge=0.0, le=10.0)
-    denoise: bool | None = None
-    preprocess_prompt: bool | None = None
-    postprocess_output: bool | None = None
+    t_shift: float | None = Field(default=0.1, ge=0.0, le=10.0)
+    denoise: bool | None = True
+    preprocess_prompt: bool | None = True
+    postprocess_output: bool | None = True
     # Caps raised so internal OmniVoice audio chunking can be pushed high enough to be
     # effectively disabled (audiobooks need one continuous sequence for prosody). Set the
     # threshold above your longest single generation; the real ceiling is VRAM (~7-9 min).
-    audio_chunk_duration: float | None = Field(default=None, ge=0.1, le=3600.0)
-    audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=3600.0)
-    position_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
-    class_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
+    audio_chunk_duration: float | None = Field(default=30.1, ge=0.1, le=3600.0)
+    audio_chunk_threshold: float | None = Field(default=30.0, ge=0.1, le=3600.0)
+    position_temperature: float | None = Field(default=5.0, ge=0.0, le=5.0)
+    class_temperature: float | None = Field(default=0.0, ge=0.0, le=5.0)
 
     @field_validator('models_root_dir', mode='before')
     @classmethod

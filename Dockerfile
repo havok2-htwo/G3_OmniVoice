@@ -57,7 +57,8 @@ WORKDIR /app
 
 # PyTorch CUDA 13.0 wheels — the exact known-good stack from requirements-lock.txt.
 # (Linux Triton for torch.compile is pulled in automatically as a torch dependency;
-#  compile_model defaults to off so it is not required at runtime.)
+#  compile_model defaults to on; build-essential above lets Inductor compile, and the
+#  first request after a cold start pays the one-time compile cost.)
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel && \
     pip install --index-url https://download.pytorch.org/whl/cu130 \

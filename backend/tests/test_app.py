@@ -22,6 +22,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_client(**overrides) -> TestClient:
+    # These tests synthesize without a saved voice profile, which only AutoVoice allows.
+    overrides.setdefault('active_model', 'k2-fsa/OmniVoice-AutoVoice')
+    overrides.setdefault('default_voice', 'Auto Voice')
     temp_data_dir = tempfile.TemporaryDirectory()
     app = create_app(
         Settings(

@@ -140,6 +140,7 @@ class QueueService:
                 f'Input text is {len(text)} characters; the limit is {max_input}. '
                 'Split it into smaller requests.'
             )
+        self._apply_default_voice(request)
         self._validate_request_voice_model(request)
 
         sentences = split_sentences(
@@ -928,6 +929,31 @@ class QueueService:
             if profile.voice_id == voice or profile.name == voice:
                 return profile
         return None
+
+    def _apply_default_voice(self, request: SpeechRequest) -> None:
+        # Base clones a voice, so a request without one (e.g. an OpenAI stock voice that
+        # resolved to None) uses the configured default voice profile when it exists.
+        if request.ref_audio or self._task_type_for_request(request) != TaskType.base:
+            return
+        if request.voice:
+            # A built-in voice has nothing to clone: render it as AutoVoice on the shared
+            # checkpoint. Pinning task_type (not model) keeps the active alias unchanged.
+            built_in = {name.casefold() for name in self.settings.built_in_voices}
+            if (
+                request.task_type is None
+                and not request.model
+                and request.voice.casefold() in built_in
+                and self._voice_profile_for_request(request) is None
+            ):
+                request.task_type = TaskType.custom_voice
+            return
+        default_voice = (self.settings.default_voice or '').strip()
+        if not default_voice:
+            return
+        for profile in self.store.voice_profiles.values():
+            if default_voice in (profile.voice_id, profile.name):
+                request.voice = profile.voice_id
+                return
 
     def _validate_request_voice_model(self, request: SpeechRequest) -> None:
         task_type = self._task_type_for_request(request)

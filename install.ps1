@@ -175,4 +175,4 @@ Write-Host "Local Conda cache: $LocalCondaHome"
 Write-Host 'Start the app with: .\start_server.bat'
 Write-Host 'Open: http://127.0.0.1:8091'
 Write-Host ''
-Write-Host 'Note: first real OmniVoice startup needs either models\OmniVoice or OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=true.'
+Write-Host 'Note: the first OmniVoice startup downloads k2-fsa/OmniVoice (~3 GB) into models\; set OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=false to stay offline.'

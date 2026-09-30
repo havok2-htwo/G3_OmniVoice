@@ -4,6 +4,33 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed — runtime defaults
+
+Fresh installs now start with the tuned production settings. Values already saved
+from the admin panel (`data/runtime_settings.json`) still win. Installs that never
+saved settings (no such file, e.g. env-only Docker volumes) switch to these
+defaults on the next start and need a `Sonja` voice profile or another default voice.
+
+- Default model `k2-fsa/OmniVoice-Base` with default voice `Sonja` (a saved voice
+  profile with that name must exist).
+- `bfloat16`, `compile_model` on, `cuda_memory_trim_after_batch` on,
+  `allow_model_downloads` on (also in `start_server.bat`).
+- `max_parallel_requests` 8, `max_batch_size` 8, `batch_wait_ms` 0,
+  `vram_budget_mb` 10000, `max_input_chars` 25000.
+- Generation: `num_step` 18, `guidance_scale` 2.0, `t_shift` 0.1,
+  `position_temperature` 5.0, `class_temperature` 0.0, `audio_chunk_duration` 30.1,
+  `audio_chunk_threshold` 30.0, `denoise`/`preprocess_prompt`/`postprocess_output` on.
+- WER `vllm_model` defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+
+### Fixed — default voice for Base
+
+- Base requests without a voice (e.g. OpenAI stock voices like `alloy`) now clone
+  the configured default voice profile instead of failing with HTTP 400.
+- The built-in `Auto Voice` sent without an explicit model is rendered as AutoVoice
+  on the shared checkpoint while Base is active, instead of failing with HTTP 400.
+- The admin VRAM estimate used the stale 11.5 GB model base; it now mirrors
+  `capacity.py` (3 GB), so the shown peak/limits match what the server enforces.
+
 ### Finetune panel — self-generated training data + trainer (admin-only)
 
 Two new admin-gated tabs ("Data Generation" and "Training") for nudging the

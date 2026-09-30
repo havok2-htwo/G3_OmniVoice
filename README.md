@@ -89,7 +89,8 @@ shape the previous G3_TADA3B endpoint used. In Open WebUI
 - TTS Model: any supported model id, or just `tts-1` (aliases fall back to the
   active model)
 - TTS Voice: a built-in voice (`Auto Voice`) or a saved voice profile by name
-  or id; standard OpenAI voices like `alloy` map to the default voice
+  or id; standard OpenAI voices like `alloy` map to the default voice (with the
+  Base model, the saved default voice profile is cloned)
 
 Open WebUI's model/voice dropdowns are fed by `GET /v1/audio/models`
 (`{ "models": [...] }`) and `GET /v1/audio/voices` (`{ "voices": [...] }`).
@@ -125,17 +126,30 @@ Pinned Windows/CUDA runtime versions are recorded in `docs/RUNTIME_VERSIONS.md`.
 In particular, fp8 currently needs `kernels>=0.14.1,<0.15`; `kernels 0.15.1`
 breaks `transformers 5.9.0` during `omnivoice` import.
 
-For first real model download, either place the checkpoint under:
-
-```text
-models\OmniVoice
-```
-
-or set:
+Model downloads are enabled by default: the first start pulls `k2-fsa/OmniVoice`
+(~3 GB) into `models\`. To stay offline, place the checkpoint under
+`models\OmniVoice` and set:
 
 ```powershell
-$env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'true'
+$env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'false'
 ```
+
+## Default Runtime Settings
+
+Fresh installs start with these values (`backend/src/omnivoice_tts_server/config.py`).
+Values saved in the admin panel (`data/runtime_settings.json`) take precedence;
+an install that never saved settings picks these defaults up on its next start.
+
+- Model `k2-fsa/OmniVoice-Base` with default voice `Sonja`. Base clones a saved
+  voice profile, so create a profile named `Sonja` (or pick another default voice);
+  requests without a voice use it, and `Auto Voice` still renders as AutoVoice.
+- `bfloat16`, `torch.compile` on, CUDA cache trim after each batch, warmup on start
+- Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
+  VRAM budget 10000 MB, max 25000 input chars, stream prebuffer 0 ms
+- `num_step` 18, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
+  class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
+  preprocessing + output postprocessing on, sentence chunking on
+- WER: TTS wave 4, ASR concurrency 16, vLLM model `Qwen/Qwen3.6-35B-A3B-FP8`
 
 ## Operator Features
 

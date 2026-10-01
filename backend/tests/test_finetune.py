@@ -12,6 +12,22 @@ from fastapi.testclient import TestClient
 from omnivoice_tts_server.app import create_app
 from omnivoice_tts_server.config import Settings
 
+
+TEST_ADMIN_PASSWORD = 'test-admin-password'
+
+
+def login_admin(client: TestClient) -> None:
+    # First login uses the seeded admin/admin and must change the password before any
+    # admin action; the resulting session cookie stays in the client's cookie jar.
+    login = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': 'admin'})
+    assert login.status_code == 200, login.text
+    changed = client.post(
+        '/api/admin/auth/change-password',
+        json={'current_password': 'admin', 'new_password': TEST_ADMIN_PASSWORD},
+    )
+    assert changed.status_code == 200, changed.text
+
+
 def make_client(**overrides) -> TestClient:
     # Hermetic: both data_dir and models_root_dir live in temp dirs so finetune tests
     # (which write train clips, datasets, and promoted model dirs) never touch the repo.
@@ -19,7 +35,6 @@ def make_client(**overrides) -> TestClient:
     temp_models_dir = tempfile.TemporaryDirectory()
     app = create_app(
         Settings(
-            admin_api_key='test-admin-key',
             runtime_backend='mock',
             models_root_dir=Path(temp_models_dir.name),
             data_dir=Path(temp_data_dir.name),
@@ -28,13 +43,15 @@ def make_client(**overrides) -> TestClient:
     )
     client = TestClient(app)
     client.__enter__()
+    login_admin(client)
     client._temp_data_dir = temp_data_dir
     client._temp_models_dir = temp_models_dir
     return client
 
 
 def auth_headers() -> dict[str, str]:
-    return {'X-Admin-Key': 'test-admin-key'}
+    # Admin calls authenticate via the session cookie set in make_client.
+    return {}
 
 
 def make_wav_bytes() -> bytes:

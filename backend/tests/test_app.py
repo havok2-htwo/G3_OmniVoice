@@ -21,6 +21,22 @@ TEST_MODELS_DIR = Path(__file__).resolve().parents[2] / 'test-models'
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+
+TEST_ADMIN_PASSWORD = 'test-admin-password'
+
+
+def login_admin(client: TestClient) -> None:
+    # First login uses the seeded admin/admin and must change the password before any
+    # admin action; the resulting session cookie stays in the client's cookie jar.
+    login = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': 'admin'})
+    assert login.status_code == 200, login.text
+    changed = client.post(
+        '/api/admin/auth/change-password',
+        json={'current_password': 'admin', 'new_password': TEST_ADMIN_PASSWORD},
+    )
+    assert changed.status_code == 200, changed.text
+
+
 def make_client(**overrides) -> TestClient:
     # These tests synthesize without a saved voice profile, which only AutoVoice allows.
     overrides.setdefault('active_model', 'k2-fsa/OmniVoice-AutoVoice')
@@ -28,7 +44,6 @@ def make_client(**overrides) -> TestClient:
     temp_data_dir = tempfile.TemporaryDirectory()
     app = create_app(
         Settings(
-            admin_api_key='test-admin-key',
             runtime_backend='mock',
             models_root_dir=TEST_MODELS_DIR,
             data_dir=Path(temp_data_dir.name),
@@ -37,12 +52,14 @@ def make_client(**overrides) -> TestClient:
     )
     client = TestClient(app)
     client.__enter__()
+    login_admin(client)
     client._temp_data_dir = temp_data_dir
     return client
 
 
 def auth_headers() -> dict[str, str]:
-    return {'X-Admin-Key': 'test-admin-key'}
+    # Admin calls authenticate via the session cookie set in make_client.
+    return {}
 
 
 def test_vllm_url_normalization_accepts_base_or_endpoint() -> None:
@@ -215,64 +232,72 @@ def test_admin_snapshot_and_settings_roundtrip() -> None:
     assert vllm_models.json()['models'] == ['mock-qwen3-35b']
 
 
-def test_admin_key_metadata_and_rotation() -> None:
-    client = make_client()
-    metadata = client.get('/api/admin/keys', headers=auth_headers())
-    assert metadata.status_code == 200
-
-    rotated = client.post('/api/admin/keys', headers=auth_headers())
-    assert rotated.status_code == 200
-    payload = rotated.json()
-    assert payload['token'].startswith('omnivoice_tts_')
-    assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'test-admin-key'}).status_code == 401
-    assert client.get('/api/admin/keys', headers={'X-Admin-Key': payload['token']}).status_code == 200
-
-
-def test_startup_admin_key_expires_without_becoming_persistent() -> None:
+def test_admin_requires_login_and_forced_password_change() -> None:
     with tempfile.TemporaryDirectory() as data_dir:
-        app = create_app(
-            Settings(
-                admin_api_key='dev-admin-key',
-                startup_admin_key='startup-temp-key',
-                startup_admin_key_ttl_seconds=1,
-                runtime_backend='mock',
-                models_root_dir=TEST_MODELS_DIR,
-                data_dir=Path(data_dir),
-            )
-        )
+        app = create_app(Settings(runtime_backend='mock', models_root_dir=TEST_MODELS_DIR, data_dir=Path(data_dir)))
         with TestClient(app) as client:
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-temp-key'}).status_code == 200
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'dev-admin-key'}).status_code == 401
-            time.sleep(1.2)
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-temp-key'}).status_code == 401
+            assert client.get('/api/admin/settings').status_code == 401
+            bad = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': 'wrong'})
+            assert bad.status_code == 401
 
+            login = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': 'admin'})
+            assert login.status_code == 200
+            assert login.json()['must_change_password'] is True
+            assert client.get('/api/admin/settings').status_code == 403
+            assert client.get('/api/admin/auth/whoami').json() == {'username': 'admin', 'must_change_password': True}
 
-def test_rotated_admin_key_persists_across_restart() -> None:
-    def make_app(data_dir: Path, startup_key: str):
-        return create_app(
-            Settings(
-                admin_api_key='dev-admin-key',
-                startup_admin_key=startup_key,
-                startup_admin_key_ttl_seconds=60,
-                runtime_backend='mock',
-                models_root_dir=TEST_MODELS_DIR,
-                data_dir=data_dir,
+            too_short = client.post(
+                '/api/admin/auth/change-password', json={'current_password': 'admin', 'new_password': 'abc'}
             )
-        )
+            assert too_short.status_code == 400
+            changed = client.post(
+                '/api/admin/auth/change-password',
+                json={'current_password': 'admin', 'new_password': TEST_ADMIN_PASSWORD},
+            )
+            assert changed.status_code == 200
+            assert client.get('/api/admin/settings').status_code == 200
 
+            assert client.post('/api/admin/auth/logout').status_code == 200
+            assert client.get('/api/admin/settings').status_code == 401
+
+
+def test_changed_admin_password_persists_across_restart() -> None:
     with tempfile.TemporaryDirectory() as raw_data_dir:
         data_dir = Path(raw_data_dir)
-        with TestClient(make_app(data_dir, 'startup-one')) as client:
-            rotated = client.post('/api/admin/keys', headers={'X-Admin-Key': 'startup-one'})
-            assert rotated.status_code == 200
-            token = rotated.json()['token']
-            assert token.startswith('omnivoice_tts_')
 
-        with TestClient(make_app(data_dir, 'startup-two')) as client:
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': token}).status_code == 200
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-one'}).status_code == 401
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'dev-admin-key'}).status_code == 401
-            assert client.get('/api/admin/keys', headers={'X-Admin-Key': 'startup-two'}).status_code == 200
+        def make_app():
+            return create_app(Settings(runtime_backend='mock', models_root_dir=TEST_MODELS_DIR, data_dir=data_dir))
+
+        with TestClient(make_app()) as client:
+            login_admin(client)
+
+        with TestClient(make_app()) as client:
+            old = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': 'admin'})
+            assert old.status_code == 401
+            login = client.post('/api/admin/auth/login', json={'username': 'admin', 'password': TEST_ADMIN_PASSWORD})
+            assert login.status_code == 200
+            assert login.json()['must_change_password'] is False
+            assert client.get('/api/admin/settings').status_code == 200
+
+
+def test_client_api_key_gates_public_synthesis() -> None:
+    client = make_client()
+    body = {'model': 'k2-fsa/OmniVoice-AutoVoice', 'input': 'Hallo Welt', 'response_format': 'wav'}
+    # No client keys configured -> public endpoints are open.
+    assert client.post('/v1/audio/speech', json=body).status_code == 200
+
+    created = client.post('/api/admin/api-keys', json={'alias': 'tests'})
+    assert created.status_code == 200
+    key = created.json()
+    assert key['alias'] == 'tests'
+    assert [item['id'] for item in client.get('/api/admin/api-keys').json()['keys']] == [key['id']]
+
+    assert client.post('/v1/audio/speech', json=body).status_code == 401
+    assert client.post('/v1/audio/speech', json=body, headers={'X-API-Key': 'wrong'}).status_code == 401
+    assert client.post('/v1/audio/speech', json=body, headers={'X-API-Key': key['token']}).status_code == 200
+
+    assert client.delete(f"/api/admin/api-keys/{key['id']}").status_code == 200
+    assert client.post('/v1/audio/speech', json=body).status_code == 200
 
 
 def test_speech_returns_audio() -> None:

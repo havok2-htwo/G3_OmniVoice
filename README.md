@@ -163,7 +163,9 @@ an install that never saved settings picks these defaults up on its next start.
   effectively disabled for continuous prosody on long, single-pass narration.
 - **VRAM trim / low idle footprint** - `cuda_memory_trim_after_batch` releases
   the reserved CUDA pool after batches; the trim also runs right after the
-  startup warmup, so idle GPU usage stays low (~3-4GB) immediately. A
+  startup warmup, so idle GPU usage stays low (~3-4GB) immediately. The
+  per-batch trim skips `gc.collect()` (~215 ms per batch, frees no VRAM); unload
+  and the admin free-memory action still run it. A
   `vram_budget_mb` / `max_input_chars` capacity budget derives chunk sizes and a
   per-batch audio-second limit.
 - **Experimental fp8 dtype** - selectable in the admin Dtype dropdown

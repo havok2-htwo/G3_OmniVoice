@@ -505,8 +505,9 @@ class OmniVoiceSynthesizer:
             'released_mb': max(0, before_used - after_used),
         }
 
-    def _trim_cuda_cache_sync(self, *, reset_compile_cache: bool = False) -> None:
-        gc.collect()
+    def _trim_cuda_cache_sync(self, *, reset_compile_cache: bool = False, collect_garbage: bool = True) -> None:
+        if collect_garbage:
+            gc.collect()
         if self._torch is None:
             return
         if reset_compile_cache:
@@ -584,8 +585,11 @@ class OmniVoiceSynthesizer:
                     if any(instructs):
                         generate_kwargs['instruct'] = instructs
                     wavs = self._model.generate(text=texts, language=languages, **generate_kwargs)
-        except Exception:
-            self._trim_cuda_cache_sync(reset_compile_cache=True)
+        except Exception as exc:
+            # Only an OOM justifies dropping the compiled graphs; any other failure (bad
+            # voice, missing ref_text, ...) would otherwise force a full dynamo re-trace
+            # and recompile on the next request.
+            self._trim_cuda_cache_sync(reset_compile_cache=self._is_cuda_oom(exc))
             raise
 
         sample_rate = int(getattr(self._model, 'sampling_rate', self.sample_rate) or self.sample_rate)
@@ -604,8 +608,17 @@ class OmniVoiceSynthesizer:
             )
         del wavs
         if self.settings.cuda_memory_trim_after_batch:
-            self._trim_cuda_cache_sync()
+            # Hot path: release the reserved pool only. A full gc.collect() walks the
+            # ~700k tracked objects of the loaded stack (~215 ms on a 5900X) on every
+            # batch while freeing no VRAM -- batch tensors die by refcount.
+            self._trim_cuda_cache_sync(collect_garbage=False)
         return results
+
+    def _is_cuda_oom(self, exc: BaseException) -> bool:
+        oom_type = getattr(getattr(self._torch, 'cuda', None), 'OutOfMemoryError', None)
+        if isinstance(oom_type, type) and isinstance(exc, oom_type):
+            return True
+        return 'out of memory' in str(exc).lower()
 
     def _generation_kwargs(self, items: list[BatchSynthesisItem]) -> dict[str, Any]:
         request = items[0].request

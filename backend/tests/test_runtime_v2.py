@@ -313,3 +313,70 @@ def test_batch_group_keys_separate_clone_design_and_auto(tmp_path) -> None:
     )
 
     assert len({auto_key, design_key, clone_key}) == 3
+
+
+def _auto_item(text: str = 'Hallo.') -> BatchSynthesisItem:
+    return BatchSynthesisItem(
+        job_id='job_trim',
+        sentence_index=0,
+        text=text,
+        request=SpeechRequest(input=text, model=OMNIVOICE_AUTO_ALIAS, task_type=TaskType.custom_voice),
+    )
+
+
+def _record_trims(synthesizer: OmniVoiceSynthesizer, monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+    monkeypatch.setattr(synthesizer, '_trim_cuda_cache_sync', lambda **kwargs: calls.append(kwargs))
+    return calls
+
+
+def test_per_batch_trim_skips_gc_collect(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path, cuda_memory_trim_after_batch=True), store=InMemoryStore(max_queue_size=8))
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+    calls = _record_trims(synthesizer, monkeypatch)
+
+    run_render(synthesizer, [_auto_item()])
+
+    # The hot path only releases the CUDA pool; a full gc.collect() cost ~215 ms per batch.
+    assert calls == [{'collect_garbage': False}]
+
+
+def test_trim_collect_garbage_flag_controls_gc(tmp_path, monkeypatch) -> None:
+    import omnivoice_tts_server.runtime_v2 as runtime_module
+
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    collected: list[int] = []
+    monkeypatch.setattr(runtime_module.gc, 'collect', lambda *args: collected.append(1) or 0)
+
+    synthesizer._trim_cuda_cache_sync(collect_garbage=False)
+    assert collected == []
+    synthesizer._trim_cuda_cache_sync()
+    assert collected == [1]
+
+
+def test_failed_generate_keeps_compiled_graphs_unless_oom(tmp_path, monkeypatch) -> None:
+    import torch
+
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+    calls = _record_trims(synthesizer, monkeypatch)
+    model = FakeOmniVoiceModel.instances[-1]
+
+    def fail(exc):
+        def generate(text, **kwargs):
+            raise exc
+        return generate
+
+    # An ordinary failure (bad input, missing voice) must not reset dynamo: the next
+    # request would re-trace and recompile the LLM (~35 s measured on the RTX 4090).
+    monkeypatch.setattr(model, 'generate', fail(RuntimeError('bad request')))
+    with pytest.raises(RuntimeError):
+        run_render(synthesizer, [_auto_item()])
+    assert calls[-1] == {'reset_compile_cache': False}
+
+    monkeypatch.setattr(model, 'generate', fail(torch.cuda.OutOfMemoryError('CUDA out of memory.')))
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        run_render(synthesizer, [_auto_item()])
+    assert calls[-1] == {'reset_compile_cache': True}

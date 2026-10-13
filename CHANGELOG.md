@@ -4,6 +4,21 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed — per-batch latency and recompile stalls
+
+Measured on the RTX 4090 with Base + `Sonja`, bf16, compile on, trim on:
+
+- The per-batch VRAM trim (`cuda_memory_trim_after_batch`) no longer runs a full
+  `gc.collect()`. It walked ~700k tracked objects (~215 ms) on every batch and
+  freed no VRAM, because batch tensors are released by refcount. `empty_cache()`
+  still runs and returns the reserved pool to the same 2.1 GB as before.
+  One short sentence went from ~600 ms to ~290 ms, a batch of 4 from ~1310 ms to
+  ~840 ms. Audio output is unchanged. Unload and the admin "free memory" action
+  still collect garbage.
+- A failed request (unknown voice, missing `ref_text`, ...) no longer resets the
+  torch.compile/dynamo caches. The reset made the next request re-trace and
+  recompile the LLM (~35 s). Only a CUDA out-of-memory error still resets them.
+
 ### Changed — runtime defaults
 
 Fresh installs now start with the tuned production settings. Values already saved

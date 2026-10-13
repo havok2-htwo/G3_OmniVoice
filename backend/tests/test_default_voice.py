@@ -37,6 +37,7 @@ def test_defaults_are_base_with_sonja(tmp_path) -> None:
     assert settings.default_voice == 'Sonja'
     assert settings.torch_dtype == 'bfloat16'
     assert (settings.max_parallel_requests, settings.max_batch_size) == (8, 8)
+    assert settings.vram_budget_mb == 7000
 
 
 def test_base_request_without_voice_uses_default_voice_profile(tmp_path) -> None:

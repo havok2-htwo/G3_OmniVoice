@@ -147,7 +147,7 @@ an install that never saved settings picks these defaults up on its next start.
   (`data/voice_presets_seeded.json`).
 - `bfloat16`, `torch.compile` on, CUDA cache trim after each batch, warmup on start
 - Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
-  VRAM budget 10000 MB, max 25000 input chars, stream prebuffer 0 ms
+  VRAM budget 7000 MB, max 25000 input chars, stream prebuffer 0 ms
 - `num_step` 18, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
   class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
   preprocessing + output postprocessing on, sentence chunking on

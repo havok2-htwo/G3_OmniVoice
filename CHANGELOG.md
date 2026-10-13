@@ -4,6 +4,25 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed — VRAM budget 7000 MB
+
+The RTX 4090 is shared with Whisper, EMBED and DIA, so the default
+`vram_budget_mb` drops from 10000 to 7000. Values saved in
+`data/runtime_settings.json` still take precedence.
+
+- At 7000 MB the scheduler caps one batch at ~95 s of estimated audio and one
+  sequence at 1587 chars. Before, the caps were ~167 s and 2777 chars.
+- Measured on the 4090 (Base + `Sonja`, bf16, compile on, batch 6):
+  - Six ~400-char sentences now run as batches of 4 + 2 instead of one batch
+    of 6. Peak VRAM on the OmniVoice process fell from 5.9 GB to 4.7 GB, and
+    wall time stayed the same (4.0 s for 168 s of audio).
+  - The highest peak left is a batch of six ~265-char sentences (111 s of
+    audio) at ~5.1 GB.
+  - Short texts and mixed concurrent loads did not change.
+- The capacity constants (3000 MB + 42 MB per audio second, 0.06 s per char)
+  stay conservative. On the 4090 the model is resident at ~2.4 GB and a batch
+  adds ~21-24 MB per second of audio, so real peaks stay well below the budget.
+
 ### Fixed — per-batch latency and recompile stalls
 
 Measured on the RTX 4090 with Base + `Sonja`, bf16, compile on, trim on:

@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     max_parallel_requests: int = 8
     max_batch_size: int = 8
     batch_wait_ms: int = 0
-    vram_budget_mb: int = 10000        # 0 = disable VRAM budgeting (unbounded)
+    vram_budget_mb: int = 7000         # 0 = disable VRAM budgeting (unbounded)
     max_input_chars: int = 25000       # hard reject single requests above this (abuse guard)
     stream_chunk_ms: int = 140
     stream_prebuffer_ms: int = 0

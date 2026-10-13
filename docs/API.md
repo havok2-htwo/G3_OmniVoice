@@ -350,7 +350,7 @@ Common fields:
   "max_parallel_requests": 8,
   "max_batch_size": 8,
   "batch_wait_ms": 0,
-  "vram_budget_mb": 10000,
+  "vram_budget_mb": 7000,
   "max_input_chars": 25000,
   "sentence_chunking": true,
   "stream_prebuffer_ms": 0,

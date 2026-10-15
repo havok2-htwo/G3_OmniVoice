@@ -154,6 +154,14 @@ Notes:
 - `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
 - Streaming still uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.
 - `metadata` overrides runtime generation settings for one request.
+  Besides the settings keys, three omnivoice >= 0.2 options are accepted here and only
+  forwarded when set: `pad_duration` and `fade_duration` (seconds of silence padding and
+  fade per side, default 0.1 each, as before; `0` gives gapless joins) and
+  `normalize_text: true` (upstream text normalisation of the target text). The server
+  forwards `normalize_text` only when the request has an explicit language. For `en`/`zh`
+  it also needs WeTextProcessing, which has no Windows wheels. Without them the flag is
+  ignored instead of failing the request. Other languages use num2words for bare integers
+  only, so German decimals, dates and units stay unchanged.
 
 ## Public API
 
@@ -569,6 +577,9 @@ Response fields include:
 - Whisper/vLLM URLs used by transcription and WER benchmarks
 - queue and batching settings
 - runtime backend, device, dtype, attention implementation, compile flags
+- `enable_flashinfer` and the read-only `attention_backend` / `attention_backend_note`: the
+  attention the resident model really runs (`sdpa`, `flex_attention`, `flashinfer`) and why it
+  differs from the settings (for example FlashInfer requested on Windows)
 - generation defaults such as `num_step`, `guidance_scale`, temperatures, and chunking controls
 
 ### `PUT /api/admin/settings`
@@ -592,6 +603,7 @@ Common request fields:
   "allow_model_downloads": true,
   "preferred_device": "cuda:0",
   "attention_implementation": "sdpa",
+  "enable_flashinfer": false,
   "torch_dtype": "bfloat16",
   "compile_model": true,
   "compile_cudagraphs": false,

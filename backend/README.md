@@ -38,7 +38,8 @@ cd ..\backend
 
 ## Current Caveats
 
-- The real runtime needs `omnivoice==0.1.5` plus CUDA PyTorch.
+- The real runtime needs `omnivoice` at upstream commit `08be0b4` (reports 0.2.1, pinned
+  in `pyproject.toml`; see `docs/RUNTIME_VERSIONS.md`) plus CUDA PyTorch.
 - Saved clone voices require `ref_text`.
 - Streaming is simulated chunked PCM, not native OmniVoice token streaming.
 - Non-streaming MP3 is not implemented.

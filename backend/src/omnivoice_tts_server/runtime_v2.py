@@ -10,9 +10,11 @@ import io
 import logging
 import os
 import subprocess
+import sys
 import time
 import wave
 from dataclasses import dataclass
+from types import MethodType
 from typing import Any
 
 from .config import Settings
@@ -142,6 +144,156 @@ def _unavailable_gpu_stats() -> dict[str, int | str | None]:
     }
 
 
+SUPPORTED_ATTENTION_IMPLEMENTATIONS = ('sdpa', 'flex_attention', 'eager')
+_ATTENTION_ALIASES = {'flex': 'flex_attention', 'flexattention': 'flex_attention'}
+
+
+def normalize_attention_implementation(value: str | None) -> str:
+    """Map an attention setting to a Transformers attn_implementation we support."""
+    raw = (value or 'sdpa').strip().lower()
+    name = _ATTENTION_ALIASES.get(raw, raw)
+    if name not in SUPPORTED_ATTENTION_IMPLEMENTATIONS:
+        raise ValueError(
+            f'Unsupported attention implementation {value!r}. '
+            f'Use one of: {", ".join(SUPPORTED_ATTENTION_IMPLEMENTATIONS)}.'
+        )
+    return name
+
+
+def _dense_mask_to_block_mask(mask: Any, create_block_mask: Any) -> Any:
+    # Drop the singleton head dim first: mask_mod runs under vmap, where mixing a python
+    # int index with the index tensors falls back to .item() and fails.
+    dense = mask[:, 0]
+
+    def mask_mod(batch_idx: Any, head_idx: Any, q_idx: Any, kv_idx: Any) -> Any:
+        return dense[batch_idx, q_idx, kv_idx]
+
+    return create_block_mask(
+        mask_mod,
+        B=dense.shape[0],
+        H=None,
+        Q_LEN=dense.shape[-2],
+        KV_LEN=dense.shape[-1],
+        device=dense.device,
+    )
+
+
+def install_flex_block_mask_forward(model: Any) -> bool:
+    """Make OmniVoice's dense bool attention mask work under flex_attention.
+
+    OmniVoice's iterative decoder passes a dense (2B, 1, S, S) bool mask. Transformers'
+    flex_attention integration treats any non-BlockMask tensor as an additive score
+    bias, so the bool mask becomes +1/+0 and padded keys are NOT masked (CFG rows always
+    carry padding). Converting the mask to a BlockMask on the model's forward restores
+    exact SDPA semantics and lets flex skip fully padded blocks. The conversion sits
+    outside the compiled LLM and is cached per mask tensor: one generate() reuses the
+    same mask object for all num_step forwards.
+    """
+    try:
+        import torch
+        from torch.nn.attention.flex_attention import create_block_mask
+    except Exception as exc:
+        logger.warning('flex_attention BlockMask support unavailable: %s', exc)
+        return False
+    original_forward = getattr(model, 'forward', None)
+    if not callable(original_forward):
+        return False
+    # Holding the mask keeps identity checks safe (no address reuse) until the next
+    # generate() replaces it; inference tensors have no version counter to compare.
+    cache: dict[str, Any] = {'mask': None, 'block_mask': None}
+
+    def forward(self: Any, *args: Any, attention_mask: Any = None, **kwargs: Any) -> Any:
+        if isinstance(attention_mask, torch.Tensor) and attention_mask.dtype == torch.bool and attention_mask.dim() == 4:
+            if cache['mask'] is not attention_mask:
+                cache['block_mask'] = _dense_mask_to_block_mask(attention_mask, create_block_mask)
+                cache['mask'] = attention_mask
+            attention_mask = cache['block_mask']
+        return original_forward(*args, attention_mask=attention_mask, **kwargs)
+
+    model.forward = MethodType(forward, model)
+    model._g3_flex_block_mask_cache = cache
+    return True
+
+
+# Inductor picks the A100 flex config (164 KB shared memory) for every sm_8x part. On
+# GPUs with ~100 KB per block (RTX 30/40/50, sm_86/89/120) that template does not fit
+# for head_dim=128 ("out of resource: Required 114688, Hardware limit 101376"), the
+# compile fails and dynamo silently runs the unfused eager flex (~10x slower).
+_FLEX_SMALL_SMEM_KERNEL_OPTIONS = {'BLOCK_M': 64, 'BLOCK_N': 64, 'num_stages': 2, 'num_warps': 4}
+_FLEX_SMALL_SMEM_LIMIT = 160 * 1024
+
+
+def flex_kernel_options_for_device(torch_module: Any, device: Any) -> dict[str, int] | None:
+    try:
+        props = torch_module.cuda.get_device_properties(device)
+    except Exception:
+        return None
+    smem = int(getattr(props, 'shared_memory_per_block_optin', 0) or 0)
+    if smem and smem < _FLEX_SMALL_SMEM_LIMIT:
+        return dict(_FLEX_SMALL_SMEM_KERNEL_OPTIONS)
+    return None
+
+
+def install_flex_kernel_options(model: Any, kernel_options: dict[str, Any]) -> bool:
+    """Route the LLM's flex attention through a wrapper that adds kernel_options."""
+    try:
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
+    except Exception as exc:
+        logger.warning('cannot set flex kernel options: %s', exc)
+        return False
+    llm = getattr(model, 'llm', None)
+    config = getattr(llm, 'config', None)
+    # omnivoice >= 0.2 switches the llm to its own 'omnivoice_flex_attention' wrapper.
+    base_name = getattr(config, '_attn_implementation', None) or 'flex_attention'
+    if 'flex' not in str(base_name):
+        return False
+    base_fn = ALL_ATTENTION_FUNCTIONS[base_name]
+
+    def flex_with_kernel_options(module: Any, query: Any, key: Any, value: Any, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get('kernel_options') is None:
+            kwargs['kernel_options'] = kernel_options
+        return base_fn(module, query, key, value, *args, **kwargs)
+
+    AttentionInterface.register('g3_flex_attention', flex_with_kernel_options)
+    llm.set_attn_implementation('g3_flex_attention')
+    return True
+
+
+def flashinfer_unavailable_reason(settings: Settings) -> str | None:
+    """Why FlashInfer cannot be used on this host, or None when it can be tried."""
+    if not sys.platform.startswith('linux'):
+        return f'FlashInfer kernels need Linux (platform is {sys.platform})'
+    try:
+        device = normalize_runtime_device(settings.preferred_device)
+    except ValueError as exc:
+        return str(exc)
+    if not device.startswith('cuda:'):
+        return 'FlashInfer needs a CUDA device'
+    if settings.enable_cpu_offload:
+        return 'FlashInfer is incompatible with CPU offload'
+    if (settings.torch_dtype or '').lower() == 'fp8':
+        return 'FlashInfer is incompatible with fp8 weights'
+    if importlib.util.find_spec('flashinfer') is None:
+        return 'flashinfer is not installed'
+    try:
+        has_patch = importlib.util.find_spec('omnivoice.models.omnivoice_flashinfer') is not None
+    except Exception:
+        has_patch = False
+    if not has_patch:
+        return 'installed omnivoice has no omnivoice_flashinfer module (needs upstream >= 08be0b4)'
+    return None
+
+
+def _reset_flashinfer_context() -> None:
+    # omnivoice_flashinfer keeps the planned wrapper (128 MB workspace) in a module dict;
+    # drop it with the model so a release really frees the VRAM.
+    module = sys.modules.get('omnivoice.models.omnivoice_flashinfer')
+    ctx = getattr(module, '_CTX', None)
+    if isinstance(ctx, dict):
+        ctx.clear()
+        ctx['wrapper'] = None
+
+
 @dataclass
 class BatchSynthesisItem:
     job_id: str
@@ -171,6 +323,16 @@ class OmniVoiceSynthesizer:
         self._torch: Any | None = None
         self._soundfile: Any | None = None
         self._numpy: Any | None = None
+        # Attention backend the resident model really runs ('sdpa', 'flex_attention',
+        # 'flashinfer', ...) and why it differs from the setting, if it does.
+        self.attention_backend: str | None = None
+        self.attention_backend_note: str | None = None
+
+    def runtime_info(self) -> dict[str, Any]:
+        return {
+            'attention_backend': self.attention_backend,
+            'attention_backend_note': self.attention_backend_note,
+        }
 
     def duration_ms(self, text: str) -> int:
         return max(500, 240 + len(text) * 38)
@@ -236,16 +398,132 @@ class OmniVoiceSynthesizer:
         if self._model is not None and self._loaded_model_id != model_id:
             self._release_model()
 
+        use_flashinfer = False
+        note: str | None = None
+        if getattr(self.settings, 'enable_flashinfer', False):
+            reason = flashinfer_unavailable_reason(self.settings)
+            if reason is None:
+                use_flashinfer = True
+            else:
+                note = f'FlashInfer requested but not used: {reason}'
+                logger.warning('%s; using %s', note, self.settings.attention_implementation)
+
+        try:
+            configured_attn = normalize_attention_implementation(self.settings.attention_implementation)
+        except ValueError as exc:
+            note = f'{exc} Falling back to sdpa.'
+            logger.warning(note)
+            configured_attn = 'sdpa'
+        # apply_flashinfer swaps the attention itself; it patches the stock SDPA model.
+        attn_implementation = 'sdpa' if use_flashinfer else configured_attn
+
+        model, attn_implementation = self._from_pretrained(
+            omnivoice_cls,
+            model_id,
+            model_source,
+            extra_kwargs,
+            # FlashInfer's packed attention is planned for fp16 only (bf16 raises in run()).
+            dtype=torch.float16 if use_flashinfer else self._torch_dtype(torch),
+            attn_implementation=attn_implementation,
+            allow_fp8=not use_flashinfer,
+        )
+
+        backend = attn_implementation
+        if use_flashinfer:
+            failure: str | None = None
+            try:
+                self._apply_flashinfer(model)
+                backend = 'flashinfer'
+            except Exception as exc:
+                failure = f'{type(exc).__name__}: {exc}'
+            if failure is not None:
+                # Outside the except block, so the traceback no longer pins the patched model.
+                note = f'FlashInfer failed ({failure}); reloaded without it'
+                logger.warning(note)
+                del model
+                _reset_flashinfer_context()
+                self._trim_cuda_cache_sync()
+                model, attn_implementation = self._from_pretrained(
+                    omnivoice_cls,
+                    model_id,
+                    model_source,
+                    extra_kwargs,
+                    dtype=self._torch_dtype(torch),
+                    attn_implementation=configured_attn,
+                    allow_fp8=True,
+                )
+                backend = attn_implementation
+                use_flashinfer = False
+
+        if backend == 'flex_attention' and not install_flex_block_mask_forward(model):
+            # Unpatched flex ignores the padding mask (bool mask -> +1 bias): never run it.
+            note = 'flex_attention mask patch unavailable; reloaded with sdpa'
+            logger.warning(note)
+            del model
+            self._trim_cuda_cache_sync()
+            model, backend = self._from_pretrained(
+                omnivoice_cls,
+                model_id,
+                model_source,
+                extra_kwargs,
+                dtype=self._torch_dtype(torch),
+                attn_implementation='sdpa',
+                allow_fp8=True,
+            )
+
+        if backend == 'flex_attention' and str(self.settings.preferred_device).startswith('cuda'):
+            kernel_options = flex_kernel_options_for_device(torch, self.settings.preferred_device)
+            if kernel_options and install_flex_kernel_options(model, kernel_options):
+                logger.info('flex_attention kernel options for this GPU: %s', kernel_options)
+
+        if note is None and not use_flashinfer and backend != configured_attn:
+            note = f'{configured_attn} failed to load; using {backend}'
+        self.attention_backend = backend
+        self.attention_backend_note = note
+        logger.info('model=%s attention backend=%s', model_id, backend)
+
+        # torch.compile would trace around FlashInfer's patched forwards and planned
+        # wrapper; upstream runs that path eager.
+        if getattr(self.settings, 'compile_model', False) and not use_flashinfer:
+            self._compile_model(model)
+
+        self._model = model
+        self._loaded_model_id = model_id
+        self._loaded_model_source = model_source
+        self.settings.active_model = model_id
+        self.sample_rate = int(getattr(model, 'sampling_rate', self.settings.sample_rate) or self.settings.sample_rate)
+
+        if getattr(self.settings, 'warmup_on_startup', True):
+            self._run_warmup_inference(model_id, None)
+            # Warmup bypasses the per-batch trim, so its reserved-pool spike would stay
+            # pinned right after startup (the ~9GB-at-load the operator sees). Release it
+            # now so idle VRAM is low immediately, not only after the first real job.
+            self._trim_cuda_cache_sync()
+
+        return int((time.perf_counter() - start) * 1000)
+
+    def _from_pretrained(
+        self,
+        omnivoice_cls: Any,
+        model_id: str,
+        model_source: str,
+        extra_kwargs: dict[str, Any],
+        *,
+        dtype: Any,
+        attn_implementation: str,
+        allow_fp8: bool,
+    ) -> tuple[Any, str]:
+        """Load the checkpoint; returns (model, attn_implementation actually used)."""
         kwargs = {
             'device_map': 'auto' if self.settings.enable_cpu_offload else self.settings.preferred_device,
-            'dtype': self._torch_dtype(torch),
-            'attn_implementation': self.settings.attention_implementation,
+            'dtype': dtype,
+            'attn_implementation': attn_implementation,
             'load_asr': False,
         }
         kwargs.update(extra_kwargs)
 
         model = None
-        quant_config = self._fp8_quant_config_if_requested()
+        quant_config = self._fp8_quant_config_if_requested() if allow_fp8 else None
         if quant_config is not None:
             try:
                 logger.info('loading model=%s with EXPERIMENTAL fp8 quantization', model_id)
@@ -264,33 +542,34 @@ class OmniVoiceSynthesizer:
                 relaxed = dict(kwargs)
                 relaxed.pop('attn_implementation', None)
                 model = omnivoice_cls.from_pretrained(model_source, **relaxed)
+                attn_implementation = 'default'
             except Exception as exc:
-                if self.settings.attention_implementation == 'sdpa':
+                if attn_implementation == 'sdpa':
                     raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
+                logger.warning('load with attn_implementation=%s failed (%s); retrying with sdpa', attn_implementation, exc)
                 fallback = dict(kwargs)
                 fallback['attn_implementation'] = 'sdpa'
                 try:
                     model = omnivoice_cls.from_pretrained(model_source, **fallback)
                 except Exception:
                     raise RuntimeError(f'Failed to load OmniVoice model {model_id}: {exc}') from exc
+                attn_implementation = 'sdpa'
+        return model, attn_implementation
 
-        if getattr(self.settings, 'compile_model', False):
-            self._compile_model(model)
+    def _apply_flashinfer(self, model: Any) -> None:
+        """Patch the model with upstream's FlashInfer packed attention and smoke-test it.
 
-        self._model = model
-        self._loaded_model_id = model_id
-        self._loaded_model_source = model_source
-        self.settings.active_model = model_id
-        self.sample_rate = int(getattr(model, 'sampling_rate', self.settings.sample_rate) or self.settings.sample_rate)
+        Plain apply_flashinfer (eager, no CUDA graphs): the graph cache keys on the exact
+        tuple of sequence lengths and never evicts, so per-request text would capture a
+        new graph almost every time. A missing JIT kernel only shows up at the first
+        generate(), hence the tiny test generation before the model goes live.
+        """
+        from omnivoice.models.omnivoice_flashinfer import apply_flashinfer
 
-        if getattr(self.settings, 'warmup_on_startup', True):
-            self._run_warmup_inference(model_id, None)
-            # Warmup bypasses the per-batch trim, so its reserved-pool spike would stay
-            # pinned right after startup (the ~9GB-at-load the operator sees). Release it
-            # now so idle VRAM is low immediately, not only after the first real job.
-            self._trim_cuda_cache_sync()
-
-        return int((time.perf_counter() - start) * 1000)
+        apply_flashinfer(model)
+        grad_ctx = self._torch.inference_mode() if self._torch is not None else contextlib.nullcontext()
+        with grad_ctx:
+            model.generate(text=['Test.'], language=['en'], num_step=2)
 
     def _compile_model(self, model: Any) -> None:
         if self._torch is None:
@@ -481,6 +760,9 @@ class OmniVoiceSynthesizer:
         self._model = None
         self._loaded_model_id = None
         self._loaded_model_source = None
+        self.attention_backend = None
+        self.attention_backend_note = None
+        _reset_flashinfer_context()
         self.store.prompt_cache.clear()
         self._trim_cuda_cache_sync()
 
@@ -646,7 +928,34 @@ class OmniVoiceSynthesizer:
         speed = metadata.get('speed', request.speed)
         if speed and float(speed) != 1.0:
             result['speed'] = speed
+        # omnivoice >= 0.2: per-request silence padding / fade per side (upstream default
+        # 0.1 s each, identical to the old hard-coded values). Only forwarded when a
+        # client sets them, so the default output stays bit-identical.
+        for key in ('pad_duration', 'fade_duration'):
+            value = metadata.get(key)
+            if value is not None:
+                result[key] = max(0.0, float(value))
+        if metadata.get('normalize_text') and self._upstream_normalize_text_usable(items):
+            result['normalize_text'] = True
         return result
+
+    def _upstream_normalize_text_usable(self, items: list[BatchSynthesisItem]) -> bool:
+        """Gate omnivoice's own normalize_text (zh/en via WeTextProcessing, else num2words).
+
+        With language=None upstream guesses zh/en, so German text would get the English
+        normaliser; and a missing WeTextProcessing (no pynini wheels on Windows) raises
+        ImportError out of generate() and fails the whole batch. Only forward the flag
+        when every item has an explicit language whose backend is importable.
+        """
+        languages = [self._normalize_language(item.request.language) for item in items]
+        if any(language is None for language in languages):
+            logger.info('normalize_text ignored: needs an explicit language per request')
+            return False
+        if any(str(language).lower() in {'zh', 'en', 'chinese', 'english'} for language in languages):
+            if importlib.util.find_spec('tn') is None:
+                logger.info('normalize_text ignored: WeTextProcessing (tn) is not installed')
+                return False
+        return True
 
     def _apply_seed(self, seed: int | None) -> None:
         if seed is None or self._torch is None:

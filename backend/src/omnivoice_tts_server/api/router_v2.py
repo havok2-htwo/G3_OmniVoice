@@ -55,7 +55,13 @@ from ..domain.models import (
     WerBenchmarkRunResponse,
 )
 from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, new_id, utcnow
-from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID, normalize_runtime_device, query_runtime_devices
+from ..runtime_v2 import (
+    DEFAULT_VOICE_DESIGN_INSTRUCT,
+    OMNIVOICE_MODEL_ID,
+    normalize_attention_implementation,
+    normalize_runtime_device,
+    query_runtime_devices,
+)
 from ..security import (
     SESSION_COOKIE_NAME,
     authorize_api_key,
@@ -211,7 +217,9 @@ def _effective_task_type(model_id: str | None, request_task_type: TaskType | Non
     return TaskType.custom_voice
 
 
-def _settings_response(settings: Any) -> ServerSettingsResponse:
+def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettingsResponse:
+    runtime_info = getattr(synthesizer, 'runtime_info', None)
+    runtime = runtime_info() if callable(runtime_info) else {}
     return ServerSettingsResponse(
         model_directory=str(settings.models_root_dir),
         default_model=settings.active_model,
@@ -228,6 +236,9 @@ def _settings_response(settings: Any) -> ServerSettingsResponse:
         allow_model_downloads=settings.allow_model_downloads,
         preferred_device=settings.preferred_device,
         attention_implementation=settings.attention_implementation,
+        enable_flashinfer=bool(getattr(settings, 'enable_flashinfer', False)),
+        attention_backend=runtime.get('attention_backend'),
+        attention_backend_note=runtime.get('attention_backend_note'),
         torch_dtype=settings.torch_dtype,
         compile_model=settings.compile_model,
         compile_cudagraphs=settings.compile_cudagraphs,
@@ -653,7 +664,7 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
     jobs = [_job_item(request, job_id) for job_id in sorted(store.jobs, key=lambda value: store.jobs[value].created_at, reverse=True)[:24]]
     return DashboardSnapshot(
         overview=overview,
-        settings=_settings_response(request.app.state.settings),
+        settings=_settings_response(request.app.state.settings, getattr(request.app.state, 'synthesizer', None)),
         models=_model_items(request),
         voices=_voice_items(request, include_details=True),
         jobs=jobs,
@@ -752,7 +763,7 @@ async def delete_admin_api_key(key_id: str, request: Request) -> dict[str, bool]
 
 @admin.get('/settings', response_model=ServerSettingsResponse)
 async def get_admin_settings(request: Request) -> ServerSettingsResponse:
-    return _settings_response(request.app.state.settings)
+    return _settings_response(request.app.state.settings, getattr(request.app.state, 'synthesizer', None))
 
 
 @admin.put('/settings', response_model=ServerSettingsResponse)
@@ -794,7 +805,12 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if payload.attention_implementation is not None:
-        settings.attention_implementation = payload.attention_implementation
+        try:
+            settings.attention_implementation = normalize_attention_implementation(payload.attention_implementation)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if payload.enable_flashinfer is not None:
+        settings.enable_flashinfer = payload.enable_flashinfer
     if payload.torch_dtype is not None:
         dtype_aliases = {'fp16': 'float16', 'bf16': 'bfloat16', 'fp32': 'float32', 'float8': 'fp8'}
         requested_dtype = dtype_aliases.get(payload.torch_dtype.lower(), payload.torch_dtype.lower())
@@ -859,7 +875,7 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.class_temperature = payload.class_temperature
 
     save_runtime_settings(settings)
-    return _settings_response(settings)
+    return _settings_response(settings, getattr(request.app.state, 'synthesizer', None))
 
 
 @admin.get('/runtime/devices', response_model=RuntimeDeviceListResponse)

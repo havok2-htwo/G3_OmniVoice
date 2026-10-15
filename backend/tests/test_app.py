@@ -229,6 +229,18 @@ def test_admin_snapshot_and_settings_roundtrip() -> None:
     invalid_device = client.put('/api/admin/settings', headers=auth_headers(), json={'preferred_device': 'intel'})
     assert invalid_device.status_code == 400
 
+    flex = client.put(
+        '/api/admin/settings', headers=auth_headers(), json={'attention_implementation': 'flex', 'enable_flashinfer': True}
+    )
+    assert flex.status_code == 200
+    assert flex.json()['attention_implementation'] == 'flex_attention'
+    assert flex.json()['enable_flashinfer'] is True
+    assert flex.json()['attention_backend'] is None  # mock runtime reports no backend
+    invalid_attention = client.put(
+        '/api/admin/settings', headers=auth_headers(), json={'attention_implementation': 'flash_attention_9'}
+    )
+    assert invalid_attention.status_code == 400
+
     vllm_models = client.get('/api/admin/vllm/models?base_url=mock', headers=auth_headers())
     assert vllm_models.status_code == 200
     assert vllm_models.json()['models'] == ['mock-qwen3-35b']

@@ -145,7 +145,8 @@ an install that never saved settings picks these defaults up on its next start.
   and is added to the voice store on first start; requests without a voice use it,
   and `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
   (`data/voice_presets_seeded.json`).
-- `bfloat16`, `torch.compile` on, CUDA cache trim after each batch, warmup on start
+- `bfloat16`, `sdpa` attention, `torch.compile` on, CUDA cache trim after each batch,
+  warmup on start
 - Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
   VRAM budget 7000 MB, max 25000 input chars, stream prebuffer 0 ms
 - `num_step` 18, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
@@ -168,6 +169,12 @@ an install that never saved settings picks these defaults up on its next start.
   and the admin free-memory action still run it. A
   `vram_budget_mb` / `max_input_chars` capacity budget derives chunk sizes and a
   per-batch audio-second limit.
+- **Attention backends** - `attention_implementation` takes `sdpa` (default),
+  `flex_attention` or `eager`; `enable_flashinfer` switches to upstream's FlashInfer
+  packed attention on Linux (fp16, no `torch.compile`, automatic fallback). The Docker
+  image ships FlashInfer and turns it on. `GET /api/admin/settings` reports the
+  backend that really runs (`attention_backend`). For details and the 0.1.5 / SDPA /
+  flex benchmark, see `docs/RUNTIME_VERSIONS.md`.
 - **Experimental fp8 dtype** - selectable in the admin Dtype dropdown
   (`FineGrainedFP8Config`), gated on kernel availability with automatic bf16
   fallback. On Windows, the unsupported DeepGEMM Hub lookup is disabled so fp8

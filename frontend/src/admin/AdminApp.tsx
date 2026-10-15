@@ -1549,6 +1549,7 @@ export function AdminApp() {
           <div className="metric-list compact model-control-summary">
             <div className="metric-row"><span>Storage</span><strong className="mono path-cell">{settingsDraft.model_directory || "-"}</strong></div>
             <div className="metric-row"><span>Runtime</span><strong title={selectedRuntimeDeviceLabel}>{settingsDraft.runtime_backend} / {settingsDraft.preferred_device} / {settingsDraft.torch_dtype}</strong></div>
+            <div className="metric-row"><span>Attention</span><strong title={settingsDraft.attention_backend_note ?? ""}>{settingsDraft.attention_backend ?? settingsDraft.attention_implementation}{settingsDraft.attention_backend_note ? " (Fallback)" : ""}</strong></div>
             <div className="metric-row"><span>VRAM</span><strong>{snapshot.overview.gpu_memory_used_mb} / {snapshot.overview.gpu_memory_total_mb} MB</strong></div>
             <div className="metric-row"><span>Compile</span><strong>{settingsDraft.compile_model ? "llm on" : "llm off"}</strong></div>
           </div>

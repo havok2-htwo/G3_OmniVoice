@@ -4,6 +4,43 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - omnivoice 0.1.5 -> upstream master 08be0b4 (0.2.1 core), flex + FlashInfer
+
+- `omnivoice` is pinned to upstream commit `08be0b4` (2026-08-24) through its GitHub
+  archive URL. Its inference core is byte-identical to the 0.2.1 release, and it adds
+  the opt-in FlashInfer path. With the same seed, 0.1.5 and the new pin rendered
+  bit-identical audio for all 30 benchmark utterances (SDPA, bf16, compile, Sonja), so
+  default output does not change.
+- `attention_implementation: flex_attention` (alias `flex`) now renders correctly.
+  - Transformers' flex integration treated OmniVoice's dense bool mask as a +1/+0
+    score bias, so padded keys were never masked; this is true in 0.1.5 too. The server
+    now converts the mask to a `BlockMask`.
+  - On RTX 30/40/50 cards, Inductor's default flex template does not fit in shared
+    memory, the compile fails and dynamo silently runs flex eager (~10x slower). The
+    server now passes smaller tile sizes there.
+  - On the 4090, patched flex matched SDPA on WER and speaker similarity. It was
+    roughly as fast (batch 6: 1.59-1.67 s vs 1.76-1.80 s), so SDPA stays the default.
+- New setting `enable_flashinfer` (default off; env `OMNIVOICE_TTS_ENABLE_FLASHINFER`).
+  - On Linux + CUDA with `flashinfer` installed, the model loads in fp16, gets
+    upstream's `apply_flashinfer`, skips `torch.compile`, and must pass a 2-step test
+    generation.
+  - Anywhere else, or on any failure, the server logs the reason and keeps
+    `attention_implementation`.
+  - The Dockerfile installs `flashinfer-python[cu13]==0.6.15.post1` +
+    `flashinfer-jit-cache==0.6.15.post1+cu130` and enables the setting
+    (`--build-arg ENABLE_FLASHINFER=false` to opt out). This is untested on real Linux
+    hardware so far.
+- `GET /api/admin/settings` reports `attention_backend` / `attention_backend_note`
+  (shown in the admin runtime card). `PUT` rejects unknown attention implementations.
+- Request `metadata` accepts `pad_duration`, `fade_duration` and `normalize_text`. These
+  are new generate() options in omnivoice >= 0.2 and are only forwarded when set.
+  `normalize_text` is dropped unless the request has an explicit language and the
+  normaliser it needs is installed.
+- `requirements-lock.txt` re-synced with the live env: transformers 5.10.2,
+  huggingface_hub 1.18.0, gradio 6.17.3 and 13 more drifted pins.
+- Dockerfile: fixed a stray `\r` that ended the runtime `ENV` block early, so
+  `OPENBLAS_NUM_THREADS` was parsed as an instruction.
+
 ### Fixed — retained job audio and idle RAM
 
 A finished job kept its audio two or three times in RAM for the whole retention

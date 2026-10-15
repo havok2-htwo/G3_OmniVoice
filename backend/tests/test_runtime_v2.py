@@ -380,3 +380,211 @@ def test_failed_generate_keeps_compiled_graphs_unless_oom(tmp_path, monkeypatch)
     with pytest.raises(torch.cuda.OutOfMemoryError):
         run_render(synthesizer, [_auto_item()])
     assert calls[-1] == {'reset_compile_cache': True}
+
+
+def _omnivoice_style_mask(c_lens: list[int], u_lens: list[int]):
+    """Dense (2B, 1, S, S) bool mask exactly as OmniVoice._generate_iterative builds it."""
+    import torch
+
+    batch = len(c_lens)
+    size = max(c_lens)
+    mask = torch.zeros((2 * batch, 1, size, size), dtype=torch.bool)
+    for i, (c_len, u_len) in enumerate(zip(c_lens, u_lens)):
+        mask[i, :, :c_len, :c_len] = True
+        mask[batch + i, :, :u_len, :u_len] = True
+        if size > u_len:
+            pad_diag = torch.arange(u_len, size)
+            mask[batch + i, :, pad_diag, pad_diag] = True
+    return mask
+
+
+def test_flex_block_mask_matches_dense_sdpa_mask() -> None:
+    import torch
+    from torch.nn.attention.flex_attention import BlockMask, flex_attention
+
+    from omnivoice_tts_server.runtime_v2 import install_flex_block_mask_forward
+
+    mask = _omnivoice_style_mask(c_lens=[150, 90], u_lens=[60, 40])
+
+    class TinyModel:
+        def forward(self, input_ids=None, attention_mask=None):
+            return attention_mask
+
+    model = TinyModel()
+    assert install_flex_block_mask_forward(model) is True
+    block_mask = model.forward(input_ids=None, attention_mask=mask)
+    assert isinstance(block_mask, BlockMask)
+    # The same mask object (one generate(), num_step forwards) reuses the BlockMask.
+    assert model.forward(input_ids=None, attention_mask=mask) is block_mask
+    # A new mask (next generate()) is converted again, never served from the cache.
+    other = _omnivoice_style_mask(c_lens=[150, 90], u_lens=[70, 40])
+    assert model.forward(input_ids=None, attention_mask=other) is not block_mask
+    # Absent masks pass through untouched.
+    assert model.forward(input_ids=None, attention_mask=None) is None
+
+    torch.manual_seed(0)
+    rows, heads, size, dim = mask.shape[0], 2, mask.shape[-1], 16
+    q, k, v = (torch.randn(rows, heads, size, dim) for _ in range(3))
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+    out = flex_attention(q, k, v, block_mask=block_mask)
+    valid = mask[:, 0].any(dim=-1)  # rows SDPA defines (fully masked pad rows are unused)
+    assert torch.allclose(out.permute(0, 2, 1, 3)[valid], ref.permute(0, 2, 1, 3)[valid], atol=1e-5)
+
+
+def test_flex_kernel_options_wrap_the_llm_attention() -> None:
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
+
+    from omnivoice_tts_server.runtime_v2 import flex_kernel_options_for_device, install_flex_kernel_options
+
+    seen: list[dict] = []
+    AttentionInterface.register('test_flex_base', lambda module, q, k, v, *args, **kwargs: seen.append(kwargs) or 'out')
+    switched: list[str] = []
+    llm = types.SimpleNamespace(
+        config=types.SimpleNamespace(_attn_implementation='test_flex_base'),
+        set_attn_implementation=switched.append,
+    )
+    options = {'BLOCK_M': 64, 'BLOCK_N': 64, 'num_stages': 2, 'num_warps': 4}
+    assert install_flex_kernel_options(types.SimpleNamespace(llm=llm), options) is True
+    assert switched == ['g3_flex_attention']
+    assert ALL_ATTENTION_FUNCTIONS['g3_flex_attention'](None, 1, 2, 3, None, scaling=0.1) == 'out'
+    assert seen[-1]['kernel_options'] == options
+
+    # sdpa models are left alone.
+    llm.config._attn_implementation = 'sdpa'
+    assert install_flex_kernel_options(types.SimpleNamespace(llm=llm), options) is False
+
+    def props(smem):
+        return types.SimpleNamespace(cuda=types.SimpleNamespace(get_device_properties=lambda device: types.SimpleNamespace(shared_memory_per_block_optin=smem)))
+
+    assert flex_kernel_options_for_device(props(101376), 'cuda:0') == options  # RTX 4090
+    assert flex_kernel_options_for_device(props(232448), 'cuda:0') is None  # H100: inductor default fits
+
+
+def test_flex_attention_load_installs_mask_patch(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    monkeypatch.setattr(FakeOmniVoiceModel, 'forward', lambda self, **kwargs: kwargs, raising=False)
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, attention_implementation='flex', compile_model=False),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    assert FakeOmniVoice.load_calls[-1]['attn_implementation'] == 'flex_attention'
+    assert synthesizer.attention_backend == 'flex_attention'
+    assert hasattr(FakeOmniVoiceModel.instances[-1], '_g3_flex_block_mask_cache')
+
+
+def test_unknown_attention_falls_back_to_sdpa(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, attention_implementation='flash_attention_9', compile_model=False),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    assert FakeOmniVoice.load_calls[-1]['attn_implementation'] == 'sdpa'
+    assert synthesizer.attention_backend == 'sdpa'
+    assert 'flash_attention_9' in (synthesizer.attention_backend_note or '')
+
+
+def test_flashinfer_request_is_skipped_off_linux(tmp_path, monkeypatch) -> None:
+    import torch
+
+    install_fake_omnivoice(monkeypatch)
+    monkeypatch.setattr('omnivoice_tts_server.runtime_v2.sys.platform', 'win32')
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, enable_flashinfer=True, torch_dtype='bfloat16', compile_model=False),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    load = FakeOmniVoice.load_calls[-1]
+    assert load['dtype'] == torch.bfloat16
+    assert load['attn_implementation'] == 'sdpa'
+    assert synthesizer.attention_backend == 'sdpa'
+    assert 'Linux' in (synthesizer.attention_backend_note or '')
+
+
+def _install_fake_flashinfer(monkeypatch, apply_flashinfer):
+    import omnivoice_tts_server.runtime_v2 as runtime_module
+
+    fi_module = types.ModuleType('omnivoice.models.omnivoice_flashinfer')
+    fi_module._CTX = {'wrapper': object()}
+    fi_module.apply_flashinfer = apply_flashinfer
+    monkeypatch.setitem(sys.modules, 'omnivoice.models.omnivoice_flashinfer', fi_module)
+    monkeypatch.setattr(runtime_module, 'flashinfer_unavailable_reason', lambda settings: None)
+    return fi_module
+
+
+def test_flashinfer_loads_fp16_patches_and_skips_compile(tmp_path, monkeypatch) -> None:
+    import torch
+
+    install_fake_omnivoice(monkeypatch)
+    patched: list = []
+    fi_module = _install_fake_flashinfer(monkeypatch, lambda model, **kwargs: patched.append(model) or model)
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, enable_flashinfer=True, torch_dtype='bfloat16', compile_model=True),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    compiled: list = []
+    monkeypatch.setattr(synthesizer, '_compile_model', lambda model: compiled.append(model))
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    model = FakeOmniVoiceModel.instances[-1]
+    assert FakeOmniVoice.load_calls[-1]['dtype'] == torch.float16
+    assert patched == [model]
+    assert model.calls[-1]['num_step'] == 2  # smoke-test generate before going live
+    assert compiled == []
+    assert synthesizer.attention_backend == 'flashinfer'
+
+    asyncio.run(synthesizer.unload())
+    assert fi_module._CTX == {'wrapper': None}
+
+
+def test_flashinfer_failure_reloads_with_configured_backend(tmp_path, monkeypatch) -> None:
+    import torch
+
+    install_fake_omnivoice(monkeypatch)
+
+    def broken(model, **kwargs):
+        raise RuntimeError('missing JIT kernel')
+
+    _install_fake_flashinfer(monkeypatch, broken)
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, enable_flashinfer=True, torch_dtype='bfloat16', compile_model=False),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    assert [call['dtype'] for call in FakeOmniVoice.load_calls] == [torch.float16, torch.bfloat16]
+    assert synthesizer.attention_backend == 'sdpa'
+    assert 'missing JIT kernel' in (synthesizer.attention_backend_note or '')
+
+
+def test_new_generation_kwargs_pass_through_metadata(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+    monkeypatch.setattr(
+        'omnivoice_tts_server.runtime_v2.importlib.util.find_spec',
+        lambda name, *args: None if name == 'tn' else object(),
+    )
+
+    def item(language, **metadata):
+        text = 'Es kostet 12 Euro.'
+        request = SpeechRequest(
+            input=text, model=OMNIVOICE_AUTO_ALIAS, task_type=TaskType.custom_voice, language=language, metadata=metadata
+        )
+        return BatchSynthesisItem(job_id='job_kw', sentence_index=0, text=text, request=request)
+
+    default_kwargs = synthesizer._generation_kwargs([item('Deutsch')])
+    assert not {'pad_duration', 'fade_duration', 'normalize_text'} & set(default_kwargs)
+
+    kwargs = synthesizer._generation_kwargs([item('Deutsch', pad_duration=0, fade_duration='0.05', normalize_text=True)])
+    assert kwargs['pad_duration'] == 0.0
+    assert kwargs['fade_duration'] == 0.05
+    assert kwargs['normalize_text'] is True
+    # Auto language would send German through upstream's English normaliser, and en/zh
+    # need WeTextProcessing (missing here): the flag is dropped instead of failing.
+    assert 'normalize_text' not in synthesizer._generation_kwargs([item('Auto', normalize_text=True)])
+    assert 'normalize_text' not in synthesizer._generation_kwargs([item('English', normalize_text=True)])

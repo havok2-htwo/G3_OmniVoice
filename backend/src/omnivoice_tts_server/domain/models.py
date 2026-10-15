@@ -194,6 +194,11 @@ class ServerSettingsResponse(BaseModel):
     allow_model_downloads: bool
     preferred_device: str
     attention_implementation: str
+    enable_flashinfer: bool = False
+    # Read-only: backend the resident model really runs (sdpa / flex_attention /
+    # flashinfer) and why it differs from the settings, if it does.
+    attention_backend: str | None = None
+    attention_backend_note: str | None = None
     torch_dtype: str
     compile_model: bool
     compile_cudagraphs: bool
@@ -246,6 +251,7 @@ class ServerSettingsUpdateRequest(BaseModel):
     allow_model_downloads: bool | None = None
     preferred_device: str | None = None
     attention_implementation: str | None = None
+    enable_flashinfer: bool | None = None
     torch_dtype: str | None = None
     compile_model: bool | None = None
     compile_cudagraphs: bool | None = None

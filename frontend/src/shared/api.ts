@@ -68,6 +68,10 @@ export interface ServerSettings {
   allow_model_downloads: boolean;
   preferred_device: string;
   attention_implementation: string;
+  enable_flashinfer?: boolean;
+  /** Read-only: backend the resident model really runs (sdpa / flex_attention / flashinfer). */
+  attention_backend?: string | null;
+  attention_backend_note?: string | null;
   torch_dtype: string;
   compile_model: boolean;
   compile_cudagraphs: boolean;

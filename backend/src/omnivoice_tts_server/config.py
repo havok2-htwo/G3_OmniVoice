@@ -28,6 +28,7 @@ RUNTIME_SETTINGS_FIELDS = {
     'allow_model_downloads',
     'preferred_device',
     'attention_implementation',
+    'enable_flashinfer',
     'torch_dtype',
     'compile_model',
     'compile_cudagraphs',
@@ -101,7 +102,13 @@ class Settings(BaseSettings):
     cuda_memory_trim_after_batch: bool = True
     warmup_on_startup: bool = True
     preferred_device: str = 'cuda:0'
+    # sdpa | flex_attention | eager. flex_attention gets its padding mask converted to a
+    # BlockMask at load (runtime_v2.install_flex_block_mask_forward).
     attention_implementation: str = 'sdpa'
+    # Upstream FlashInfer packed attention (omnivoice_flashinfer, Linux + CUDA + the
+    # flashinfer wheels). When it is active the model loads in fp16 and torch.compile is
+    # skipped; anywhere else the server logs why and keeps attention_implementation.
+    enable_flashinfer: bool = False
     torch_dtype: str = 'bfloat16'
     max_queue_size: int = 32
     sample_rate: int = 24_000

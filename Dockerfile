@@ -21,6 +21,10 @@ RUN npm run build
 ############################  2) Python runtime  ############################
 FROM python:3.12-slim-bookworm AS runtime
 
+# FlashInfer packed attention for OmniVoice (upstream omnivoice_flashinfer). On by default
+# for the Linux image; build with --build-arg ENABLE_FLASHINFER=false to leave it out.
+ARG ENABLE_FLASHINFER=true
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUTF8=1 \
@@ -36,10 +40,15 @@ ENV PYTHONUNBUFFERED=1 \
     OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=true \
     # Trim the CUDA caching-allocator reserved pool (lower idle VRAM; shares the GPU
     # with the Whisper container). expandable_segments is fine on Linux.
-    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256 \r
+    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256 \
     # numpy/scipy OpenBLAS would start one thread per core, each with its own buffer;
     # inference runs in torch, so cap it (torch intra-op threads are not affected).
-    OPENBLAS_NUM_THREADS=4
+    OPENBLAS_NUM_THREADS=4 \
+    # Load the model in fp16 and patch it with FlashInfer when the wheels below are
+    # installed. The server skips torch.compile for that path and falls back to
+    # attention_implementation (sdpa, bf16, compile) if FlashInfer cannot load or its
+    # smoke-test generation fails; the effective backend shows in /api/admin/settings.
+    OMNIVOICE_TTS_ENABLE_FLASHINFER=${ENABLE_FLASHINFER}
 
 # System libraries:
 #   ffmpeg         -> audio container decode (imageio-ffmpeg also bundles a binary)
@@ -71,13 +80,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # (parents[3] of backend/src/omnivoice_tts_server/config.py) — matching start_server.bat —
 # so DEFAULT_FRONTEND_DIST = /app/frontend/dist works out of the box.
 #
-# This pulls omnivoice==0.1.5, kernels, transformers, etc. Without pins those float to the
+# This pulls omnivoice (upstream master 08be0b4 via its GitHub archive URL, so no git is
+# needed in the image), kernels, transformers, etc. Without pins those float to the
 # newest PyPI release, which does NOT reproduce the machine-verified stack (the fp8/kernels/
 # transformers combo is version-sensitive). So constrain the whole dependency set with
 # requirements-lock.txt via -c (NOT -r: the lock is a Windows conda snapshot pinning
 # triton-windows and +cu130 torch, which -r would try to install and fail on). As a
 # constraints file it only caps versions of packages actually pulled — forcing
-# transformers==5.9.0, huggingface_hub==1.16.1, accelerate==1.13.0, tokenizers==0.22.2,
+# transformers==5.10.2, huggingface_hub==1.18.0, accelerate==1.13.0, tokenizers==0.22.2,
 # kernels==0.14.1, numpy==2.4.4, ... — while the Windows-only lines stay inert and the
 # already-installed +cu130 torch trio (above) satisfies its pins untouched.
 COPY backend/ ./backend/
@@ -86,6 +96,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e ./backend \
         -c requirements-lock.txt \
         --extra-index-url https://download.pytorch.org/whl/cu130
+
+# FlashInfer 0.6.15.post1 is the version upstream OmniVoice validated. flashinfer-python is a
+# py3-none-any wheel binding through tvm-ffi (no torch ABI pin, fine with torch 2.10);
+# flashinfer-jit-cache ships the precompiled cu130 kernels, so no nvcc is needed as long as
+# the kernels OmniVoice uses (fp16 ragged prefill head_dim 128, rmsnorm, rope, silu_and_mul)
+# are in the cache. If one is missing, its JIT build fails without a CUDA toolkit and the
+# server falls back to SDPA (see above); use an nvidia/cuda:13.0-devel base to JIT instead.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$ENABLE_FLASHINFER" = "true" ]; then \
+        pip install "flashinfer-python[cu13]==0.6.15.post1" "flashinfer-jit-cache==0.6.15.post1+cu130" \
+            -c requirements-lock.txt \
+            --extra-index-url https://flashinfer.ai/whl/cu130/ ; \
+    fi
 
 # Built frontend + helper tools.
 COPY --from=frontend /build/frontend/dist ./frontend/dist

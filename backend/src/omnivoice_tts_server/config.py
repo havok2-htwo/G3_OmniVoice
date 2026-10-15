@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -58,6 +59,7 @@ RUNTIME_SETTINGS_FIELDS = {
     'audio_chunk_threshold',
     'position_temperature',
     'class_temperature',
+    'text_optimization_default',
 }
 
 
@@ -146,6 +148,9 @@ class Settings(BaseSettings):
     audio_chunk_threshold: float | None = Field(default=30.0, ge=0.1, le=3600.0)
     position_temperature: float | None = Field(default=5.0, ge=0.0, le=5.0)
     class_temperature: float | None = Field(default=0.0, ge=0.0, le=5.0)
+    # Spoken-text optimization for public requests that do not set text_optimization
+    # themselves ('off' | 'deterministic'). Benchmarks and finetune jobs stay 'off'.
+    text_optimization_default: Literal['off', 'deterministic'] = 'off'
 
     @field_validator('models_root_dir', mode='before')
     @classmethod

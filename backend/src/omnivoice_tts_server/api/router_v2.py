@@ -46,6 +46,9 @@ from ..domain.models import (
     SpeechRequest,
     SynthesisResultResponse,
     TaskType,
+    TextOptimizationInfo,
+    TextOptimizeRequest,
+    TextOptimizeResponse,
     TranscriptionResponse,
     VoiceCatalogResponse,
     VoiceProfileCreateResponse,
@@ -273,7 +276,28 @@ def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettings
         audio_chunk_threshold=settings.audio_chunk_threshold,
         position_temperature=settings.position_temperature,
         class_temperature=settings.class_temperature,
+        text_optimization_default=_text_optimization_default(settings),
     )
+
+
+def _text_optimization_default(settings: Any) -> str:
+    value = getattr(settings, 'text_optimization_default', 'off')
+    return value if value in ('off', 'deterministic') else 'off'
+
+
+def _text_optimization_info(job: Any) -> TextOptimizationInfo | None:
+    if not getattr(job, 'text_optimization', None):
+        return None
+    return TextOptimizationInfo(**job.text_optimization, spoken_text=job.spoken_text)
+
+
+def _text_optimization_headers(job: Any) -> dict[str, str]:
+    """X-Text-Optimization: '<mode>; language=<de|en|none>; rules=<a,b,...>' (ASCII only)."""
+    info = getattr(job, 'text_optimization', None)
+    if not info:
+        return {}
+    rules = ','.join(info.get('applied_rules') or [])
+    return {'X-Text-Optimization': f"{info.get('mode')}; language={info.get('language') or 'none'}; rules={rules}"}
 
 
 def _voice_items(request: Request, *, include_details: bool = False) -> list[VoiceProfileListItem]:
@@ -608,6 +632,7 @@ def _job_detail(request: Request, job_id: str) -> JobDetailResponse:
         completed_at=job.completed_at,
         sentences_total=job.sentences_total,
         batch_count=int(job.metrics.get('batch_count') or 0),
+        text_optimization=_text_optimization_info(job),
     )
 
 
@@ -873,6 +898,8 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.position_temperature = payload.position_temperature
     if payload.class_temperature is not None:
         settings.class_temperature = payload.class_temperature
+    if payload.text_optimization_default is not None:
+        settings.text_optimization_default = payload.text_optimization_default
 
     save_runtime_settings(settings)
     return _settings_response(settings, getattr(request.app.state, 'synthesizer', None))
@@ -1282,6 +1309,52 @@ async def synthesize(request: Request, payload: SpeechRequest, api_key_id: str |
         voice=finished.request.voice,
         sample_rate=finished.sample_rate,
         metrics=finished.metrics,
+        text_optimization=_text_optimization_info(finished),
+    )
+
+
+@router.post('/api/v1/text/optimize', response_model=TextOptimizeResponse)
+async def optimize_text_preview(
+    request: Request, payload: TextOptimizeRequest, api_key_id: str | None = Depends(authorize_api_key)
+) -> TextOptimizeResponse:
+    """Dry run of the deterministic text optimization: the spoken text and the sentences
+    a synthesis request with text_optimization='deterministic' would render."""
+    return await _optimize_text_preview(request, payload)
+
+
+@admin.post('/text/optimize', response_model=TextOptimizeResponse)
+async def admin_optimize_text_preview(request: Request, payload: TextOptimizeRequest) -> TextOptimizeResponse:
+    """Admin-session twin of /api/v1/text/optimize for the dashboard preview."""
+    return await _optimize_text_preview(request, payload)
+
+
+async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest) -> TextOptimizeResponse:
+    from ..capacity import max_chars_per_chunk
+    from ..prompt_batch import split_sentences
+    from ..text_optimizer.service import optimize_text
+
+    settings = request.app.state.settings
+    text = (payload.input or '').strip()
+    max_input = int(getattr(settings, 'max_input_chars', 0) or 0)
+    if max_input > 0 and len(text) > max_input:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f'Input text is {len(text)} characters; the limit is {max_input}.',
+        )
+    outcome = await asyncio.to_thread(optimize_text, text, payload.language, stage=payload.stage)
+    sentences = split_sentences(
+        outcome.text,
+        enabled=settings.sentence_chunking,
+        short_sentence_merge_max_chars=settings.short_sentence_merge_max_chars,
+        following_sentence_merge_min_chars=settings.following_sentence_merge_min_chars,
+        max_chars=max_chars_per_chunk(getattr(settings, 'vram_budget_mb', 0)),
+    )
+    return TextOptimizeResponse(
+        text=outcome.text,
+        applied_rules=outcome.applied_rules,
+        language=outcome.language,
+        binding_origin=outcome.binding_origin,
+        sentences=sentences,
     )
 
 
@@ -1364,7 +1437,7 @@ async def speech(request: Request, payload: SpeechRequest, api_key_id: str | Non
                     except Exception:
                         pass
 
-        return StreamingResponse(stream_job(), media_type='audio/pcm')
+        return StreamingResponse(stream_job(), media_type='audio/pcm', headers=_text_optimization_headers(job))
 
     job = await _submit_or_429(queue, payload.model_copy(update={'stream': False}), owner_scope='public', api_key_id=api_key_id)
     finished = await queue.wait_for_completion(job.job_id)
@@ -1372,12 +1445,14 @@ async def speech(request: Request, payload: SpeechRequest, api_key_id: str | Non
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=finished.error_message or 'Synthesis cancelled')
     if finished.status != JobStatus.completed or not finished.final_audio:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=finished.error_message or 'Synthesis failed')
-    return _audio_response(
+    response = _audio_response(
         finished.final_audio,
         source_media_type=finished.content_type or 'audio/wav',
         requested_format=payload.response_format,
         filename_stem=finished.job_id,
     )
+    response.headers.update(_text_optimization_headers(finished))
+    return response
 
 
 @router.post('/v1/jobs', response_model=SpeechJobCreateResponse)

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..text_optimizer.modes import parse_text_optimization_mode
+
+TextOptimizationMode = Literal['off', 'deterministic']
 
 
 class JobStatus(str, Enum):
@@ -39,6 +43,37 @@ class SpeechRequest(BaseModel):
     x_vector_only_mode: bool = False
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Spoken-text optimization (dates, numbers, units, URLs, Markdown -> words) for de/en.
+    # None = admin default (text_optimization_default) for public requests, 'off' otherwise.
+    # Also accepts true/false. 'llm' is reserved. ref_text / instructions are never touched.
+    text_optimization: TextOptimizationMode | None = None
+
+    @field_validator('text_optimization', mode='before')
+    @classmethod
+    def _validate_text_optimization(cls, value: Any) -> str | None:
+        return parse_text_optimization_mode(value)
+
+
+class TextOptimizationInfo(BaseModel):
+    mode: TextOptimizationMode
+    language: str | None = None
+    binding_origin: str = 'none'
+    applied_rules: list[str] = Field(default_factory=list)
+    spoken_text: str | None = None
+
+
+class TextOptimizeRequest(BaseModel):
+    input: str = Field(max_length=1_000_000)
+    language: str | None = None
+    stage: Literal['final', 'floor'] = 'final'
+
+
+class TextOptimizeResponse(BaseModel):
+    text: str
+    applied_rules: list[str] = Field(default_factory=list)
+    language: str | None = None
+    binding_origin: str = 'none'
+    sentences: list[str] = Field(default_factory=list)
 
 
 class JobMetrics(BaseModel):
@@ -73,6 +108,7 @@ class SynthesisResultResponse(BaseModel):
     metrics: JobMetrics = Field(default_factory=JobMetrics)
     audio_url: str | None = None
     error_message: str | None = None
+    text_optimization: TextOptimizationInfo | None = None
 
 
 class JobListItem(BaseModel):
@@ -96,6 +132,7 @@ class JobDetailResponse(JobListItem):
     completed_at: datetime | None = None
     sentences_total: int | None = None
     batch_count: int | None = None
+    text_optimization: TextOptimizationInfo | None = None
 
 
 class VoiceProfileCreateResponse(BaseModel):
@@ -234,6 +271,7 @@ class ServerSettingsResponse(BaseModel):
     audio_chunk_threshold: float | None = None
     position_temperature: float | None = None
     class_temperature: float | None = None
+    text_optimization_default: TextOptimizationMode = 'off'
 
 
 class ServerSettingsUpdateRequest(BaseModel):
@@ -283,6 +321,7 @@ class ServerSettingsUpdateRequest(BaseModel):
     audio_chunk_threshold: float | None = Field(default=None, ge=0.1, le=3600.0)
     position_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
     class_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
+    text_optimization_default: TextOptimizationMode | None = None
 
 
 class SettingsPresetItem(BaseModel):

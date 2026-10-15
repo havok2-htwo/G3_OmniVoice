@@ -155,6 +155,10 @@ class JobRecord:
     sentences_total: int = 0
     owner_scope: str = 'public'
     api_key_id: str | None = None
+    # Set when text optimization ran: {mode, language, binding_origin, applied_rules} and the
+    # text that was actually split and spoken. request.input always stays the raw input.
+    text_optimization: dict[str, Any] | None = None
+    spoken_text: str | None = None
 
     def preview(self, length: int = 80) -> str:
         text = (self.request.input or '').strip()

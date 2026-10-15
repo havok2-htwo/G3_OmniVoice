@@ -32,6 +32,8 @@ import {
   type ServerSettings,
   type SynthStreamEvent,
   type TaskType,
+  type TextOptimizationMode,
+  type TextOptimizeResponse,
   type VllmModelsResponse,
   type WerBenchmarkRunResponse,
 } from "../shared/api";
@@ -162,6 +164,8 @@ const ADMIN_HELP = {
   quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
   quickInstructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wird von OmniVoice abgelehnt.",
   quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
+  quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese.",
+  textOptimizationDefault: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus; Benchmarks, WER und Finetune bleiben immer aus.",
   defaultModel: "Default-Modell fuer neue Jobs, Model Ops und den naechsten Serverstart.",
   defaultVoice: "Default-Stimme passend zum Default-Modell. Base braucht eine gespeicherte Custom Voice.",
   queueLimit: "Maximale Anzahl wartender Jobs, bevor neue Requests mit 429 abgelehnt werden.",
@@ -405,6 +409,8 @@ export function AdminApp() {
   const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
   const [quickSeed, setQuickSeed] = useState("");
+  const [quickTextOptimization, setQuickTextOptimization] = useState<"" | TextOptimizationMode>("");
+  const [quickOptimizePreview, setQuickOptimizePreview] = useState<TextOptimizeResponse | null>(null);
   const [quickMetrics, setQuickMetrics] = useState<JobMetrics | null>(null);
   const [quickAudioUrl, setQuickAudioUrl] = useState("");
   const [quickAudioDownloadName, setQuickAudioDownloadName] = useState("omnivoice-admin-quick.mp3");
@@ -859,6 +865,20 @@ export function AdminApp() {
     nextPlaybackTimeRef.current = startAt + buffer.duration;
   }
 
+  async function handleQuickOptimizePreview() {
+    setError("");
+    try {
+      const preview = await apiFetch<TextOptimizeResponse>("/api/admin/text/optimize", {
+        method: "POST",
+        adminKey,
+        body: { input: quickText, language: quickLanguage },
+      });
+      setQuickOptimizePreview(preview);
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : "Textoptimierung fehlgeschlagen.");
+    }
+  }
+
   async function handleQuickRun() {
     if (quickRunning) {
       quickAbortRef.current?.abort();
@@ -892,9 +912,18 @@ export function AdminApp() {
           stream: true,
           response_format: "pcm",
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
+          text_optimization: quickTextOptimization || null,
         },
         onEvent: async (event: SynthStreamEvent) => {
-          if (event.type === "start") completedJobId = event.job_id;
+          if (event.type === "start") {
+            completedJobId = event.job_id;
+            const info = event.text_optimization;
+            setQuickOptimizePreview(
+              info
+                ? { text: info.spoken_text ?? "", applied_rules: info.applied_rules, language: info.language, binding_origin: info.binding_origin ?? "none", sentences: [] }
+                : null,
+            );
+          }
           if (event.type === "chunk") {
             sampleRate = event.sample_rate;
             const decoded = decodePcm16Base64(event.pcm16_b64);
@@ -1649,6 +1678,10 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.tShift}>T shift<input type="number" step="0.1" value={settingsDraft.t_shift ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, t_shift: event.target.value ? Number(event.target.value) : null })} /></label>
             <label className="with-help" title={ADMIN_HELP.positionTemperature}>Position temp<input type="number" step="0.1" value={settingsDraft.position_temperature ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, position_temperature: event.target.value ? Number(event.target.value) : null })} /></label>
             <label className="with-help" title={ADMIN_HELP.classTemperature}>Class temp<input type="number" step="0.1" value={settingsDraft.class_temperature ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, class_temperature: event.target.value ? Number(event.target.value) : null })} /></label>
+            <label className="with-help" title={ADMIN_HELP.textOptimizationDefault}>Textoptimierung (Default)<select value={settingsDraft.text_optimization_default ?? "off"} onChange={(event) => setSettingsDraft({ ...settingsDraft, text_optimization_default: event.target.value as TextOptimizationMode })}>
+              <option value="off">off</option>
+              <option value="deterministic">deterministic (de/en)</option>
+            </select></label>
             <label className="with-help" title={ADMIN_HELP.audioChunkDuration}>Audio chunk sec<input type="number" step="0.1" value={settingsDraft.audio_chunk_duration ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, audio_chunk_duration: event.target.value ? Number(event.target.value) : null })} /></label>
             <label className="with-help" title={ADMIN_HELP.audioChunkThreshold}>Chunk threshold sec<input type="number" step="0.1" value={settingsDraft.audio_chunk_threshold ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, audio_chunk_threshold: event.target.value ? Number(event.target.value) : null })} /></label>
           </div>
@@ -1876,7 +1909,22 @@ export function AdminApp() {
             </div>
           ) : null}
           <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
-          <div className="button-row"><button className="primary-button" type="button" onClick={handleQuickRun}>{quickRunning ? "Stoppen" : "Stream starten"}</button></div>
+          <label className="with-help" title={ADMIN_HELP.quickTextOptimization}>Textoptimierung<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
+            <option value="">Server-Default ({snapshot?.settings.text_optimization_default ?? "off"})</option>
+            <option value="off">off</option>
+            <option value="deterministic">deterministic</option>
+          </select></label>
+          <div className="button-row">
+            <button className="primary-button" type="button" onClick={handleQuickRun}>{quickRunning ? "Stoppen" : "Stream starten"}</button>
+            <button className="secondary-button" type="button" title={ADMIN_HELP.quickTextOptimization} onClick={() => void handleQuickOptimizePreview()}>Text-Vorschau</button>
+          </div>
+          {quickOptimizePreview ? (
+            <div className="metric-list" title="Gesprochener Text nach der Textoptimierung">
+              <div className="metric-row"><span>Sprache</span><strong>{quickOptimizePreview.language ?? "keine"} ({quickOptimizePreview.binding_origin})</strong></div>
+              <div className="metric-row"><span>Regeln</span><strong>{quickOptimizePreview.applied_rules.length ? quickOptimizePreview.applied_rules.join(", ") : "keine"}</strong></div>
+              <p style={{ whiteSpace: "pre-wrap", margin: "6px 0 0" }}>{quickOptimizePreview.text}</p>
+            </div>
+          ) : null}
           {quickAudioUrl ? (
             <>
               <audio controls src={quickAudioUrl} />

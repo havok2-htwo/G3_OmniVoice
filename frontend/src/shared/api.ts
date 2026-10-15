@@ -106,6 +106,7 @@ export interface ServerSettings {
   audio_chunk_threshold?: number | null;
   position_temperature?: number | null;
   class_temperature?: number | null;
+  text_optimization_default?: TextOptimizationMode;
 }
 
 export interface DashboardSnapshot {
@@ -179,11 +180,30 @@ export interface StreamDoneEvent {
   };
 }
 
+export type TextOptimizationMode = "off" | "deterministic";
+
+export interface TextOptimizationInfo {
+  mode: TextOptimizationMode;
+  language?: string | null;
+  binding_origin?: string;
+  applied_rules: string[];
+  spoken_text?: string | null;
+}
+
+export interface TextOptimizeResponse {
+  text: string;
+  applied_rules: string[];
+  language?: string | null;
+  binding_origin: string;
+  sentences: string[];
+}
+
 export interface StreamStartEvent {
   type: "start";
   job_id: string;
   sentence_count: number;
   queue_position: number;
+  text_optimization?: TextOptimizationInfo;
 }
 
 export interface StreamBatchEvent {

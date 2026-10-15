@@ -152,9 +152,11 @@ class QueueService:
             )
         self._apply_default_voice(request)
         self._validate_request_voice_model(request)
+        spoken_text, text_optimization = await self._optimize_spoken_text(request, text, owner_scope)
+        request = self._drop_upstream_normalize_after_optimization(request, text_optimization)
 
         sentences = split_sentences(
-            text,
+            spoken_text,
             enabled=self.settings.sentence_chunking,
             short_sentence_merge_max_chars=self.settings.short_sentence_merge_max_chars,
             following_sentence_merge_min_chars=self.settings.following_sentence_merge_min_chars,
@@ -173,6 +175,8 @@ class QueueService:
             api_key_id=api_key_id,
             sentences_total=len(sentences),
             stream_consumer=stream_consumer,
+            text_optimization=text_optimization,
+            spoken_text=spoken_text if text_optimization is not None else None,
         )
         job.metrics['sentences_total'] = len(sentences)
         state = RequestState(job_id=job.job_id, group_key=self._group_key_for_request(request), sentences=sentences)
@@ -185,18 +189,76 @@ class QueueService:
             self.store.request_states[job.job_id] = state
             self.store.waiting_requests.append(job.job_id)
             self._recompute_positions_locked()
-            job.push_stream_event(
-                {
-                    'type': 'start',
-                    'job_id': job.job_id,
-                    'sentence_count': len(sentences),
-                    'queue_position': job.queue_position,
-                }
-            )
+            start_event = {
+                'type': 'start',
+                'job_id': job.job_id,
+                'sentence_count': len(sentences),
+                'queue_position': job.queue_position,
+            }
+            if text_optimization is not None:
+                start_event['text_optimization'] = {**text_optimization, 'spoken_text': spoken_text}
+            job.push_stream_event(start_event)
             self.store.job_condition.notify_all()
 
         await self._publish_state()
         return job
+
+    @staticmethod
+    def _drop_upstream_normalize_after_optimization(
+        request: SpeechRequest, text_optimization: dict[str, Any] | None
+    ) -> SpeechRequest:
+        """Skip omnivoice's own normalize_text once our optimizer bound de/en.
+
+        The spoken text is already verbalized, so a second (and for German weaker,
+        integer-only) normalisation pass can only hurt. Done before the group key is
+        computed, so such requests never share a batch with ones that still normalize.
+        """
+        metadata = request.metadata or {}
+        if not metadata.get('normalize_text') or not text_optimization:
+            return request
+        if text_optimization.get('language') not in {'de', 'en'}:
+            return request
+        logger.info(
+            'normalize_text ignored: text_optimization already verbalized the %s text',
+            text_optimization.get('language'),
+        )
+        return request.model_copy(
+            update={'metadata': {key: value for key, value in metadata.items() if key != 'normalize_text'}}
+        )
+
+    async def _optimize_spoken_text(
+        self, request: SpeechRequest, text: str, owner_scope: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Apply the request's text optimization mode (text_optimizer package).
+
+        Returns (text to split and speak, info for the job) - info is None when the mode is
+        'off', so such requests keep today's sentences byte for byte. Runs in a thread: the
+        rule passes are CPU-bound regex work (about 1 s for a 25k-character input).
+        """
+        from .text_optimizer.modes import resolve_text_optimization_mode
+
+        try:
+            mode = resolve_text_optimization_mode(
+                request.text_optimization,
+                request.metadata,
+                getattr(self.settings, 'text_optimization_default', 'off'),
+                owner_scope,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if mode != 'deterministic':
+            return text, None
+        from .text_optimizer.service import optimize_text
+
+        try:
+            outcome = await asyncio.to_thread(optimize_text, text, request.language)
+        except Exception as exc:  # a rule bug must not cost the request its audio
+            logger.exception('text optimization failed; speaking the raw input')
+            return text, {'mode': mode, 'language': None, 'binding_origin': 'error', 'applied_rules': [], 'error': str(exc)}
+        spoken = outcome.text.strip()
+        if not spoken:
+            raise RuntimeError('Input text is empty after text optimization')
+        return spoken, outcome.as_dict()
 
     async def cancel(self, job_id: str) -> JobRecord:
         async with self.store.job_condition:

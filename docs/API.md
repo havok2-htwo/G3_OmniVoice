@@ -94,6 +94,18 @@ Useful notes:
   it also needs WeTextProcessing, which has no Windows wheels. Without them the flag is
   ignored instead of failing the request. Other languages use num2words for bare integers
   only, so German decimals, dates and units stay unchanged.
+  When `text_optimization` already rewrote a German or English text, `normalize_text`
+  is skipped, because the text is in spoken form at that point.
+- `text_optimization`: `"deterministic"` (or `true`) rewrites the text into its spoken
+  form for German/English before sentence splitting: dates, times, numbers, currency,
+  units, phone numbers, URLs (domain only), Markdown, emoji, abbreviations, acronyms.
+  `"off"` (or `false`) keeps today's behaviour. Omitted means the admin default
+  `text_optimization_default` (default `off`) for public requests and always `off`
+  for benchmark, WER and finetune jobs. `"llm"` is reserved (`422`). `Auto` binds
+  the language from the text's notation; other languages are left unchanged.
+  `input`, `ref_text`, `instructions` and inline tags like `[laughter]` are never
+  rewritten. OpenAI SDKs pass it via `extra_body` or `metadata.text_optimization`.
+  Details: `API_DOCUMENTATION.md`, section "Text optimization".
 
 ## Public Routes
 
@@ -212,9 +224,13 @@ Response:
     "sentences_rendered": 1
   },
   "audio_url": null,
-  "error_message": null
+  "error_message": null,
+  "text_optimization": null
 }
 ```
+
+`text_optimization` is `{mode, language, binding_origin, applied_rules, spoken_text}`
+when the request ran with text optimization.
 
 ### Synthesize Event Stream
 
@@ -245,6 +261,9 @@ Event types:
 { "type": "error", "message": "..." }
 ```
 
+With text optimization the `start` event also carries `text_optimization`
+(including `spoken_text`).
+
 ### OpenAI-Compatible Audio
 
 ```http
@@ -273,6 +292,24 @@ Invoke-WebRequest `
 
 When `stream=true`, the endpoint returns raw `audio/pcm` chunks. The sample rate
 is 24 kHz, mono, signed 16-bit little-endian PCM.
+
+When text optimization ran, the response has a header like
+`X-Text-Optimization: deterministic; language=de; rules=date_de_dmy,time_de_hhmm`.
+
+### Text Optimization Preview
+
+```http
+POST /api/v1/text/optimize
+Content-Type: application/json
+```
+
+```json
+{ "input": "Am 24.09.2026 um 14:30 Uhr kostet es 29,90 €.", "language": "Deutsch" }
+```
+
+Returns the spoken text, the Genesis3 rule names that fired, the bound language and
+its origin, and the sentences a synthesis request would render. Same API-key gate as
+synthesis; `POST /api/admin/text/optimize` is the admin-session twin.
 
 ### Async Jobs
 
@@ -373,9 +410,13 @@ Common fields:
   "vllm_model": "Qwen/Qwen3.6-35B-A3B-FP8",
   "whisper_base_url": "http://192.168.0.200:7861",
   "wer_concurrency": 4,
-  "wer_transcription_concurrency": 16
+  "wer_transcription_concurrency": 16,
+  "text_optimization_default": "off"
 }
 ```
+
+`text_optimization_default` (`off` | `deterministic`) is used by public synthesis
+requests without their own `text_optimization` field.
 
 ### Dashboard Snapshot And SSE
 

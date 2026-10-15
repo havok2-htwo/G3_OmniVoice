@@ -153,6 +153,7 @@ an install that never saved settings picks these defaults up on its next start.
   class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
   preprocessing + output postprocessing on, sentence chunking on
 - WER: TTS wave 4, ASR concurrency 16, vLLM model `Qwen/Qwen3.6-35B-A3B-FP8`
+- Text optimization default `off` (`OMNIVOICE_TTS_TEXT_OPTIMIZATION_DEFAULT`)
 
 ## Operator Features
 
@@ -186,6 +187,17 @@ an install that never saved settings picks these defaults up on its next start.
   dropdown (default `Auto`). The labels are mapped to OmniVoice language codes
   server-side, so a fixed choice actually reaches the model instead of silently
   falling back to auto-detection.
+- **Text optimization (de/en)** - `"text_optimization": "deterministic"` on any
+  synthesis request writes dates, times, numbers, currency, units, phone numbers,
+  URLs and Markdown out as spoken words before OmniVoice sees them
+  (`24.09.2026 um 14:30 Uhr` -> `vierundzwanzigsten September
+  zweitausendsechsundzwanzig um vierzehn Uhr dreißig`). It is a Python port of
+  the Genesis3 deterministic TTS pipeline
+  (`backend/src/omnivoice_tts_server/text_optimizer/`), checked against golden
+  outputs of the TS original. The admin default `text_optimization_default` is
+  `off`, so existing clients hear no change; benchmarks and WER runs always stay
+  off. The admin Quick Synthesis panel has a mode switch and a text preview
+  (`POST /api/v1/text/optimize`).
 
 ## Notes
 

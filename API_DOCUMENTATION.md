@@ -162,6 +162,68 @@ Notes:
   it also needs WeTextProcessing, which has no Windows wheels. Without them the flag is
   ignored instead of failing the request. Other languages use num2words for bare integers
   only, so German decimals, dates and units stay unchanged.
+  When `text_optimization` already rewrote a German or English text, `normalize_text`
+  is skipped, because the text is in spoken form at that point.
+- `text_optimization` turns on spoken-text optimization for German and English (see below).
+
+### Text optimization (`text_optimization`)
+
+OmniVoice reads digits, dates, units and symbols poorly. With
+`"text_optimization": "deterministic"` the server rewrites the text into its spoken
+form before sentence splitting. The rules are a port of the Genesis3 deterministic
+TTS pipeline; no LLM is involved:
+
+- dates and times (`24.09.2026`, `14:30 Uhr`, `3:30 PM`, `12/24/2026`, ISO stamps),
+  durations, ranges (`9-17 Uhr` -> `neun bis siebzehn Uhr`)
+- numbers, decimals, thousands, ordinals, fractions, percent, currency
+  (`29,90 €` -> `neunundzwanzig Euro und neunzig Cent`), units (`5 km`, `2,4 GHz`),
+  temperatures, phone numbers, IPs, versions, ports, hex colours, IBANs, list markers
+- full URLs are reduced to their domain (`https://heise.de/x` -> `heise punkt de`),
+  stack-trace frames are dropped
+- Markdown (fences, links, bold, bullets, tables) and emoji are removed
+- abbreviations (`z.B.`, `inkl.`, `Tel.`, `e.g.`, ...) are expanded and known
+  acronyms are spelled (`API` -> `A P I`)
+- `!` at a sentence end becomes `.`, quotation marks are dropped, en/em dashes
+  become a spaced hyphen pause
+
+Values:
+
+| Value | Meaning |
+| --- | --- |
+| omitted / `null` | admin default `text_optimization_default` (default `off`) for public requests; always `off` for benchmark, WER and finetune jobs |
+| `"off"` or `false` | no optimization; the sentences are exactly the same as without the field |
+| `"deterministic"` or `true` | deterministic optimization |
+| `"llm"` | reserved for a later LLM rewrite mode; rejected with `422` |
+
+Language: an explicit `de*`/`Deutsch`/`German` or `en*`/`English` uses that rule
+set. `Auto` or no language binds the language from language-specific notation in
+the text (`14:30 Uhr`, `24.09.2026`, `3:30 PM`, month names, ...). If there is none,
+or the request names another language (`fr`, `Français`, ...), the text is left
+unchanged.
+
+What is never changed: `request.input` stays the raw text (job lists show it),
+`ref_text` and `instructions` are not touched, and OmniVoice inline control spans
+such as `[laughter]` or CMU pronunciations like `[B EY1 S]` pass through verbatim.
+`max_input_chars` is checked on the raw input; the spoken text is usually longer, so
+it can produce more chunks.
+
+Where the result shows up:
+
+- `POST /api/v1/synthesize` response and `GET /api/admin/jobs/{job_id}`:
+  `text_optimization` = `{mode, language, binding_origin, applied_rules, spoken_text}`
+  (`null` when the mode was `off`)
+- `POST /api/v1/synthesize/stream`: the `start` event carries the same object
+- `POST /v1/audio/speech`: header `X-Text-Optimization: deterministic; language=de; rules=date_de_dmy,time_de_hhmm`
+
+OpenAI SDK clients send the field with `extra_body`, or as
+`metadata.text_optimization`, which is read when the top-level field is missing:
+
+```python
+client.audio.speech.create(model="tts-1", voice="Sonja", input="Am 24.09. um 14:30 Uhr.",
+                           extra_body={"text_optimization": "deterministic", "language": "de"})
+```
+
+`POST /api/v1/text/optimize` shows the spoken text without synthesizing.
 
 ## Public API
 
@@ -376,9 +438,13 @@ Response shape:
     "sentences_rendered": 1
   },
   "audio_url": null,
-  "error_message": null
+  "error_message": null,
+  "text_optimization": null
 }
 ```
+
+With `text_optimization` on, the last field holds
+`{"mode": "deterministic", "language": "de", "binding_origin": "request", "applied_rules": ["time_de_hour_only"], "spoken_text": "Um neun Uhr."}`.
 
 ### `POST /api/v1/synthesize/stream`
 
@@ -398,6 +464,9 @@ Event examples:
 ```json
 { "type": "start", "job_id": "job_...", "sentence_count": 2, "queue_position": 0 }
 ```
+
+With `text_optimization` on, `start` also has
+`"text_optimization": {"mode": "deterministic", "language": "de", "binding_origin": "request", "applied_rules": [...], "spoken_text": "..."}`.
 
 ```json
 { "type": "batch", "job_id": "job_...", "batch_id": "batch_...", "batch_size": 1, "sentence_index": 0 }
@@ -438,6 +507,7 @@ OpenAI-client tolerance:
 - `voice`: resolved case-insensitively against built-in voices and saved voice profiles (by id or name); standard OpenAI voice names (`alloy`, `echo`, `fable`, ...) fall back to the default voice; anything else returns `404`
 - a resolved custom voice profile automatically routes the request to the `k2-fsa/OmniVoice-Base` (voice clone) alias
 - the `Authorization: Bearer ...` header sent by OpenAI clients is accepted and ignored (the endpoint stays public, like all synthesis endpoints)
+- `text_optimization` (top level via `extra_body`, or `metadata.text_optimization`) is honoured; when it ran, the response has an `X-Text-Optimization` header
 
 Example:
 
@@ -471,6 +541,40 @@ Response:
   "eta_ms": 0
 }
 ```
+
+### `POST /api/v1/text/optimize`
+
+Purpose:
+
+- dry run of `text_optimization="deterministic"`: returns the spoken text and the
+  sentences a synthesis request would render, without synthesizing
+- same API-key gate as the synthesis routes; `max_input_chars` applies (`413`)
+
+Request:
+
+```json
+{ "input": "Am 24.09.2026 um 14:30 Uhr kostet es 29,90 €.", "language": "Deutsch", "stage": "final" }
+```
+
+`stage` is `final` (default, what synthesis uses) or `floor`. `floor` keeps bare
+German four-digit numbers and determiner-bound ordinals in digits; it exists for
+an LLM rewrite step and is not used for synthesis.
+
+Response:
+
+```json
+{
+  "text": "Am vierundzwanzigsten September zweitausendsechsundzwanzig um vierzehn Uhr dreißig kostet es neunundzwanzig Euro und neunzig Cent.",
+  "applied_rules": ["date_de_dmy", "time_de_hhmm", "currency_suffix"],
+  "language": "de",
+  "binding_origin": "request",
+  "sentences": ["Am vierundzwanzigsten September ... neunzig Cent."]
+}
+```
+
+`binding_origin` is `request` (explicit de/en), `chunk_notation` (bound from the
+text for `Auto`), `none` (nothing bound, text unchanged) or `unsupported_language`.
+`applied_rules` uses the Genesis3 rule names.
 
 ## Admin API
 
@@ -581,6 +685,7 @@ Response fields include:
   attention the resident model really runs (`sdpa`, `flex_attention`, `flashinfer`) and why it
   differs from the settings (for example FlashInfer requested on Windows)
 - generation defaults such as `num_step`, `guidance_scale`, temperatures, and chunking controls
+- `text_optimization_default` (`off` | `deterministic`)
 
 ### `PUT /api/admin/settings`
 
@@ -632,9 +737,19 @@ Common request fields:
   "vllm_base_url": "http://192.168.20.126:8000",
   "vllm_model": "Qwen/Qwen3.6-35B-A3B-FP8",
   "wer_concurrency": 4,
-  "wer_transcription_concurrency": 16
+  "wer_transcription_concurrency": 16,
+  "text_optimization_default": "off"
 }
 ```
+
+`text_optimization_default` applies to public synthesis requests that do not send
+`text_optimization` themselves (env: `OMNIVOICE_TTS_TEXT_OPTIMIZATION_DEFAULT`).
+Benchmark, WER and finetune jobs ignore it.
+
+### `POST /api/admin/text/optimize`
+
+Admin-session twin of `POST /api/v1/text/optimize` (same body and response), used by
+the "Text-Vorschau" button in Quick Synthesis.
 
 ### `GET /api/admin/runtime/devices`
 
@@ -868,6 +983,8 @@ Notes:
 Purpose:
 
 - returns in-memory job detail
+- `input_preview` is the raw input; `text_optimization` (with `spoken_text`) is set
+  when the job ran with text optimization
 
 ### `GET /api/admin/jobs/{job_id}/audio`
 

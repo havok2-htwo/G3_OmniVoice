@@ -41,6 +41,49 @@ All notable changes to G3_OmniVoice are recorded here.
 - Dockerfile: fixed a stray `\r` that ended the runtime `ENV` block early, so
   `OPENBLAS_NUM_THREADS` was parsed as an instruction.
 
+### Added — spoken-text optimization for German and English
+
+New request field `text_optimization` on `/v1/audio/speech`, `/api/v1/synthesize`,
+`/api/v1/synthesize/stream` and `/v1/jobs`. With `"deterministic"` (or `true`) the
+server rewrites the input into its spoken form before sentence splitting. Dates,
+times, durations, ranges, numbers, currency, units, phone numbers, IPs, versions
+and list markers become words; full URLs become their domain; Markdown, emoji and
+stack-trace frames are removed; abbreviations are expanded and known acronyms are
+spelled.
+
+- The rules are a Python port of the Genesis3 deterministic TTS pipeline
+  (`buildDeterministicTtsFallback`, about 140 passes) in
+  `backend/src/omnivoice_tts_server/text_optimizer/`. Rule names
+  (`applied_rules`) are the same as in Genesis. A small JS-regex layer on the
+  `regex` package keeps JavaScript semantics, for example ASCII-only `\d`, `\w`
+  and `\b`.
+- Parity: the port reproduces the TS outputs for all 6120 golden records (1530
+  inputs from the Genesis sweep corpus, the TS unit tests and OmniVoice extras, in
+  de/en and floor/final) and all 15347 per-stage records. It also passes the 517
+  replayed assertions of the ported TS unit tests.
+- Language: an explicit de/en language uses that rule set. `Auto` binds the
+  language from language-specific notation in the text. Other languages, and text
+  with no such notation, stay unchanged.
+- OmniVoice inline tags (`[laughter]`, `[B EY1 S]`) are protected and come back
+  verbatim. Blank lines become single newlines, so a heading stays its own
+  sentence. `input`, `ref_text` and `instructions` are never rewritten.
+- The result is in the synthesize response, the admin job detail and the NDJSON
+  `start` event (`text_optimization` with `spoken_text`). `/v1/audio/speech`
+  sends an `X-Text-Optimization` header.
+- New admin setting `text_optimization_default` (`off` | `deterministic`,
+  default `off`). It applies only to public requests without the field.
+  Benchmark, WER and finetune jobs stay off, so WER still compares against the
+  digit reference.
+- Dry run: `POST /api/v1/text/optimize` (API-key gate) and
+  `POST /api/admin/text/optimize`. Admin Quick Synthesis has a mode switch and a
+  "Text-Vorschau" button.
+- Clients that do not send the field get the same sentences as before.
+- When the optimizer bound German or English, a `metadata.normalize_text` flag is
+  dropped before batching, so omnivoice does not normalise the already spoken text a
+  second time.
+- `regex` is now a declared dependency (it was already installed via
+  `transformers`).
+
 ### Fixed — retained job audio and idle RAM
 
 A finished job kept its audio two or three times in RAM for the whole retention

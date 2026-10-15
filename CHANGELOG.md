@@ -41,6 +41,40 @@ All notable changes to G3_OmniVoice are recorded here.
 - Dockerfile: fixed a stray `\r` that ended the runtime `ENV` block early, so
   `OPENBLAS_NUM_THREADS` was parsed as an instruction.
 
+### Fixed — review findings on the 0.2.1 upgrade and the text optimizer
+
+- `metadata.normalize_text` is gated on the language omnivoice itself resolves, so
+  `de-DE`, `en-US` or unknown tags no longer fail the batch with an ImportError
+  (WeTextProcessing missing); the flag is ignored instead. `num2words` is now a
+  dependency, so the flag works for de/fr/... (bare integers).
+- `attention_implementation: eager` converts OmniVoice's bool mask into an additive
+  mask; before, padded keys were attended to (+1/+0 bias) in every CFG batch.
+- `metadata.pad_duration` (0-2 s) and `fade_duration` (0-1 s) are validated: `Infinity`,
+  huge or non-numeric values return `422` instead of failing or allocating hours of
+  audio. An invalid `metadata.text_optimization` (including `"llm"`) is `422` too, like
+  the top-level field (was `400`).
+- Text optimizer:
+  - `Auto` / no language no longer binds Dutch, Polish, Italian, French, Spanish,
+    Portuguese, Turkish or Russian text to German because of a `24.09.2026` date or a
+    `1.234,56` amount; German/English function words now bind `Auto` text without
+    notation (`binding_origin` `text_words` / `other_language`).
+  - Only OmniVoice control spans (non-verbal tags, ARPAbet pronunciations) are held
+    out; citations, checkboxes and editorial brackets are optimized as in the TS code.
+    Placeholders avoid private-use characters already in the text, so one U+F8FF no
+    longer disables tag protection.
+  - CRLF / CR / U+2028 / U+2029 line breaks are normalised, so a heading followed by a
+    Windows blank line stays its own sentence.
+  - JS `/i` semantics: Turkish `İ`/`ı`, `ſ`, `K` and `ẞ` no longer fold like Python's
+    IGNORECASE; parity with the TS golden still holds for all 6120 records.
+  - A 5 s budget bounds the rule passes (number-dense input was quadratic, 12 s for
+    6000 characters); on timeout the raw text is spoken (`binding_origin: timeout`).
+    Matching releases the GIL.
+  - The dry run shares the submit path: empty input and input that optimizes to
+    nothing return `400`, rule errors fall back to the raw text. The admin preview
+    shows the raw text when the effective mode is `off`.
+  - `normalize_text` is dropped only when the optimizer actually rewrote the text.
+- `GET /v1/jobs/{job_id}/audio` sends `X-Text-Optimization`, and CORS exposes it.
+
 ### Added — spoken-text optimization for German and English
 
 New request field `text_optimization` on `/v1/audio/speech`, `/api/v1/synthesize`,

@@ -14,7 +14,7 @@ from omnivoice_tts_server.text_optimizer import (
     resolve_optimizer_language,
     resolve_text_optimization_mode,
 )
-from omnivoice_tts_server.text_optimizer.jsre import js, js_number, js_replace, js_trim
+from omnivoice_tts_server.text_optimizer.jsre import js, js_number, js_replace, js_trim, time_budget
 from omnivoice_tts_server.text_optimizer.omnivoice_tags import protect_inline_tags, restore_inline_tags
 
 
@@ -58,13 +58,49 @@ def test_genesis_quirks_kept_for_parity() -> None:
     assert optimize_text('Super! Er sagt „Hallo“ um 9 Uhr.', 'de').text == 'Super. Er sagt Hallo um neun Uhr.'
 
 
-def test_tag_placeholders_roundtrip_and_respect_existing_private_use_text() -> None:
-    protected, spans = protect_inline_tags('a [sigh] b [B EY1 S] c')
-    assert spans == ['[sigh]', '[B EY1 S]']
+def test_tag_placeholders_roundtrip_and_avoid_private_use_text_in_the_input() -> None:
+    protected, protection = protect_inline_tags('a [sigh] b [B EY1 S] c')
+    assert protection.spans == ['[sigh]', '[B EY1 S]']
     assert '[' not in protected
-    assert restore_inline_tags(protected, spans) == 'a [sigh] b [B EY1 S] c'
-    untouched, none = protect_inline_tags('x  [sigh]')
-    assert none == [] and untouched == 'x  [sigh]'
+    assert restore_inline_tags(protected, protection) == 'a [sigh] b [B EY1 S] c'
+    # Private-use characters already in the text are never chosen as placeholders.
+    text = 'x \uf000\uf001 [sigh] \uf8ff'
+    protected, protection = protect_inline_tags(text)
+    assert protection.placeholders == ['\uf002']
+    assert protected == 'x \uf000\uf001 \uf002 \uf8ff'
+    assert restore_inline_tags(protected, protection) == text
+
+
+def test_private_use_character_keeps_tag_protection() -> None:
+    # U+F8FF is the Apple logo; one of them used to switch protection off for the whole text.
+    outcome = optimize_text('Mein \uf8ff MacBook [laughter] kostet 5 €.', 'de')
+    assert outcome.text == 'Mein \uf8ff MacBook [laughter] kostet fünf Euro.'
+    assert outcome.protected_tags == 1
+
+
+@pytest.mark.parametrize(
+    ('text', 'language', 'expected'),
+    [
+        ('Preis [ca. 5 €] und [Anm. d. Red.: 3 Tage]', 'de', 'Preis circa fünf € und Anm. d. Red.: drei Tage'),
+        ('Laut Studie [1] steigen die Preise um 5 %.', 'de', 'Laut Studie eins steigen die Preise um fünf Prozent.'),
+        ('Aufgaben:\n- [ ] Milch kaufen\n- [x] 3 Eier holen', 'de', 'Aufgaben: Milch kaufen\nx drei Eier holen'),
+        ('See [1] and [2], it costs $5.', 'en', 'See one and two, it costs five dollars.'),
+    ],
+)
+def test_only_omnivoice_control_spans_are_protected(text, language, expected) -> None:
+    # Citations, checkboxes and editorial brackets are ordinary text, as in the TS pipeline.
+    outcome = optimize_text(text, language)
+    assert outcome.text == expected
+    assert outcome.protected_tags == 0
+
+
+def test_all_nonverbal_tags_and_arpabet_spans_are_protected() -> None:
+    from omnivoice_tts_server.text_optimizer.omnivoice_tags import NONVERBAL_TAGS
+
+    tags = ' '.join(f'[{tag}]' for tag in NONVERBAL_TAGS)
+    outcome = optimize_text(f'{tags} um 9 Uhr [K AH0 M P Y UW1 T ER0] und [HH AH0 L OW1].', 'de')
+    assert outcome.protected_tags == len(NONVERBAL_TAGS) + 2
+    assert outcome.text == f'{tags} um neun Uhr [K AH0 M P Y UW1 T ER0] und [HH AH0 L OW1].'
 
 
 # --- language binding --------------------------------------------------------------------------
@@ -86,10 +122,53 @@ def test_explicit_request_language_mapping(language: str, expected: str | None) 
 def test_auto_binding_uses_notation_and_passes_through_without_it() -> None:
     assert resolve_optimizer_language('Auto', 'Treffen am 24.09.2026 um 14:30 Uhr.') == ('de', 'chunk_notation')
     assert resolve_optimizer_language(None, 'Meet me on March 3, 2026 at 4:15 PM.') == ('en', 'chunk_notation')
-    text = 'Ich habe 3 Katzen.'
+    text = 'Kaffee 3 Mal.'
     outcome = optimize_text(text, 'Auto')
     assert outcome.language is None and outcome.binding_origin == 'none'
     assert outcome.text == text and outcome.applied_rules == []
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected_text', 'language'),
+    [
+        ('Das kostet 5 Euro.', 'Das kostet fünf Euro.', 'de'),
+        ('Wir haben 20 % Rabatt auf 3 Artikel.', 'Wir haben zwanzig Prozent Rabatt auf drei Artikel.', 'de'),
+        ('It costs 5 dollars and weighs 3 kg.', 'It costs five dollars and weighs three kilograms.', 'en'),
+        ('# Titel\n\n**Fett** und 🙂 hier.', 'Titel\nFett und hier.', 'de'),
+        ('Siehe https://example.com/a/b?c=1 hier.', 'Siehe example punkt com hier.', 'de'),
+    ],
+)
+@pytest.mark.parametrize('request_language', [None, 'Auto'])
+def test_auto_binding_from_function_words(text, expected_text, language, request_language) -> None:
+    outcome = optimize_text(text, request_language)
+    assert (outcome.language, outcome.binding_origin) == (language, 'text_words')
+    assert outcome.text == expected_text
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        'Op 24.09.2026 kost het 1.234,56 euro.',
+        'Spotkanie odbędzie się 24.09.2026 o godzinie 14:30.',
+        'La riunione è il 24.09.2026 e costa 29,90 €.',
+        'La réunion aura lieu le 24.09.2026 et coûte 29,90 €.',
+        'Toplantı 24.09.2026 tarihinde ve fiyatı 29,90 €.',
+        'La reunión es el 24.09.2026 y cuesta 29,90 €.',
+        'A reunião é no dia 24.09.2026 e custa 29,90 €.',
+        'Встреча состоится 24.09.2026, цена 1.234,56 руб.',
+        'Hello 世界, 会议在 24.09.2026 举行, 价格 29,90 €.',
+    ],
+)
+def test_auto_notation_binding_is_dropped_for_other_languages(text) -> None:
+    for request_language in (None, 'Auto'):
+        outcome = optimize_text(text, request_language)
+        assert outcome.text == text
+        assert (outcome.language, outcome.binding_origin) == (None, 'other_language')
+
+
+def test_auto_notation_binding_survives_without_contradicting_words() -> None:
+    assert resolve_optimizer_language(None, '24.09.2026') == ('de', 'chunk_notation')
+    assert resolve_optimizer_language('Auto', 'Am 24.09.2026 um 14:30 Uhr, the deadline.') == ('de', 'chunk_notation')
 
 
 def test_other_languages_are_a_no_op() -> None:
@@ -120,6 +199,30 @@ def test_text_without_any_rule_is_returned_unchanged() -> None:
 def test_paragraph_breaks_become_single_newlines() -> None:
     outcome = optimize_text('Überschrift\n\n  \nUm 9 Uhr gibt es 2 Sorten.', 'de')
     assert outcome.text == 'Überschrift\nUm neun Uhr gibt es zwei Sorten.'
+
+
+@pytest.mark.parametrize('separator', ['\r\n\r\n', '\r\r', '\r\n \r\n', '\u2029', '\n\r\n'])
+def test_windows_and_unicode_paragraph_breaks_keep_the_heading_apart(separator) -> None:
+    outcome = optimize_text(f'Überschrift{separator}Am 3.4. kommen 5 Gäste.', 'de')
+    assert outcome.text == 'Überschrift\nam dritten April kommen fünf Gäste.'
+
+
+def test_number_dense_input_is_bounded_by_the_time_budget() -> None:
+    text = '1.' * 3000
+    started = time.perf_counter()
+    outcome = optimize_text(text, 'de', time_budget_seconds=0.5)
+    elapsed = time.perf_counter() - started
+    assert outcome.binding_origin == 'timeout'
+    assert outcome.text == text and outcome.applied_rules == []
+    assert elapsed < 3.0, elapsed
+
+
+def test_time_budget_raises_timeout_inside_the_block_only() -> None:
+    with pytest.raises(TimeoutError):
+        with time_budget(1e-9):
+            time.sleep(0.001)
+            js('a', 'g').test('a')
+    assert js('a', 'g').test('a')
 
 
 def test_list_lines_keep_their_newlines() -> None:
@@ -193,6 +296,45 @@ def test_resolve_mode_precedence_and_scopes() -> None:
 
 
 # --- JS regex compatibility layer -------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ('pattern', 'flags', 'text', 'expected'),
+    [
+        # Non-u /i: no fold onto ASCII from outside it, and no multi-character mappings.
+        ('[a-z]', 'i', 'İ', False),
+        ('i', 'i', 'İ', False),
+        ('[A-Z]', 'i', 'ı', False),
+        ('ß', 'i', 'ẞ', False),
+        ('s', 'i', 'ſ', False),
+        ('k', 'i', '\u212a', False),
+        ('ä', 'i', 'Ä', True),
+        ('[^a-z]', 'i', 'Q', False),
+        # /iu: simple case folding, still never İ/ı.
+        ('ß', 'iu', 'ẞ', True),
+        ('s', 'iu', 'ſ', True),
+        ('k', 'iu', '\u212a', True),
+        ('i', 'iu', 'İ', False),
+        ('[a-z]', 'iu', 'ı', False),
+        # Property escapes are case-closed under /iu, backreferences compare case-insensitively.
+        (r'\p{Lu}', 'iu', 'a', True),
+        (r'(ab)\1', 'i', 'abAB', True),
+    ],
+)
+def test_jsre_ignore_case_follows_javascript(pattern, flags, text, expected) -> None:
+    assert js(pattern, flags).test(text) is expected
+
+
+def test_turkish_and_long_s_text_matches_the_ts_reference() -> None:
+    from omnivoice_tts_server.text_optimizer.post_processor import post_process_tts_text
+
+    # Expected values from the TS pipeline (node + tsx on the Genesis sources).
+    assert post_process_tts_text('İhttp://a.de/x', 'de')[0] == 'İhttp://a.de/x'
+    assert optimize_tts_text_for_language('undkgNr.ſv2.1z.B.', 'de').text == 'undkgNr.ſVersion zwei Punkt einsz.B.'
+    assert optimize_tts_text_for_language('[12:30İ−ẞ5kg`0341', 'de').text.startswith('[zwölf Uhr dreißigİ')
+    assert optimize_tts_text('İlkay Gündoğan schoss am 3.4. 2 Tore.', 'de').text == (
+        'İlkay Gündoğan schoss am dritten April zwei Tore.'
+    )
+
 
 def test_jsre_shorthands_are_ascii_like_javascript() -> None:
     assert not js(r'\d', 'u').test('٣')

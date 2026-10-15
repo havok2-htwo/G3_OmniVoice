@@ -164,8 +164,8 @@ const ADMIN_HELP = {
   quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
   quickInstructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wird von OmniVoice abgelehnt.",
   quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
-  quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese.",
-  textOptimizationDefault: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus; Benchmarks, WER und Finetune bleiben immer aus.",
+  quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese (bei 'off' den Originaltext). Sprache Auto: Deutsch/Englisch wird an Schreibweise (24.09.2026, 14:30 Uhr, 3:30 PM) oder an typischen Woertern erkannt; andere Sprachen bleiben unveraendert.",
+  textOptimizationDefault: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus. Wirkt nur, wenn der Request de/en angibt oder der Text bei Auto/ohne Sprache als Deutsch/Englisch erkannt wird (Schreibweise oder typische Woerter); andere Sprachen bleiben unveraendert. Benchmarks, WER und Finetune bleiben immer aus.",
   defaultModel: "Default-Modell fuer neue Jobs, Model Ops und den naechsten Serverstart.",
   defaultVoice: "Default-Stimme passend zum Default-Modell. Base braucht eine gespeicherte Custom Voice.",
   queueLimit: "Maximale Anzahl wartender Jobs, bevor neue Requests mit 429 abgelehnt werden.",
@@ -867,6 +867,12 @@ export function AdminApp() {
 
   async function handleQuickOptimizePreview() {
     setError("");
+    const effectiveMode = quickTextOptimization || snapshot?.settings.text_optimization_default || "off";
+    if (effectiveMode === "off") {
+      // The run would speak the raw text: show that instead of a deterministic rewrite.
+      setQuickOptimizePreview({ text: quickText.trim(), applied_rules: [], language: null, binding_origin: "Textoptimierung aus", sentences: [] });
+      return;
+    }
     try {
       const preview = await apiFetch<TextOptimizeResponse>("/api/admin/text/optimize", {
         method: "POST",

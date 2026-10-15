@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -100,6 +103,16 @@ def configure_frontend(app: FastAPI, settings: Settings) -> None:
             return FileResponse(requested_path)
 
         raise HTTPException(status_code=404, detail='Not found')
+
+
+def _json_safe(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -215,6 +228,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
         allow_methods=['*'],
         allow_headers=['*'],
+        # Browser clients on other origins may read what was actually spoken.
+        expose_headers=['X-Text-Optimization'],
     )
 
     @app.middleware('http')
@@ -263,5 +278,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(KeyError)
     async def key_error_handler(_: Request, exc: KeyError):
         return JSONResponse(status_code=404, content={'detail': str(exc) or 'Not found'})
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_handler(_: Request, exc: RequestValidationError):
+        # FastAPI's default 422 echoes the input; a body with Infinity/NaN (Starlette's
+        # json.loads accepts them) would then fail to serialise and turn into a 500.
+        return JSONResponse(status_code=422, content={'detail': _json_safe(jsonable_encoder(exc.errors()))})
 
     return app

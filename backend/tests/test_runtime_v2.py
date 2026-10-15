@@ -588,3 +588,120 @@ def test_new_generation_kwargs_pass_through_metadata(tmp_path, monkeypatch) -> N
     # need WeTextProcessing (missing here): the flag is dropped instead of failing.
     assert 'normalize_text' not in synthesizer._generation_kwargs([item('Auto', normalize_text=True)])
     assert 'normalize_text' not in synthesizer._generation_kwargs([item('English', normalize_text=True)])
+
+
+def _kw_item(language, **metadata):
+    text = 'Es kostet 12 Euro.'
+    # model_construct: internal requests skip the SpeechRequest validators.
+    request = SpeechRequest.model_construct(
+        input=text, model=OMNIVOICE_AUTO_ALIAS, task_type=TaskType.custom_voice, language=language, metadata=metadata,
+        speed=1.0,
+    )
+    return BatchSynthesisItem(job_id='job_kw', sentence_index=0, text=text, request=request)
+
+
+@pytest.mark.parametrize('language', ['de-DE', 'en-US', 'xx', 'Auto', None, 'Klingonisch'])
+def test_normalize_text_is_dropped_for_languages_omnivoice_does_not_resolve(tmp_path, monkeypatch, language) -> None:
+    # The live env: tn (WeTextProcessing) missing. Upstream resolves these to None and
+    # would auto-detect English -> ImportError for the whole batch.
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    monkeypatch.setattr(
+        'omnivoice_tts_server.runtime_v2.importlib.util.find_spec',
+        lambda name, *args: None if name == 'tn' else object(),
+    )
+    assert 'normalize_text' not in synthesizer._generation_kwargs([_kw_item(language, normalize_text=True)])
+
+
+def test_normalize_text_gate_matches_upstream_language_resolution(tmp_path, monkeypatch) -> None:
+    pytest.importorskip('omnivoice.utils.lang_map')
+    from omnivoice_tts_server.runtime_v2 import resolve_omnivoice_language
+
+    assert resolve_omnivoice_language('de') == 'de'
+    assert resolve_omnivoice_language('German') == 'de'
+    assert resolve_omnivoice_language('de-DE') is None
+    assert resolve_omnivoice_language('en-US') is None
+    assert resolve_omnivoice_language('xx') is None
+    assert resolve_omnivoice_language(None) is None
+
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    available = {'num2words'}
+    monkeypatch.setattr(
+        'omnivoice_tts_server.runtime_v2.importlib.util.find_spec',
+        lambda name, *args: object() if name in available else None,
+    )
+    assert synthesizer._generation_kwargs([_kw_item('German', normalize_text=True)])['normalize_text'] is True
+    assert synthesizer._generation_kwargs([_kw_item('Deutsch', normalize_text=True)])['normalize_text'] is True
+    assert 'normalize_text' not in synthesizer._generation_kwargs([_kw_item('en', normalize_text=True)])
+    available.add('tn')
+    assert synthesizer._generation_kwargs([_kw_item('en', normalize_text=True)])['normalize_text'] is True
+    # Without num2words the non-zh/en path would be a silent no-op: dropped and logged.
+    available.discard('num2words')
+    assert 'normalize_text' not in synthesizer._generation_kwargs([_kw_item('de', normalize_text=True)])
+
+
+@pytest.mark.parametrize(
+    ('metadata', 'expected'),
+    [
+        ({'pad_duration': float('inf')}, {}),
+        ({'pad_duration': 3600, 'fade_duration': 0.05}, {'fade_duration': 0.05}),
+        ({'pad_duration': 'abc'}, {}),
+        ({'pad_duration': '0.5', 'fade_duration': 1}, {'pad_duration': 0.5, 'fade_duration': 1.0}),
+    ],
+)
+def test_pad_and_fade_are_bounded_in_the_runtime_too(tmp_path, monkeypatch, metadata, expected) -> None:
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path), store=InMemoryStore(max_queue_size=8))
+    kwargs = synthesizer._generation_kwargs([_kw_item('de', **metadata)])
+    assert {key: kwargs[key] for key in ('pad_duration', 'fade_duration') if key in kwargs} == expected
+
+
+def test_eager_mask_patch_turns_the_bool_mask_into_an_additive_mask() -> None:
+    import torch
+
+    from omnivoice_tts_server.runtime_v2 import install_eager_additive_mask_forward
+
+    mask = _omnivoice_style_mask(c_lens=[40, 24], u_lens=[16, 10])
+
+    class TinyModel:
+        llm = types.SimpleNamespace(dtype=torch.bfloat16)
+
+        def forward(self, input_ids=None, attention_mask=None):
+            return attention_mask
+
+    model = TinyModel()
+    assert install_eager_additive_mask_forward(model) is True
+    additive = model.forward(input_ids=None, attention_mask=mask)
+    assert additive.dtype == torch.bfloat16 and additive.shape == mask.shape
+    assert torch.all(additive[mask] == 0)
+    assert torch.all(additive[~mask] == torch.finfo(torch.bfloat16).min)
+    assert model.forward(input_ids=None, attention_mask=mask) is additive  # cached per mask
+    assert model.forward(input_ids=None, attention_mask=None) is None
+
+    # Eager attention (scores + mask, softmax) now equals SDPA with the bool mask.
+    torch.manual_seed(0)
+    rows, heads, size, dim = mask.shape[0], 2, mask.shape[-1], 16
+    q, k, v = (torch.randn(rows, heads, size, dim) for _ in range(3))
+    float_mask = torch.zeros(mask.shape).masked_fill(~mask, torch.finfo(torch.float32).min)
+    scores = q @ k.transpose(-1, -2) / dim**0.5 + float_mask
+    eager = torch.softmax(scores, dim=-1) @ v
+    ref = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+    valid = mask[:, 0].any(dim=-1)
+    assert torch.allclose(eager.permute(0, 2, 1, 3)[valid], ref.permute(0, 2, 1, 3)[valid], atol=1e-5)
+    # Unpatched (bool added as +1/+0) it does not.
+    broken = torch.softmax(q @ k.transpose(-1, -2) / dim**0.5 + mask.float(), dim=-1) @ v
+    assert not torch.allclose(broken.permute(0, 2, 1, 3)[valid], ref.permute(0, 2, 1, 3)[valid], atol=1e-3)
+
+
+def test_eager_attention_load_installs_the_mask_patch(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    monkeypatch.setattr(FakeOmniVoiceModel, 'forward', lambda self, **kwargs: kwargs, raising=False)
+    synthesizer = OmniVoiceSynthesizer(
+        settings=make_settings(tmp_path, attention_implementation='eager', compile_model=False),
+        store=InMemoryStore(max_queue_size=8),
+    )
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+
+    assert FakeOmniVoice.load_calls[-1]['attn_implementation'] == 'eager'
+    assert synthesizer.attention_backend == 'eager'
+    assert hasattr(FakeOmniVoiceModel.instances[-1], '_g3_eager_additive_mask_cache')

@@ -58,6 +58,10 @@ fallback as `attention_backend_note`.
   passes a dense bool mask, and Transformers' flex integration adds it as a
   +1/+0 score bias, so padded keys are not masked (true for 0.1.5, 0.2.1 and
   master). The server converts the mask to a `BlockMask` before the LLM.
+- **eager** has the same mask problem: Transformers' eager attention adds a 4D mask
+  to the scores as-is (`attn_weights + attention_mask`). The server converts the bool
+  mask once per generate() into an additive mask in the model dtype (0 / finfo.min);
+  if that patch cannot be installed, the model reloads with `sdpa`.
   Inductor's default flex template also needs more shared memory than RTX
   30/40/50 GPUs have (114688 > 101376 bytes for head_dim 128). The compile then
   fails, and dynamo silently runs unfused eager flex, about 10x slower. On GPUs

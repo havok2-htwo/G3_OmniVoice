@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -9,6 +10,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ..text_optimizer.modes import parse_text_optimization_mode
 
 TextOptimizationMode = Literal['off', 'deterministic']
+
+# Upper bounds (seconds) for the per-request silence padding / fade that metadata may
+# forward to omnivoice >= 0.2 (upstream default 0.1 s each).
+METADATA_SECONDS_LIMITS: dict[str, float] = {'pad_duration': 2.0, 'fade_duration': 1.0}
+
+
+def bounded_metadata_seconds(key: str, value: Any) -> float | None:
+    """Parse metadata.pad_duration / fade_duration: None stays None, else a finite number
+    in [0, limit]. Raises ValueError otherwise."""
+    if value is None:
+        return None
+    limit = METADATA_SECONDS_LIMITS[key]
+    if isinstance(value, bool):
+        raise ValueError(f'metadata.{key} must be a number of seconds')
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'metadata.{key} must be a number of seconds') from None
+    if not math.isfinite(seconds) or seconds < 0 or seconds > limit:
+        raise ValueError(f'metadata.{key} must be between 0 and {limit:g} seconds')
+    return seconds
 
 
 class JobStatus(str, Enum):
@@ -52,6 +74,16 @@ class SpeechRequest(BaseModel):
     @classmethod
     def _validate_text_optimization(cls, value: Any) -> str | None:
         return parse_text_optimization_mode(value)
+
+    @field_validator('metadata')
+    @classmethod
+    def _validate_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Same 422 as the top-level fields for the metadata forms OpenAI SDK clients use.
+        if 'text_optimization' in value:
+            parse_text_optimization_mode(value['text_optimization'])
+        for key in METADATA_SECONDS_LIMITS:
+            bounded_metadata_seconds(key, value.get(key))
+        return value
 
 
 class TextOptimizationInfo(BaseModel):

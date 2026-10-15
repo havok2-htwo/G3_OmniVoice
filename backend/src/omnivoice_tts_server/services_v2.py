@@ -207,16 +207,17 @@ class QueueService:
     def _drop_upstream_normalize_after_optimization(
         request: SpeechRequest, text_optimization: dict[str, Any] | None
     ) -> SpeechRequest:
-        """Skip omnivoice's own normalize_text once our optimizer bound de/en.
+        """Skip omnivoice's own normalize_text once our optimizer rewrote a de/en text.
 
         The spoken text is already verbalized, so a second (and for German weaker,
-        integer-only) normalisation pass can only hurt. Done before the group key is
+        integer-only) normalisation pass can only hurt. Text the optimizer bound but left
+        unchanged (no rule applied) keeps the flag. Done before the group key is
         computed, so such requests never share a batch with ones that still normalize.
         """
         metadata = request.metadata or {}
         if not metadata.get('normalize_text') or not text_optimization:
             return request
-        if text_optimization.get('language') not in {'de', 'en'}:
+        if text_optimization.get('language') not in {'de', 'en'} or not text_optimization.get('applied_rules'):
             return request
         logger.info(
             'normalize_text ignored: text_optimization already verbalized the %s text',
@@ -248,17 +249,13 @@ class QueueService:
             raise RuntimeError(str(exc)) from exc
         if mode != 'deterministic':
             return text, None
-        from .text_optimizer.service import optimize_text
+        from .text_optimizer.service import optimize_request_text
 
-        try:
-            outcome = await asyncio.to_thread(optimize_text, text, request.language)
-        except Exception as exc:  # a rule bug must not cost the request its audio
-            logger.exception('text optimization failed; speaking the raw input')
-            return text, {'mode': mode, 'language': None, 'binding_origin': 'error', 'applied_rules': [], 'error': str(exc)}
-        spoken = outcome.text.strip()
-        if not spoken:
+        # Shared with the dry-run preview: raw-text fallback on a rule error or timeout.
+        outcome = await asyncio.to_thread(optimize_request_text, text, request.language)
+        if not outcome.text:
             raise RuntimeError('Input text is empty after text optimization')
-        return spoken, outcome.as_dict()
+        return outcome.text, outcome.as_dict()
 
     async def cancel(self, job_id: str) -> JobRecord:
         async with self.store.job_condition:

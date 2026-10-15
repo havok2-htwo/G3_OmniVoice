@@ -89,20 +89,29 @@ Useful notes:
   Besides the settings keys, three omnivoice >= 0.2 options are accepted here and only
   forwarded when set: `pad_duration` and `fade_duration` (seconds of silence padding and
   fade per side, default 0.1 each, as before; `0` gives gapless joins) and
-  `normalize_text: true` (upstream text normalisation of the target text). The server
-  forwards `normalize_text` only when the request has an explicit language. For `en`/`zh`
-  it also needs WeTextProcessing, which has no Windows wheels. Without them the flag is
-  ignored instead of failing the request. Other languages use num2words for bare integers
-  only, so German decimals, dates and units stay unchanged.
-  When `text_optimization` already rewrote a German or English text, `normalize_text`
-  is skipped, because the text is in spoken form at that point.
+  `normalize_text: true` (upstream text normalisation of the target text).
+  `pad_duration` must be a finite number from 0 to 2 and `fade_duration` from 0 to 1;
+  anything else (including `Infinity` or a non-numeric string) is rejected with `422`.
+  The server forwards `normalize_text` only when the request language is one OmniVoice
+  recognises (a code such as `de` / `en`, an English name such as `German`, or a UI
+  label such as `Deutsch`). `Auto`, no language and tags OmniVoice does not know
+  (`de-DE`, `en-US`) would make upstream guess Chinese/English, so the flag is ignored
+  for them. For `en`/`zh` it also needs WeTextProcessing, which has no Windows wheels.
+  Other languages use num2words (installed with the server) for bare integers only, so
+  German decimals, dates and units stay unchanged. Whenever a requirement is missing the
+  flag is ignored instead of failing the request.
+  When `text_optimization` rewrote a German or English text (at least one rule
+  applied), `normalize_text` is skipped, because the text is in spoken form at that
+  point.
 - `text_optimization`: `"deterministic"` (or `true`) rewrites the text into its spoken
   form for German/English before sentence splitting: dates, times, numbers, currency,
   units, phone numbers, URLs (domain only), Markdown, emoji, abbreviations, acronyms.
   `"off"` (or `false`) keeps today's behaviour. Omitted means the admin default
   `text_optimization_default` (default `off`) for public requests and always `off`
-  for benchmark, WER and finetune jobs. `"llm"` is reserved (`422`). `Auto` binds
-  the language from the text's notation; other languages are left unchanged.
+  for benchmark, WER and finetune jobs. `"llm"` is reserved (`422`, also as
+  `metadata.text_optimization`). `Auto` / no language binds de/en from the text's
+  notation or its German/English function words; text in other languages (also with
+  `24.09.2026`-style dates) and explicit other languages are left unchanged.
   `input`, `ref_text`, `instructions` and inline tags like `[laughter]` are never
   rewritten. OpenAI SDKs pass it via `extra_body` or `metadata.text_optimization`.
   Details: `API_DOCUMENTATION.md`, section "Text optimization".

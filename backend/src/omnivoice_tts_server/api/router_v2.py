@@ -1331,17 +1331,23 @@ async def admin_optimize_text_preview(request: Request, payload: TextOptimizeReq
 async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest) -> TextOptimizeResponse:
     from ..capacity import max_chars_per_chunk
     from ..prompt_batch import split_sentences
-    from ..text_optimizer.service import optimize_text
+    from ..text_optimizer.service import optimize_request_text
 
     settings = request.app.state.settings
     text = (payload.input or '').strip()
+    # Same checks and fallbacks as QueueService.submit, so the preview never shows a
+    # result that synthesis would reject (400) or speak differently.
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Missing input text')
     max_input = int(getattr(settings, 'max_input_chars', 0) or 0)
     if max_input > 0 and len(text) > max_input:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f'Input text is {len(text)} characters; the limit is {max_input}.',
         )
-    outcome = await asyncio.to_thread(optimize_text, text, payload.language, stage=payload.stage)
+    outcome = await asyncio.to_thread(optimize_request_text, text, payload.language, stage=payload.stage)
+    if not outcome.text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Input text is empty after text optimization')
     sentences = split_sentences(
         outcome.text,
         enabled=settings.sentence_chunking,
@@ -1360,7 +1366,9 @@ async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest)
 
 @router.get('/v1/jobs/{job_id}/audio')
 async def public_job_audio(request: Request, job_id: str, format: str | None = None) -> Response:
-    return _completed_job_audio_response(request, job_id, format)
+    response = _completed_job_audio_response(request, job_id, format)
+    response.headers.update(_text_optimization_headers(request.app.state.store.jobs.get(job_id)))
+    return response
 
 
 @router.post('/api/v1/synthesize/stream')

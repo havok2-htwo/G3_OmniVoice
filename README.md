@@ -171,7 +171,8 @@ an install that never saved settings picks these defaults up on its next start.
   `vram_budget_mb` / `max_input_chars` capacity budget derives chunk sizes and a
   per-batch audio-second limit.
 - **Attention backends** - `attention_implementation` takes `sdpa` (default),
-  `flex_attention` or `eager`; `enable_flashinfer` switches to upstream's FlashInfer
+  `flex_attention` or `eager` (both get a mask patch: OmniVoice's bool mask would
+  otherwise be added as a +1/+0 bias); `enable_flashinfer` switches to upstream's FlashInfer
   packed attention on Linux (fp16, no `torch.compile`, automatic fallback). The Docker
   image ships FlashInfer and turns it on. `GET /api/admin/settings` reports the
   backend that really runs (`attention_backend`). For details and the 0.1.5 / SDPA /

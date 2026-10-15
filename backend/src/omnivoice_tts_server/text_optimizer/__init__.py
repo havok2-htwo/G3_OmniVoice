@@ -26,6 +26,7 @@ from .modes import TEXT_OPTIMIZATION_MODES, parse_text_optimization_mode, resolv
 _LAZY = {
     "TextOptimizationOutcome": ".service",
     "optimize_text": ".service",
+    "optimize_request_text": ".service",
     "resolve_optimizer_language": ".service",
     "DeterministicTtsResult": ".pipeline",
     "build_deterministic_tts_text": ".pipeline",

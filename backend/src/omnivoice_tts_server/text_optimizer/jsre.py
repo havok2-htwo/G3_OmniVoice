@@ -17,16 +17,33 @@ line. Differences that are handled:
   the callback argument layout ``(match, *groups, offset, source)`` with
   ``None`` for groups that did not participate, and ``$1``/``$&``/``$$``
   replacement templates.
+* ``/i`` follows ECMAScript case-insensitivity instead of Python's: without
+  ``u`` two characters are equal when their single-character upper-case forms
+  are equal and no non-ASCII character maps onto ASCII (so ``İ``, ``ı``, ``ſ``,
+  ``K`` and ``ẞ`` never match ``i``/``s``/``k``/``ß``); with ``u`` simple case
+  folding is used (``ſ``~``s``, ``K``~``k``, ``ẞ``~``ß``, never ``İ``/``ı``).
+  Patterns are compiled without ``regex.IGNORECASE``: literals and classes are
+  expanded to their JS case-equivalents, backreferences compare case-folded.
 
 Known, accepted gaps (not exercised by the optimizer): captures inside a
-repeated group are not reset per iteration as in JS, ``/i`` uses Unicode
-simple case folding even without the ``u`` flag, and offsets are code points
-instead of UTF-16 code units.
+repeated group are not reset per iteration as in JS; offsets are code points
+instead of UTF-16 code units, so a callback that looks at ``source[offset-1]``
+sees a whole astral letter where JS sees a lone surrogate (the JS result is the
+buggier one there); ``\\w``/``\\b`` under ``/iu`` stay ASCII (JS adds ``ſ`` and
+``K``).
+
+Every match runs with ``concurrent=True`` (the GIL is released while the regex
+engine scans) and honours :func:`time_budget`: once the budget is spent the next
+match raises :class:`TimeoutError`, so a pathological input cannot hold a worker
+thread for minutes.
 """
 
 from __future__ import annotations
 
+import contextvars
 import math
+import time
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Callable, Iterator
 
@@ -34,6 +51,7 @@ import regex
 
 __all__ = [
     "JS_WHITESPACE",
+    "time_budget",
     "JsRegExp",
     "js",
     "js_number",
@@ -62,6 +80,113 @@ _HEX2_RE = regex.compile(r"[0-9A-Fa-f]{2}")
 
 class JsRegexTranslationError(ValueError):
     pass
+
+
+# --- time budget ---------------------------------------------------------------------------
+
+_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("jsre_deadline", default=None)
+
+
+@contextmanager
+def time_budget(seconds: float | None):
+    """Bound the regex work done inside the block (per thread / context).
+
+    ``None`` or a non-positive value disables the budget. When it is spent, the next
+    match raises :class:`TimeoutError` (the ``regex`` module's own timeout error).
+    """
+    if seconds is None or seconds <= 0:
+        yield
+        return
+    token = _DEADLINE.set(time.monotonic() + float(seconds))
+    try:
+        yield
+    finally:
+        _DEADLINE.reset(token)
+
+
+def _timeout() -> float | None:
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("regex time budget exhausted")
+    return remaining
+
+
+# --- ECMAScript case-insensitivity ---------------------------------------------------------
+
+
+def _js_canonicalize_non_unicode(ch: str) -> str:
+    """ECMAScript Canonicalize(ch) for /i without u (toUpperCase, single unit, no ->ASCII)."""
+    upper = ch.upper()
+    if len(upper) != 1:
+        return ch
+    if ord(ch) >= 128 and ord(upper) < 128:
+        return ch
+    return upper
+
+
+def _simple_case_fold(ch: str) -> str:
+    """Unicode simple case folding (CaseFolding.txt C+S), what /iu canonicalizes with."""
+    folded = ch.casefold()
+    if len(folded) == 1:
+        return folded
+    lower = ch.lower()
+    if len(lower) == 1:
+        return lower
+    return ch
+
+
+@lru_cache(maxsize=2)
+def _case_groups(unicode_mode: bool) -> tuple[dict[str, str], str]:
+    """char -> all chars JS /i treats as equal to it (only chars with a partner), plus
+    the concatenation of those chars for one-pass class membership scans."""
+    canonicalize = _simple_case_fold if unicode_mode else _js_canonicalize_non_unicode
+    # Without u, JS compares UTF-16 code units: astral letters never fold.
+    limit = 0x1FFFF if unicode_mode else 0xFFFF
+    groups: dict[str, list[str]] = {}
+    for cp in range(limit + 1):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        groups.setdefault(canonicalize(ch), []).append(ch)
+    mapping = {ch: "".join(group) for group in groups.values() if len(group) > 1 for ch in group}
+    return mapping, "".join(mapping)
+
+
+def _class_char(ch: str) -> str:
+    cp = ord(ch)
+    return f"\\u{cp:04x}" if cp <= 0xFFFF else f"\\U{cp:08x}"
+
+
+def _case_variants_class(ch: str, unicode_mode: bool) -> str | None:
+    group = _case_groups(unicode_mode)[0].get(ch)
+    if group is None:
+        return None
+    return "[" + "".join(_class_char(c) for c in group) + "]"
+
+
+def _class_case_closure(body_text: str, unicode_mode: bool) -> str:
+    """Extra class body that adds the JS case-equivalents of every member of ``[body]``."""
+    mapping, cased = _case_groups(unicode_mode)
+    member = regex.compile(f"[{body_text}]", regex.V0)
+    matched = set(member.findall(cased))
+    extras = {other for ch in matched for other in mapping[ch] if other not in matched}
+    return "".join(_class_char(c) for c in sorted(extras))
+
+
+_SINGLE_CHAR_FRAGMENT = regex.compile(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})|\\x([0-9A-Fa-f]{2})|([^\\])")
+_BACKREF_FRAGMENT = regex.compile(r"\\[1-9][0-9]*|\(\?P=[^)]+\)")
+
+
+def _fragment_char(fragment: str) -> str | None:
+    m = _SINGLE_CHAR_FRAGMENT.fullmatch(fragment)
+    if m is None:
+        return None
+    if m.group(4) is not None:
+        return m.group(4)
+    return chr(int(m.group(1) or m.group(2) or m.group(3), 16))
 
 
 def _escape_literal(ch: str) -> str:
@@ -142,7 +267,7 @@ def _translate_escape(source: str, i: int, unicode_mode: bool, in_class: bool) -
     return _escape_literal(c), j, None
 
 
-def _translate_class(source: str, i: int, unicode_mode: bool) -> tuple[str, int]:
+def _translate_class(source: str, i: int, unicode_mode: bool, ignore_case: bool = False) -> tuple[str, int]:
     """Translate the character class starting at ``source[i] == '['``."""
     j = i + 1
     negated = False
@@ -176,6 +301,8 @@ def _translate_class(source: str, i: int, unicode_mode: bool) -> tuple[str, int]
         j += 1
 
     body_text = "".join(body)
+    if ignore_case and body_text:
+        body_text += _class_case_closure(body_text, unicode_mode)
     if not complements:
         if not body_text:
             # JS: [] never matches, [^] matches any character.
@@ -200,6 +327,7 @@ def _translate_class(source: str, i: int, unicode_mode: bool) -> tuple[str, int]
 @lru_cache(maxsize=None)
 def translate(source: str, flags: str) -> str:
     unicode_mode = "u" in flags or "v" in flags
+    ignore_case = "i" in flags
     multiline = "m" in flags
     dotall = "s" in flags
     out: list[str] = []
@@ -209,10 +337,23 @@ def translate(source: str, flags: str) -> str:
         ch = source[i]
         if ch == "\\":
             fragment, i, _ = _translate_escape(source, i, unicode_mode, in_class=False)
+            if ignore_case:
+                if _BACKREF_FRAGMENT.fullmatch(fragment):
+                    # JS /i compares a backreference case-insensitively.
+                    fragment = f"(?i:{fragment})"
+                elif fragment.startswith(("\\p{", "\\P{")):
+                    # A property escape is a set too: /iu matches its case-equivalents
+                    # (\\p{Lu} matches lower-case letters under /iu).
+                    fragment = f"[{fragment}{_class_case_closure(fragment, unicode_mode)}]"
+                else:
+                    char = _fragment_char(fragment)
+                    variants = _case_variants_class(char, unicode_mode) if char is not None else None
+                    if variants is not None:
+                        fragment = variants
             out.append(fragment)
             continue
         if ch == "[":
-            fragment, i = _translate_class(source, i, unicode_mode)
+            fragment, i = _translate_class(source, i, unicode_mode, ignore_case)
             out.append(fragment)
             continue
         if ch == ".":
@@ -242,7 +383,8 @@ def translate(source: str, flags: str) -> str:
         elif ch.isspace():
             out.append(ch)
         else:
-            out.append(ch)
+            variants = _case_variants_class(ch, unicode_mode) if ignore_case else None
+            out.append(variants if variants is not None else ch)
         i += 1
     return "".join(out)
 
@@ -257,38 +399,36 @@ class JsRegExp:
         self.flags = flags
         self.global_ = "g" in flags
         self.sticky = "y" in flags
-        pyflags = regex.V0
-        if "i" in flags:
-            pyflags |= regex.IGNORECASE
-        self.compiled = _compile(translate(source, flags), pyflags)
+        # No regex.IGNORECASE: translate() expands /i to the JS case-equivalents.
+        self.compiled = _compile(translate(source, flags), regex.V0)
 
     def with_flags(self, flags: str) -> "JsRegExp":
         return JsRegExp(self.source, flags)
 
     # RegExp.prototype.test for a non-global pattern.
     def test(self, text: str) -> bool:
-        return self.compiled.search(text) is not None
+        return self.compiled.search(text, concurrent=True, timeout=_timeout()) is not None
 
     def search(self, text: str, pos: int = 0):
-        return self.compiled.search(text, pos)
+        return self.compiled.search(text, pos, concurrent=True, timeout=_timeout())
 
     def match_at(self, text: str, pos: int):
         """Sticky match: only at ``pos`` (lookbehind may see text before it)."""
-        return self.compiled.match(text, pos)
+        return self.compiled.match(text, pos, concurrent=True, timeout=_timeout())
 
     def finditer(self, text: str) -> Iterator["regex.Match[str]"]:
-        return self.compiled.finditer(text)
+        return self.compiled.finditer(text, concurrent=True, timeout=_timeout())
 
     def match_all(self, text: str) -> list[str]:
         """``String.prototype.match`` with a global pattern (``[]`` instead of null)."""
-        return [m.group(0) for m in self.compiled.finditer(text)]
+        return [m.group(0) for m in self.finditer(text)]
 
     def first(self, text: str):
         """``String.prototype.match`` with a non-global pattern."""
-        return self.compiled.search(text)
+        return self.search(text)
 
     def split(self, text: str, limit: int | None = None) -> list[str]:
-        parts = self.compiled.split(text)
+        parts = self.compiled.split(text, concurrent=True, timeout=_timeout())
         # regex.split includes captured groups like JS; JS gives undefined -> keep None.
         if limit is not None:
             parts = parts[:limit]
@@ -360,9 +500,9 @@ def _expand_template(template: str, m: "regex.Match[str]", text: str) -> str:
 def js_replace(pattern: JsRegExp, text: str, replacement: str | ReplaceCallback) -> str:
     """``text.replace(pattern, replacement)`` with JS semantics."""
     if pattern.global_:
-        matches = list(pattern.compiled.finditer(text))
+        matches = list(pattern.finditer(text))
     else:
-        first = pattern.compiled.search(text)
+        first = pattern.search(text)
         matches = [first] if first is not None else []
     if not matches:
         return text

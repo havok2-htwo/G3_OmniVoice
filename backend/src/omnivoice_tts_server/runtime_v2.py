@@ -18,7 +18,7 @@ from types import MethodType
 from typing import Any
 
 from .config import Settings
-from .domain.models import SpeechRequest, TaskType
+from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
 from .domain.state import InMemoryStore, VoiceProfileRecord
 from .voice_design import DEFAULT_VOICE_DESIGN_INSTRUCT, normalize_voice_design_instruct
 
@@ -148,6 +148,25 @@ SUPPORTED_ATTENTION_IMPLEMENTATIONS = ('sdpa', 'flex_attention', 'eager')
 _ATTENTION_ALIASES = {'flex': 'flex_attention', 'flexattention': 'flex_attention'}
 
 
+def resolve_omnivoice_language(language: str | None) -> str | None:
+    """The language id OmniVoice.generate() resolves ``language`` to (None = agnostic).
+
+    Mirrors omnivoice.models.omnivoice._resolve_language over omnivoice.utils.lang_map
+    (exact id, else lower-cased full name, else None) without importing the model module.
+    """
+    if language is None or not str(language).strip() or str(language).lower() == 'none':
+        return None
+    value = str(language)
+    try:
+        from omnivoice.utils.lang_map import LANG_IDS, LANG_NAME_TO_ID
+    except Exception:
+        known = set(LANGUAGE_LABEL_TO_CODE.values())
+        return value if value in known else None
+    if value in LANG_IDS:
+        return value
+    return LANG_NAME_TO_ID.get(value.lower())
+
+
 def normalize_attention_implementation(value: str | None) -> str:
     """Map an attention setting to a Transformers attn_implementation we support."""
     raw = (value or 'sdpa').strip().lower()
@@ -212,6 +231,45 @@ def install_flex_block_mask_forward(model: Any) -> bool:
 
     model.forward = MethodType(forward, model)
     model._g3_flex_block_mask_cache = cache
+    return True
+
+
+def install_eager_additive_mask_forward(model: Any) -> bool:
+    """Make OmniVoice's dense bool attention mask work under the eager attention.
+
+    Transformers' eager attention adds a 4D attention_mask to the scores as-is
+    (``attn_weights + attention_mask``), so OmniVoice's (2B, 1, S, S) bool mask becomes
+    a +1/+0 bias and padded keys are NOT masked (same bug as unpatched flex). The mask is
+    converted once per mask tensor into an additive mask in the model dtype: 0 where
+    attention is allowed, finfo(dtype).min where it is not.
+    """
+    try:
+        import torch
+    except Exception as exc:
+        logger.warning('eager attention mask conversion unavailable: %s', exc)
+        return False
+    original_forward = getattr(model, 'forward', None)
+    if not callable(original_forward):
+        return False
+    cache: dict[str, Any] = {'mask': None, 'additive': None}
+
+    def _mask_dtype() -> Any:
+        llm = getattr(model, 'llm', None)
+        dtype = getattr(llm, 'dtype', None) or getattr(model, 'dtype', None)
+        return dtype if isinstance(dtype, torch.dtype) and dtype.is_floating_point else torch.float32
+
+    def forward(self: Any, *args: Any, attention_mask: Any = None, **kwargs: Any) -> Any:
+        if isinstance(attention_mask, torch.Tensor) and attention_mask.dtype == torch.bool and attention_mask.dim() == 4:
+            if cache['mask'] is not attention_mask:
+                dtype = _mask_dtype()
+                additive = torch.zeros(attention_mask.shape, dtype=dtype, device=attention_mask.device)
+                cache['additive'] = additive.masked_fill(~attention_mask, torch.finfo(dtype).min)
+                cache['mask'] = attention_mask
+            attention_mask = cache['additive']
+        return original_forward(*args, attention_mask=attention_mask, **kwargs)
+
+    model.forward = MethodType(forward, model)
+    model._g3_eager_additive_mask_cache = cache
     return True
 
 
@@ -458,6 +516,22 @@ class OmniVoiceSynthesizer:
         if backend == 'flex_attention' and not install_flex_block_mask_forward(model):
             # Unpatched flex ignores the padding mask (bool mask -> +1 bias): never run it.
             note = 'flex_attention mask patch unavailable; reloaded with sdpa'
+            logger.warning(note)
+            del model
+            self._trim_cuda_cache_sync()
+            model, backend = self._from_pretrained(
+                omnivoice_cls,
+                model_id,
+                model_source,
+                extra_kwargs,
+                dtype=self._torch_dtype(torch),
+                attn_implementation='sdpa',
+                allow_fp8=True,
+            )
+
+        if backend == 'eager' and not install_eager_additive_mask_forward(model):
+            # Eager adds the bool mask as a +1/+0 bias, so padding would be attended to.
+            note = 'eager attention mask patch unavailable; reloaded with sdpa'
             logger.warning(note)
             del model
             self._trim_cuda_cache_sync()
@@ -931,10 +1005,16 @@ class OmniVoiceSynthesizer:
         # omnivoice >= 0.2: per-request silence padding / fade per side (upstream default
         # 0.1 s each, identical to the old hard-coded values). Only forwarded when a
         # client sets them, so the default output stays bit-identical.
-        for key in ('pad_duration', 'fade_duration'):
-            value = metadata.get(key)
+        # Bounded (pad <= 2 s, fade <= 1 s) and finite: SpeechRequest rejects anything else
+        # with 422; this second check only guards internally built requests.
+        for key in METADATA_SECONDS_LIMITS:
+            try:
+                value = bounded_metadata_seconds(key, metadata.get(key))
+            except ValueError as exc:
+                logger.warning('%s ignored: %s', key, exc)
+                continue
             if value is not None:
-                result[key] = max(0.0, float(value))
+                result[key] = value
         if metadata.get('normalize_text') and self._upstream_normalize_text_usable(items):
             result['normalize_text'] = True
         return result
@@ -942,19 +1022,27 @@ class OmniVoiceSynthesizer:
     def _upstream_normalize_text_usable(self, items: list[BatchSynthesisItem]) -> bool:
         """Gate omnivoice's own normalize_text (zh/en via WeTextProcessing, else num2words).
 
-        With language=None upstream guesses zh/en, so German text would get the English
-        normaliser; and a missing WeTextProcessing (no pynini wheels on Windows) raises
-        ImportError out of generate() and fails the whole batch. Only forward the flag
-        when every item has an explicit language whose backend is importable.
+        The decision uses the language generate() itself resolves (lang_map): anything it
+        does not recognise ('de-DE', 'en-US', 'xx', Auto) becomes None there, and
+        normalize_text(None) guesses zh/en, so German text would get the English
+        normaliser. A missing WeTextProcessing (no pynini wheels on Windows) raises
+        ImportError out of generate() and fails the whole batch, and without num2words
+        the other languages are a silent no-op. Only forward the flag when every item
+        has a recognised language whose normaliser is importable.
         """
-        languages = [self._normalize_language(item.request.language) for item in items]
-        if any(language is None for language in languages):
-            logger.info('normalize_text ignored: needs an explicit language per request')
+        resolved = [resolve_omnivoice_language(self._normalize_language(item.request.language)) for item in items]
+        if any(code is None for code in resolved):
+            logger.info(
+                'normalize_text ignored: needs a language OmniVoice recognises per request (got %s)',
+                sorted({str(item.request.language) for item in items}),
+            )
             return False
-        if any(str(language).lower() in {'zh', 'en', 'chinese', 'english'} for language in languages):
-            if importlib.util.find_spec('tn') is None:
-                logger.info('normalize_text ignored: WeTextProcessing (tn) is not installed')
-                return False
+        if any(code in ('zh', 'en') for code in resolved) and importlib.util.find_spec('tn') is None:
+            logger.info('normalize_text ignored: WeTextProcessing (tn) is not installed')
+            return False
+        if any(code not in ('zh', 'en') for code in resolved) and importlib.util.find_spec('num2words') is None:
+            logger.info('normalize_text ignored: num2words is not installed')
+            return False
         return True
 
     def _apply_seed(self, seed: int | None) -> None:

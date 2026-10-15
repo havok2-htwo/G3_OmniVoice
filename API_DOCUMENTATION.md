@@ -157,13 +157,20 @@ Notes:
   Besides the settings keys, three omnivoice >= 0.2 options are accepted here and only
   forwarded when set: `pad_duration` and `fade_duration` (seconds of silence padding and
   fade per side, default 0.1 each, as before; `0` gives gapless joins) and
-  `normalize_text: true` (upstream text normalisation of the target text). The server
-  forwards `normalize_text` only when the request has an explicit language. For `en`/`zh`
-  it also needs WeTextProcessing, which has no Windows wheels. Without them the flag is
-  ignored instead of failing the request. Other languages use num2words for bare integers
-  only, so German decimals, dates and units stay unchanged.
-  When `text_optimization` already rewrote a German or English text, `normalize_text`
-  is skipped, because the text is in spoken form at that point.
+  `normalize_text: true` (upstream text normalisation of the target text).
+  `pad_duration` must be a finite number from 0 to 2 and `fade_duration` from 0 to 1;
+  anything else (including `Infinity` or a non-numeric string) is rejected with `422`.
+  The server forwards `normalize_text` only when the request language is one OmniVoice
+  recognises (a code such as `de` / `en`, an English name such as `German`, or a UI
+  label such as `Deutsch`). `Auto`, no language and tags OmniVoice does not know
+  (`de-DE`, `en-US`) would make upstream guess Chinese/English, so the flag is ignored
+  for them. For `en`/`zh` it also needs WeTextProcessing, which has no Windows wheels.
+  Other languages use num2words (installed with the server) for bare integers only, so
+  German decimals, dates and units stay unchanged. Whenever a requirement is missing the
+  flag is ignored instead of failing the request.
+  When `text_optimization` rewrote a German or English text (at least one rule
+  applied), `normalize_text` is skipped, because the text is in spoken form at that
+  point.
 - `text_optimization` turns on spoken-text optimization for German and English (see below).
 
 ### Text optimization (`text_optimization`)
@@ -184,7 +191,8 @@ TTS pipeline; no LLM is involved:
 - abbreviations (`z.B.`, `inkl.`, `Tel.`, `e.g.`, ...) are expanded and known
   acronyms are spelled (`API` -> `A P I`)
 - `!` at a sentence end becomes `.`, quotation marks are dropped, en/em dashes
-  become a spaced hyphen pause
+  become a spaced hyphen pause. These punctuation changes only happen when at least
+  one rule fired; a text no rule touches is spoken exactly as sent.
 
 Values:
 
@@ -193,13 +201,34 @@ Values:
 | omitted / `null` | admin default `text_optimization_default` (default `off`) for public requests; always `off` for benchmark, WER and finetune jobs |
 | `"off"` or `false` | no optimization; the sentences are exactly the same as without the field |
 | `"deterministic"` or `true` | deterministic optimization |
-| `"llm"` | reserved for a later LLM rewrite mode; rejected with `422` |
+| `"llm"` | reserved for a later LLM rewrite mode; rejected with `422` (also as `metadata.text_optimization`) |
 
 Language: an explicit `de*`/`Deutsch`/`German` or `en*`/`English` uses that rule
-set. `Auto` or no language binds the language from language-specific notation in
-the text (`14:30 Uhr`, `24.09.2026`, `3:30 PM`, month names, ...). If there is none,
-or the request names another language (`fr`, `Français`, ...), the text is left
-unchanged.
+set; any other explicit language (`fr`, `Français`, ...) leaves the text unchanged.
+`Auto` or no language (the OpenAI SDK default) decides from the text:
+
+1. Language-specific notation (`14:30 Uhr`, `24.09.2026`, `29,90 €`, `3:30 PM`, month
+   names, ...) binds German or English (`binding_origin: chunk_notation`), unless the
+   text's frequent function words belong to another language or the text is mostly in
+   a non-Latin script. Dutch, Polish, Italian, French, Spanish, Portuguese, Turkish or
+   Russian text with a `24.09.2026` date or a `1.234,56` amount is therefore left
+   unchanged (`other_language`).
+2. Without such notation, German or English function words (`der`, `und`, `ist`,
+   `the`, `and`, `is`, ...) bind the language (`text_words`), so `Das kostet 5 Euro.`
+   is optimized with `Auto` too.
+3. Otherwise nothing is bound and the text is left unchanged (`none`). Pass an
+   explicit `language` when the text is very short or mixed.
+
+Bracketed text is ordinary text: only OmniVoice's own control spans (the non-verbal
+tags such as `[laughter]` / `[sigh]` and ARPAbet pronunciations such as `[B EY1 S]`)
+are protected, so `[ca. 5 €]` or a citation `[1]` is optimized like the rest.
+
+Limits: the rule passes have a 5-second budget per request. Number-dense input (long
+digit lists, `1.1.1...` runs) can exceed it; the raw text is then spoken
+(`binding_origin: timeout`). Known gaps inherited from the Genesis rules (kept for
+parity with the TS reference): `25:30 min` is read as a ratio (`fünfundzwanzig zu
+dreißig`), a lone attributive `1` (`1 Person`, `Ich kaufe 1 Butter`) stays a digit in
+German, a keycap `1️⃣` becomes `1`, and a sentence-initial `Am 3.4.` is lower-cased.
 
 What is never changed: `request.input` stays the raw text (job lists show it),
 `ref_text` and `instructions` are not touched, and OmniVoice inline control spans
@@ -213,7 +242,10 @@ Where the result shows up:
   `text_optimization` = `{mode, language, binding_origin, applied_rules, spoken_text}`
   (`null` when the mode was `off`)
 - `POST /api/v1/synthesize/stream`: the `start` event carries the same object
-- `POST /v1/audio/speech`: header `X-Text-Optimization: deterministic; language=de; rules=date_de_dmy,time_de_hhmm`
+- `POST /v1/audio/speech` and `GET /v1/jobs/{job_id}/audio` (for jobs created with
+  `POST /v1/jobs`): header
+  `X-Text-Optimization: deterministic; language=de; rules=date_de_dmy,time_de_hhmm`.
+  CORS exposes it, so browser clients on other origins can read it.
 
 OpenAI SDK clients send the field with `extra_body`, or as
 `metadata.text_optimization`, which is read when the top-level field is missing:
@@ -572,9 +604,21 @@ Response:
 }
 ```
 
-`binding_origin` is `request` (explicit de/en), `chunk_notation` (bound from the
-text for `Auto`), `none` (nothing bound, text unchanged) or `unsupported_language`.
-`applied_rules` uses the Genesis3 rule names.
+`binding_origin` is one of:
+
+- `request`: explicit de/en request language
+- `chunk_notation`: bound from German/English notation (`Auto` / no language)
+- `text_words`: bound from German/English function words (`Auto` / no language)
+- `none`: nothing bound, text unchanged
+- `other_language`: `Auto` text written in another language or script, unchanged
+- `unsupported_language`: explicit non-de/en language, unchanged
+- `timeout`: the rule passes exceeded their 5 s budget, the raw text is spoken
+- `error`: a rule raised, the raw text is spoken (the job's `text_optimization`
+  also carries `error`)
+- `tags_unprotected`: no free placeholder for the inline tags, unchanged
+
+`applied_rules` uses the Genesis3 rule names. The dry run applies the same checks as
+synthesis: empty input, or input that optimizes to nothing, returns `400`.
 
 ## Admin API
 

@@ -61,5 +61,8 @@ if exist "%~dp0frontend\dist\index.html" (
 REM Shrink the CUDA caching-allocator reserved pool (less fragmentation -> lower idle VRAM,
 REM leaves room for Whisper + Ollama). expandable_segments is Linux-only / ignored on Windows.
 set "PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256"
+REM numpy/scipy OpenBLAS starts one thread per core at import and commits 32 MiB per
+REM thread (~1.5 GB commit, never touched). Inference runs in torch, so 4 is plenty.
+if not defined OPENBLAS_NUM_THREADS set "OPENBLAS_NUM_THREADS=4"
 "%PYTHON_EXE%" -u -m omnivoice_tts_server.main
 pause

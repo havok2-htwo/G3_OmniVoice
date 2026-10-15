@@ -4,6 +4,32 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed — retained job audio and idle RAM
+
+A finished job kept its audio two or three times in RAM for the whole retention
+(up to 500 jobs / 7 days). The store was bounded by job count, not by size, so
+many long jobs could grow it without limit.
+
+- The PCM parts are freed once `final_audio` is built. Failed and cancelled jobs
+  free them too.
+- Only the stream queue an endpoint reads is filled: NDJSON events for
+  `/api/v1/synthesize/stream`, raw PCM for streaming `/v1/audio/speech`. Before,
+  every streaming job also filled the other queue, and nobody drained it. Jobs
+  with no stream reader (`/v1/jobs` with `stream: true`, benchmarks) buffer
+  nothing. When a stream ends or the client disconnects, the queue is emptied.
+- New setting `max_retained_audio_mb` (default 256,
+  `OMNIVOICE_TTS_MAX_RETAINED_AUDIO_MB`, `0` = unlimited) caps the audio kept for
+  finished jobs. Above the cap, the least recently used jobs (completion or last
+  download) lose their audio. The job stays in the job list, and its download
+  returns `410 Gone`. The newest job and jobs finished in the last 60 s always
+  keep their audio, so waiting callers and poll-then-download clients still get
+  theirs.
+- The startup warmup runs under `torch.inference_mode()`, like real requests.
+  Before, it built autograd state.
+- `start_server.bat` and the Dockerfile set `OPENBLAS_NUM_THREADS=4`. numpy/scipy
+  OpenBLAS started ~24 threads at import, and each committed 32 MiB it never
+  used (~1.5 GB commit, no RAM). Runtime does not change.
+
 ### Changed — VRAM budget 7000 MB
 
 The RTX 4090 is shared with Whisper, EMBED and DIA, so the default

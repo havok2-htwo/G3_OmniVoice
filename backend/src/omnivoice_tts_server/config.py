@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     channels: int = 1
     retention_days: int = 7
     max_retained_jobs: int = 500
+    # Byte cap on audio kept for finished jobs (download via /v1/jobs/{id}/audio). Above
+    # it the least recently used jobs lose their audio (record stays). 0 = unlimited.
+    max_retained_audio_mb: int = Field(default=256, ge=0)
     max_retained_benchmark_runs: int = 25
     benchmark_dataset_default: str = 'de_standard_v1'
     frontend_poll_interval_ms: int = 500

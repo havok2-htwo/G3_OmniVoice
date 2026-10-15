@@ -291,6 +291,10 @@ Completed public jobs can also be downloaded with:
 GET /v1/jobs/{job_id}/audio?format=mp3
 ```
 
+Finished audio stays in memory up to `max_retained_audio_mb` (default 256 MB,
+`OMNIVOICE_TTS_MAX_RETAINED_AUDIO_MB`). Above it the least recently used jobs
+lose their audio and the download returns `410 Gone`; the job itself stays listed.
+
 ## Admin Routes
 
 Protected routes below require the admin session cookie.

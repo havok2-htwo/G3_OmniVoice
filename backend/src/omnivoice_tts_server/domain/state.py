@@ -22,6 +22,14 @@ DEFAULT_ADMIN_PASSWORD = "admin"
 API_KEY_PREFIX = "omnivoice_tts"
 SECRETS_VERSION = 2
 
+# --- job stream consumers (JobRecord.stream_consumer) ---
+STREAM_EVENTS = 'events'
+STREAM_CHUNKS = 'chunks'
+
+# Finished jobs younger than this keep their audio even above the byte cap, so a caller
+# that is just being woken (wait_for_completion) or polls-then-downloads still finds it.
+AUDIO_EVICTION_GRACE_SECONDS = 60
+
 
 def _json_load(path: Path) -> dict[str, Any] | list[Any]:
     if not path.exists():
@@ -134,8 +142,15 @@ class JobRecord:
     cancel_requested: bool = False
     stream_chunks: asyncio.Queue[bytes | None] = field(default_factory=asyncio.Queue)
     stream_events: asyncio.Queue[dict[str, Any] | None] = field(default_factory=asyncio.Queue)
+    # Which stream queue an HTTP handler actually reads: STREAM_EVENTS (NDJSON endpoint),
+    # STREAM_CHUNKS (raw PCM endpoint) or None (nobody streams this job). Only that queue
+    # is filled, so unread PCM / base64 copies never pile up on the retained job.
+    stream_consumer: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
+    # PCM pieces collected while rendering; joined into final_audio and cleared on completion.
     pcm_parts: list[bytes] = field(default_factory=list)
+    audio_accessed_at: datetime | None = None
+    audio_evicted: bool = False
     sample_rate: int = 24_000
     sentences_total: int = 0
     owner_scope: str = 'public'
@@ -144,6 +159,42 @@ class JobRecord:
     def preview(self, length: int = 80) -> str:
         text = (self.request.input or '').strip()
         return text if len(text) <= length else f'{text[: length - 1]}...'
+
+    @property
+    def wants_stream_events(self) -> bool:
+        return self.stream_consumer == STREAM_EVENTS
+
+    @property
+    def wants_stream_chunks(self) -> bool:
+        return self.stream_consumer == STREAM_CHUNKS
+
+    def push_stream_event(self, event: dict[str, Any]) -> None:
+        if self.stream_consumer == STREAM_EVENTS:
+            self.stream_events.put_nowait(event)
+
+    def push_stream_chunk(self, chunk: bytes) -> None:
+        if self.stream_consumer == STREAM_CHUNKS:
+            self.stream_chunks.put_nowait(chunk)
+
+    def end_stream(self) -> None:
+        """Wake the consumer with the end-of-stream sentinel (no-op without one)."""
+        if self.stream_consumer == STREAM_EVENTS:
+            self.stream_events.put_nowait(None)
+        elif self.stream_consumer == STREAM_CHUNKS:
+            self.stream_chunks.put_nowait(None)
+
+    def detach_stream(self) -> None:
+        """The consumer is gone: stop filling the queues and drop what is still buffered."""
+        self.stream_consumer = None
+        for queue in (self.stream_events, self.stream_chunks):
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+    def retained_audio_bytes(self) -> int:
+        return len(self.final_audio or b'') + sum(len(part) for part in self.pcm_parts)
 
 
 class InMemoryStore:
@@ -504,7 +555,13 @@ class InMemoryStore:
             return 0
         return position * (900 + min(text_length * 10, 2800))
 
-    def prune_terminal_jobs(self, *, retention_days: int = 0, max_retained_jobs: int = 500) -> int:
+    def prune_terminal_jobs(
+        self,
+        *,
+        retention_days: int = 0,
+        max_retained_jobs: int = 500,
+        max_retained_audio_bytes: int = 0,
+    ) -> int:
         """Evict finished jobs so the in-memory store stays bounded.
 
         Removes terminal jobs (completed/failed/cancelled) older than retention_days
@@ -512,9 +569,57 @@ class InMemoryStore:
         Frees the heavy fields (final_audio WAV bytes, pcm_parts) and drops the
         request_states entry. Never touches queued/active jobs. Returns count removed.
 
+        Then, if max_retained_audio_bytes > 0, drops the audio (not the job record) of
+        the least recently used finished jobs until the retained audio fits the cap;
+        see evict_retained_audio().
+
         Callers must hold job_condition (or run before the worker starts); this only
         mutates plain dicts and does no awaiting.
         """
+        removed = self._prune_terminal_job_records(retention_days=retention_days, max_retained_jobs=max_retained_jobs)
+        if max_retained_audio_bytes and max_retained_audio_bytes > 0:
+            self.evict_retained_audio(max_retained_audio_bytes)
+        return removed
+
+    def retained_audio_bytes(self) -> int:
+        terminal = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
+        return sum(job.retained_audio_bytes() for job in self.jobs.values() if job.status in terminal)
+
+    def evict_retained_audio(self, max_bytes: int, *, now: datetime | None = None) -> int:
+        """Drop audio of finished jobs, least recently used first, until <= max_bytes.
+
+        "Used" is completion or the last download (audio_accessed_at). The job record
+        stays in the list (metrics, status), only its audio is freed and marked evicted.
+        Kept regardless of the cap: the most recently used job (so one oversized result
+        is still downloadable) and jobs finished less than AUDIO_EVICTION_GRACE_SECONDS
+        ago. Returns the number of jobs whose audio was dropped.
+        """
+        terminal = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
+        holding = [job for job in self.jobs.values() if job.status in terminal and job.retained_audio_bytes() > 0]
+        total = sum(job.retained_audio_bytes() for job in holding)
+        if total <= max_bytes or len(holding) <= 1:
+            return 0
+
+        def last_used(job: JobRecord) -> datetime:
+            stamps = [s for s in (job.completed_at, job.audio_accessed_at) if s is not None]
+            return max(stamps) if stamps else (job.updated_at or job.created_at)
+
+        holding.sort(key=last_used)
+        grace_cutoff = (now or utcnow()) - timedelta(seconds=AUDIO_EVICTION_GRACE_SECONDS)
+        evicted = 0
+        for job in holding[:-1]:  # never the most recently used one
+            if total <= max_bytes:
+                break
+            if (job.completed_at or job.updated_at or job.created_at) > grace_cutoff:
+                continue
+            total -= job.retained_audio_bytes()
+            job.final_audio = None
+            job.pcm_parts = []
+            job.audio_evicted = True
+            evicted += 1
+        return evicted
+
+    def _prune_terminal_job_records(self, *, retention_days: int, max_retained_jobs: int) -> int:
         terminal = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
         removable = [(job_id, job) for job_id, job in self.jobs.items() if job.status in terminal]
         to_remove: set[str] = set()

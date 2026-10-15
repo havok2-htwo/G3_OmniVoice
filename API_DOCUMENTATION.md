@@ -872,6 +872,13 @@ Notes:
 
 - completed audio is kept in memory only
 - it is not written under `data/`
+- retained audio is capped at `max_retained_audio_mb` (default 256 MB, env
+  `OMNIVOICE_TTS_MAX_RETAINED_AUDIO_MB`, `0` = unlimited). Above the cap the least
+  recently used finished jobs (completion or last download) lose their audio. The
+  job record stays in the job list. The newest job and jobs finished less than
+  60 s ago always keep their audio.
+- `404 Audio not ready`: the job has no audio yet (queued, running, failed)
+- `410 Gone`: the audio was dropped by the byte cap; synthesize again
 
 ### `GET /v1/jobs/{job_id}/audio`
 
@@ -879,6 +886,7 @@ Purpose:
 
 - public compatibility route for downloading completed public job audio
 - supports the same `format=mp3` query param as the admin job audio route
+- same retention rules and `404` / `410` responses as the admin job audio route
 
 ### `DELETE /api/admin/jobs/{job_id}`
 

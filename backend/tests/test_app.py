@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
+import json
 import tempfile
 import time
 import wave
@@ -423,6 +425,73 @@ def test_public_stream_returns_ndjson() -> None:
     assert '"type": "start"' in body
     assert '"type": "chunk"' in body
     assert '"type": "done"' in body
+
+
+def _assert_job_holds_only_final_audio(client: TestClient, job_id: str) -> None:
+    job = client.app.state.store.jobs[job_id]
+    assert job.final_audio and len(job.final_audio) > 44
+    assert job.pcm_parts == []
+    assert job.stream_events.qsize() == 0
+    assert job.stream_chunks.qsize() == 0
+
+
+def test_ndjson_stream_leaves_no_buffered_audio_on_the_job() -> None:
+    client = make_client(sentence_chunking=True, short_sentence_merge_max_chars=0, following_sentence_merge_min_chars=0)
+    with client.stream(
+        'POST',
+        '/api/v1/synthesize/stream',
+        json={'input': 'Erster Satz ist lang genug. Zweiter Satz ist lang genug.'},
+    ) as response:
+        assert response.status_code == 200
+        lines = [json.loads(line) for line in response.iter_lines() if line]
+    assert lines[0]['type'] == 'start'
+    assert lines[-1]['type'] == 'done'
+    streamed = b''.join(base64.b64decode(item['pcm16_b64']) for item in lines if item['type'] == 'chunk')
+    assert streamed
+    job_id = lines[0]['job_id']
+    _assert_job_holds_only_final_audio(client, job_id)
+    # The streamed PCM is exactly the audio the finished job keeps for download.
+    download = client.get(f'/v1/jobs/{job_id}/audio')
+    assert download.status_code == 200
+    with wave.open(io.BytesIO(download.content), 'rb') as wav:
+        assert wav.readframes(wav.getnframes()) == streamed
+
+
+def test_raw_pcm_stream_leaves_no_buffered_audio_on_the_job() -> None:
+    client = make_client()
+    with client.stream('POST', '/v1/audio/speech', json={'input': 'Roher PCM Stream', 'stream': True}) as response:
+        assert response.status_code == 200
+        body = b''.join(response.iter_bytes())
+    assert body
+    store = client.app.state.store
+    (job_id,) = list(store.jobs)
+    _assert_job_holds_only_final_audio(client, job_id)
+
+
+def test_unconsumed_stream_job_buffers_nothing() -> None:
+    # A /v1/jobs request with stream=true has no stream reader: nothing may be queued.
+    client = make_client()
+    create = client.post('/v1/jobs', json={'input': 'Niemand liest mit', 'stream': True})
+    assert create.status_code == 200
+    job_id = create.json()['job_id']
+    wait_for_admin_job_status(client, job_id, {'completed'})
+    _assert_job_holds_only_final_audio(client, job_id)
+    assert client.get(f'/v1/jobs/{job_id}/audio').status_code == 200
+
+
+def test_evicted_job_audio_returns_410_but_job_stays_listed() -> None:
+    client = make_client()
+    create = client.post('/v1/jobs', json={'input': 'Gleich weg'})
+    job_id = create.json()['job_id']
+    wait_for_admin_job_status(client, job_id, {'completed'})
+    job = client.app.state.store.jobs[job_id]
+    job.final_audio = None
+    job.audio_evicted = True
+
+    response = client.get(f'/v1/jobs/{job_id}/audio')
+    assert response.status_code == 410
+    listed = client.get('/api/admin/jobs', headers=auth_headers()).json()
+    assert any(item['job_id'] == job_id and item['status'] == 'completed' for item in listed)
 
 
 def test_streaming_request_gets_first_sentence_fast_path() -> None:

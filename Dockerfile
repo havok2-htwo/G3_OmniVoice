@@ -36,7 +36,10 @@ ENV PYTHONUNBUFFERED=1 \
     OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=true \
     # Trim the CUDA caching-allocator reserved pool (lower idle VRAM; shares the GPU
     # with the Whisper container). expandable_segments is fine on Linux.
-    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256
+    PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:256 \r
+    # numpy/scipy OpenBLAS would start one thread per core, each with its own buffer;
+    # inference runs in torch, so cap it (torch intra-op threads are not affected).
+    OPENBLAS_NUM_THREADS=4
 
 # System libraries:
 #   ffmpeg         -> audio container decode (imageio-ffmpeg also bundles a binary)

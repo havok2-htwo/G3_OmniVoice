@@ -175,6 +175,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     removed = store.prune_terminal_jobs(
                         retention_days=settings.retention_days,
                         max_retained_jobs=settings.max_retained_jobs,
+                        max_retained_audio_bytes=settings.max_retained_audio_mb * 1024 * 1024,
                     )
                 if removed:
                     logger.info('job reaper evicted %s terminal jobs', removed)

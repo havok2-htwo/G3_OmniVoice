@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import gc
 import hashlib
@@ -339,35 +340,40 @@ class OmniVoiceSynthesizer:
             return
         logger.info('warmup model_id=%s starting...', model_id)
         try:
-            task_type = request.task_type if request and request.task_type else self._task_type_from_model(model_id)
-            # A representative ~20-word sentence warms the compiled kernels for a realistic
-            # input shape (better first-request latency than a 1-word 'Warmup.').
-            text = (
-                request.input
-                if request and request.input
-                else 'Dies ist ein Aufwaermsatz fuer das Sprachmodell mit etwa zwanzig Woertern, damit die Kernel fuer typische Eingaben vorbereitet sind.'
-            )
-            language = self._normalize_language(request.language if request and request.language else None)
-            if task_type == TaskType.voice_design:
-                self._model.generate(
-                    text=[text],
-                    language=[language],
-                    instruct=[
-                        normalize_voice_design_instruct(request.instructions if request else None)
-                    ],
+            # Same grad mode as the request path (_generate_batch_sync): without it the
+            # warmup builds autograd state and its compiled graphs are guarded on grad mode,
+            # so the first real request would recompile instead of reusing them.
+            grad_ctx = self._torch.inference_mode() if self._torch is not None else contextlib.nullcontext()
+            with grad_ctx:
+                task_type = request.task_type if request and request.task_type else self._task_type_from_model(model_id)
+                # A representative ~20-word sentence warms the compiled kernels for a realistic
+                # input shape (better first-request latency than a 1-word 'Warmup.').
+                text = (
+                    request.input
+                    if request and request.input
+                    else 'Dies ist ein Aufwaermsatz fuer das Sprachmodell mit etwa zwanzig Woertern, damit die Kernel fuer typische Eingaben vorbereitet sind.'
                 )
-            elif task_type == TaskType.base:
-                profile = next((item for item in self.store.voice_profiles.values() if item.audio_bytes and item.ref_text), None)
-                if profile is None:
-                    logger.info('warmup skipped for Base model (requires saved voice profile with ref_text)')
-                    return
-                self._model.generate(
-                    text=[text],
-                    language=[language],
-                    voice_clone_prompt=[self._clone_prompt_from_profile(profile, ref_text=profile.ref_text)],
-                )
-            else:
-                self._model.generate(text=[text], language=[language])
+                language = self._normalize_language(request.language if request and request.language else None)
+                if task_type == TaskType.voice_design:
+                    self._model.generate(
+                        text=[text],
+                        language=[language],
+                        instruct=[
+                            normalize_voice_design_instruct(request.instructions if request else None)
+                        ],
+                    )
+                elif task_type == TaskType.base:
+                    profile = next((item for item in self.store.voice_profiles.values() if item.audio_bytes and item.ref_text), None)
+                    if profile is None:
+                        logger.info('warmup skipped for Base model (requires saved voice profile with ref_text)')
+                        return
+                    self._model.generate(
+                        text=[text],
+                        language=[language],
+                        voice_clone_prompt=[self._clone_prompt_from_profile(profile, ref_text=profile.ref_text)],
+                    )
+                else:
+                    self._model.generate(text=[text], language=[language])
             logger.info('warmup model_id=%s done', model_id)
         except Exception as exc:
             logger.warning('warmup failed (non-critical): %s', exc)

@@ -130,7 +130,17 @@ class QueueService:
             except Exception:
                 pass
 
-    async def submit(self, request: SpeechRequest, *, owner_scope: str = 'public', api_key_id: str | None = None) -> JobRecord:
+    async def submit(
+        self,
+        request: SpeechRequest,
+        *,
+        owner_scope: str = 'public',
+        api_key_id: str | None = None,
+        stream_consumer: str | None = None,
+    ) -> JobRecord:
+        """Queue a request. stream_consumer names the job queue an HTTP handler will read
+        (STREAM_EVENTS / STREAM_CHUNKS); None means nobody streams it, so no stream copies
+        of the audio are buffered on the job."""
         text = (request.input or '').strip()
         if not text:
             raise RuntimeError('Missing input text')
@@ -162,6 +172,7 @@ class QueueService:
             owner_scope=owner_scope,
             api_key_id=api_key_id,
             sentences_total=len(sentences),
+            stream_consumer=stream_consumer,
         )
         job.metrics['sentences_total'] = len(sentences)
         state = RequestState(job_id=job.job_id, group_key=self._group_key_for_request(request), sentences=sentences)
@@ -174,7 +185,7 @@ class QueueService:
             self.store.request_states[job.job_id] = state
             self.store.waiting_requests.append(job.job_id)
             self._recompute_positions_locked()
-            job.stream_events.put_nowait(
+            job.push_stream_event(
                 {
                     'type': 'start',
                     'job_id': job.job_id,
@@ -407,6 +418,7 @@ class QueueService:
                 self.store.prune_terminal_jobs(
                     retention_days=self.settings.retention_days,
                     max_retained_jobs=self.settings.max_retained_jobs,
+                    max_retained_audio_bytes=int(getattr(self.settings, 'max_retained_audio_mb', 0) or 0) * 1024 * 1024,
                 )
                 self.store.job_condition.notify_all()
 
@@ -581,7 +593,9 @@ class QueueService:
         state.emitted_samples_by_sentence[sentence_index] = emitted_samples
         state.emitted_audio_ms += int(len(pcm) / 2 / max(sample_rate, 1) * 1000)
         progress_step = min(sentence_index + 1, len(state.sentences))
-        job.stream_chunks.put_nowait(pcm)
+        job.push_stream_chunk(pcm)
+        if not job.wants_stream_events:
+            return
         job.stream_events.put_nowait(
             {
                 'type': 'chunk',
@@ -752,7 +766,7 @@ class QueueService:
             task_type = job.request.task_type or self._task_type_for_request(job.request)
             voice = job.request.voice
             language = job.request.language or 'Auto'
-            job.stream_events.put_nowait(
+            job.push_stream_event(
                 {
                     'type': 'batch',
                     'job_id': job_id,
@@ -801,12 +815,16 @@ class QueueService:
 
             if job.request.stream:
                 job.status = JobStatus.streaming
+                if job.stream_consumer is None:
+                    continue
                 emitted_samples = 0
                 for chunk_index, chunk in enumerate(
                     chunks := list(chunk_pcm16le(pcm, sample_rate=job.sample_rate, chunk_ms=self.settings.stream_chunk_ms))
                 ):
                     emitted_samples += len(chunk) // 2
-                    job.stream_chunks.put_nowait(chunk)
+                    job.push_stream_chunk(chunk)
+                    if not job.wants_stream_events:
+                        continue
                     job.stream_events.put_nowait(
                         {
                             'type': 'chunk',
@@ -827,7 +845,11 @@ class QueueService:
 
     def _complete_job_locked(self, job: JobRecord, state: RequestState) -> None:
         combined_pcm = b''.join(job.pcm_parts)
+        # final_audio is the only copy the job keeps; the parts and the joined buffer
+        # would otherwise stay referenced (2-3x the audio) for the whole retention.
+        job.pcm_parts = []
         job.final_audio = self.synthesizer.pcm_to_wav(combined_pcm, sample_rate=job.sample_rate)
+        del combined_pcm
         job.content_type = 'audio/wav'
         job.completed_at = utcnow()
         job.updated_at = job.completed_at
@@ -853,7 +875,7 @@ class QueueService:
             self.store.active_request_ids.remove(job.job_id)
 
         if job.request.stream:
-            job.stream_events.put_nowait(
+            job.push_stream_event(
                 {
                     'type': 'done',
                     'result': {
@@ -864,8 +886,7 @@ class QueueService:
                     },
                 }
             )
-            job.stream_events.put_nowait(None)
-            job.stream_chunks.put_nowait(None)
+            job.end_stream()
 
     def _fail_job_locked(self, job: JobRecord, message: str) -> None:
         now = utcnow()
@@ -875,15 +896,15 @@ class QueueService:
         job.updated_at = now
         job.final_audio = None
         job.content_type = None
+        job.pcm_parts = []
         self.store.request_states.pop(job.job_id, None)
         if job.job_id in self.store.active_request_ids:
             self.store.active_request_ids.remove(job.job_id)
         if job.job_id in self.store.waiting_requests:
             self.store.waiting_requests.remove(job.job_id)
         if job.request.stream:
-            job.stream_events.put_nowait({'type': 'error', 'message': message})
-            job.stream_events.put_nowait(None)
-            job.stream_chunks.put_nowait(None)
+            job.push_stream_event({'type': 'error', 'message': message})
+            job.end_stream()
 
     def _mark_cancelled_locked(self, job: JobRecord, message: str) -> None:
         now = utcnow()
@@ -894,15 +915,15 @@ class QueueService:
         job.queue_position = 0
         job.eta_ms = 0
         job.error_message = message
+        job.pcm_parts = []
         self.store.request_states.pop(job.job_id, None)
         if job.job_id in self.store.active_request_ids:
             self.store.active_request_ids.remove(job.job_id)
         if job.job_id in self.store.waiting_requests:
             self.store.waiting_requests.remove(job.job_id)
         if job.request.stream:
-            job.stream_events.put_nowait({'type': 'error', 'message': message})
-            job.stream_events.put_nowait(None)
-            job.stream_chunks.put_nowait(None)
+            job.push_stream_event({'type': 'error', 'message': message})
+            job.end_stream()
 
     def _recompute_positions_locked(self) -> None:
         for index, job_id in enumerate(self.store.waiting_requests, start=1):

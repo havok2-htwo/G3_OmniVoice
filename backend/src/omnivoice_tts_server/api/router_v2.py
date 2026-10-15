@@ -54,7 +54,7 @@ from ..domain.models import (
     WerBenchmarkCreateRequest,
     WerBenchmarkRunResponse,
 )
-from ..domain.state import VoiceProfileRecord, new_id, utcnow
+from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, new_id, utcnow
 from ..runtime_v2 import DEFAULT_VOICE_DESIGN_INSTRUCT, OMNIVOICE_MODEL_ID, normalize_runtime_device, query_runtime_devices
 from ..security import (
     SESSION_COOKIE_NAME,
@@ -177,7 +177,13 @@ def _completed_job_audio_response(request: Request, job_id: str, requested_forma
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Job not found')
     if not job.final_audio:
+        if job.audio_evicted:
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail='Audio no longer retained (max_retained_audio_mb reached); re-synthesize the job.',
+            )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Audio not ready')
+    job.audio_accessed_at = utcnow()
     return _audio_response(
         job.final_audio,
         source_media_type=job.content_type or 'audio/wav',
@@ -656,9 +662,16 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
     )
 
 
-async def _submit_or_429(queue: QueueService, payload: SpeechRequest, *, owner_scope: str = 'public', api_key_id: str | None = None):
+async def _submit_or_429(
+    queue: QueueService,
+    payload: SpeechRequest,
+    *,
+    owner_scope: str = 'public',
+    api_key_id: str | None = None,
+    stream_consumer: str | None = None,
+):
     try:
-        return await queue.submit(payload, owner_scope=owner_scope, api_key_id=api_key_id)
+        return await queue.submit(payload, owner_scope=owner_scope, api_key_id=api_key_id, stream_consumer=stream_consumer)
     except QueueSaturatedError as exc:
         # Genuine rate limit -> retryable.
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
@@ -1264,7 +1277,13 @@ async def public_job_audio(request: Request, job_id: str, format: str | None = N
 @router.post('/api/v1/synthesize/stream')
 async def synthesize_stream(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> StreamingResponse:
     queue: QueueService = request.app.state.queue_service
-    job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public', api_key_id=api_key_id)
+    job = await _submit_or_429(
+        queue,
+        payload.model_copy(update={'stream': True, 'response_format': 'pcm'}),
+        owner_scope='public',
+        api_key_id=api_key_id,
+        stream_consumer=STREAM_EVENTS,
+    )
 
     async def iterator() -> Any:
         disconnected = False
@@ -1282,8 +1301,9 @@ async def synthesize_stream(request: Request, payload: SpeechRequest, api_key_id
                 yield json.dumps(event) + '\n'
         finally:
             # Client gone mid-stream: cancel so the single worker stops rendering
-            # audio nobody consumes (otherwise the job runs to completion and its
-            # PCM piles up in the unbounded stream queue).
+            # audio nobody consumes. Either way stop buffering into the queue and drop
+            # what is left, so the retained job holds no stream copies of its audio.
+            job.detach_stream()
             if disconnected:
                 try:
                     await queue.cancel(job.job_id)
@@ -1298,7 +1318,13 @@ async def speech(request: Request, payload: SpeechRequest, api_key_id: str | Non
     queue: QueueService = request.app.state.queue_service
     payload = _coerce_openai_speech_request(request, payload)
     if payload.stream:
-        job = await _submit_or_429(queue, payload.model_copy(update={'stream': True, 'response_format': 'pcm'}), owner_scope='public', api_key_id=api_key_id)
+        job = await _submit_or_429(
+            queue,
+            payload.model_copy(update={'stream': True, 'response_format': 'pcm'}),
+            owner_scope='public',
+            api_key_id=api_key_id,
+            stream_consumer=STREAM_CHUNKS,
+        )
 
         async def stream_job() -> Any:
             disconnected = False
@@ -1315,6 +1341,7 @@ async def speech(request: Request, payload: SpeechRequest, api_key_id: str | Non
                         break
                     yield chunk
             finally:
+                job.detach_stream()
                 if disconnected:
                     try:
                         await queue.cancel(job.job_id)

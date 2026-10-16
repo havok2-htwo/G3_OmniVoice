@@ -4,6 +4,13 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - packed CFG and cuDNN attention on by default
+
+- The listening test passed (SonjaV2, Ero2, SonjaV3; all variants clean), so `packed_cfg` and `sdpa_prefer_cudnn`
+  are now on in the code defaults and in every VRAM tier. Batch 4 on the RTX 5090: SonjaV2 0.634 -> 0.385 s,
+  Ero2 0.904 -> 0.609 s. Existing installs without these keys in `data/runtime_settings.json` get them on the next
+  start; both can be switched off in the admin UI.
+
 ### Added - SonjaV3 voice preset (3.9 s reference, seed 9301)
 
 - A shorter Sonja clip ("Franz jagt im komplett verwahrlosten Taxi quer durch Bayern.", 3.88 s, 24 kHz mono) ships

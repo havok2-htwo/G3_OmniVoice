@@ -699,7 +699,7 @@ class OmniVoiceSynthesizer:
         self.attention_backend_note = note
         logger.info('model=%s attention backend=%s', model_id, backend)
 
-        if getattr(self.settings, 'packed_cfg', False) and not use_flashinfer:
+        if getattr(self.settings, 'packed_cfg', True) and not use_flashinfer:
             # One row per item [cond | uncond] instead of 2B padded rows (packed_decode). Installed before the
             # compile and the warm-up, so the warm-up compiles the shapes real requests use.
             if packed_decode.install(model):
@@ -929,7 +929,7 @@ class OmniVoiceSynthesizer:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.set_float32_matmul_precision('high')
-            apply_sdpa_backend_preference(torch, bool(getattr(self.settings, 'sdpa_prefer_cudnn', False)))
+            apply_sdpa_backend_preference(torch, bool(getattr(self.settings, 'sdpa_prefer_cudnn', True)))
 
         self._torch = torch
         self._soundfile = soundfile

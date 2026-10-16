@@ -105,11 +105,11 @@ class Settings(BaseSettings):
     compile_model: bool = True
     compile_cudagraphs: bool = False
     # Put cuDNN first in PyTorch's SDPA backend order (default order picks the mem-efficient kernel). Not
-    # bit-identical; on the RTX 5090 ~15-22 % faster per generate. Applied at model load.
-    sdpa_prefer_cudnn: bool = False
+    # bit-identical (listening test passed 2026-10-16); on the RTX 5090 ~15-22 % faster per generate. Applied at model load.
+    sdpa_prefer_cudnn: bool = True
     # One row per item [conditional | unconditional] instead of 2B padded rows (packed_decode.py). Not
-    # bit-identical; ~20-33 % faster per generate on the RTX 5090. Applied at model load.
-    packed_cfg: bool = False
+    # bit-identical (listening test passed 2026-10-16); ~20-33 % faster per generate on the RTX 5090. Applied at model load.
+    packed_cfg: bool = True
     # A stream's first sentence that arrives while a batch renders runs solo at the batch's next diffusion step
     # boundary instead of after the batch. The running batch's audio is unchanged (random state restored).
     stream_first_preempt: bool = True

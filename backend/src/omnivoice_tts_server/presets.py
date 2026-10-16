@@ -104,6 +104,11 @@ _TIER_COMMON: dict[str, Any] = {
     'cudagraph_skip_dynamic_graphs': True,
     'cuda_memory_trim_after_batch': True,
     'warmup_on_startup': True,
+    # Packed CFG rows + cuDNN attention: ~33-39 % less time per batch on the RTX 5090, listening test passed
+    # 2026-10-16. cuDNN SDPA also runs on Ampere (3090); not measured there.
+    'packed_cfg': True,
+    'sdpa_prefer_cudnn': True,
+    'stream_first_preempt': True,
     'batch_wait_ms': 30,
     'max_input_chars': 25000,
     'num_step': 20,

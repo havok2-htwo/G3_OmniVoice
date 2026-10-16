@@ -272,8 +272,8 @@ class ServerSettingsResponse(BaseModel):
     torch_dtype: str
     compile_model: bool
     compile_cudagraphs: bool
-    sdpa_prefer_cudnn: bool = False
-    packed_cfg: bool = False
+    sdpa_prefer_cudnn: bool = True
+    packed_cfg: bool = True
     stream_first_preempt: bool = True
     cudagraph_skip_dynamic_graphs: bool
     cuda_memory_trim_after_batch: bool

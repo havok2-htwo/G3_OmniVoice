@@ -146,22 +146,47 @@ and logs `startup first start: ... applied the '24GB VRAM' preset`. An explicit
 their saved values, which take precedence over these defaults.
 
 - Model `k2-fsa/OmniVoice-Base` with default voice `SonjaV2`. The `SonjaV2` (8.2 s,
-  the first two sentences of `Sonja`) and `Sonja` (14.4 s) clone profiles ship with
-  the server (`backend/src/omnivoice_tts_server/voice_presets/`) and are added to the
+  the first two sentences of `Sonja`, seed 9305), `SonjaV3` (3.9 s, the first sentence,
+  seed 9301) and `Sonja` (14.4 s) clone profiles ship with the server (`backend/src/omnivoice_tts_server/voice_presets/`) and are added to the
   voice store on start when missing; requests without a voice use `SonjaV2`, and
   `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
   (`data/voice_presets_seeded.json`). A voice profile can carry a `seed` that applies
   to requests for that voice without their own seed (the shipped value comes from the
   WER seed benchmark; `null` means random).
-- `bfloat16`, `sdpa` attention, `torch.compile` on, CUDA cache trim after each batch,
-  warmup on start
-- Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
+- `bfloat16`, `sdpa` attention with cuDNN first (`sdpa_prefer_cudnn`), packed CFG rows
+  (`packed_cfg`), `torch.compile` on, CUDA cache trim once the queue runs empty
+  (`cuda_memory_trim_after_batch`), warmup on start
+- A streaming request that arrives during a batch gets its first sentence rendered at
+  the batch's next diffusion step (`stream_first_preempt`); the running batch's audio
+  does not change
+- Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms (the window counts
+  from the arrival of the oldest request without a batch and ends early when the
+  batch is full),
   VRAM budget 7000 MB, max 25000 input chars, stream prebuffer 0 ms
 - `num_step` 20, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
   class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
   preprocessing + output postprocessing on, sentence chunking on
 - WER: TTS wave 4, ASR concurrency 16, vLLM model `Qwen/Qwen3.6-35B-A3B-FP8`
 - Text optimization default `off` (`OMNIVOICE_TTS_TEXT_OPTIMIZATION_DEFAULT`)
+
+## Performance
+
+Measured on the RTX 5090 (24GB tier, ~7 s German sentences, seed 9305, other G3
+services running; details in `docs/perf-experiments-2026-10-16.md`):
+
+| Voice, batch 4 | before 2026-10-16 evening | now |
+| --- | --- | --- |
+| SonjaV2 (8.2 s reference) | 0.634 s | 0.385 s |
+| Ero2 (long reference) | 0.904 s | 0.609 s |
+
+- `packed_cfg`: one row per item `[conditional | unconditional]` instead of 2B rows
+  padded to the longest conditional row. `sdpa_prefer_cudnn`: cuDNN attention instead
+  of the mem-efficient kernel (no flash kernel on Windows). Both change the audio by
+  floating-point rounding only (listening test and Whisper: no difference); turn them
+  off in the admin UI to get the stock numerics back.
+- Bit-identical: codec decode overlaps the silence trimming of the previous item, the
+  silence trimming is an exact numpy port of pydub, the CUDA trim waits for an empty
+  queue, nvidia-smi runs off the event loop.
 
 ## Operator Features
 

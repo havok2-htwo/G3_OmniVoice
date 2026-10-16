@@ -136,9 +136,14 @@ $env:OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS = 'false'
 
 ## Default Runtime Settings
 
-Fresh installs start with these values (`backend/src/omnivoice_tts_server/config.py`).
-Values saved in the admin panel (`data/runtime_settings.json`) take precedence;
-an install that never saved settings picks these defaults up on its next start.
+These are the code defaults (`backend/src/omnivoice_tts_server/config.py`). A fresh
+install (no `data/runtime_settings.json` yet) starts with them plus the `24GB VRAM`
+tier: batch / parallel 4, VRAM budget 5000 MB, batch wait 30 ms (the other tier
+values match the defaults). It saves those tier keys to `data/runtime_settings.json`
+and logs `startup first start: ... applied the '24GB VRAM' preset`. An explicit
+`OMNIVOICE_TTS_<KEY>` env var beats the tier for that key (Docker sets
+`OMNIVOICE_TTS_ENABLE_FLASHINFER` that way). Later starts and existing installs keep
+their saved values, which take precedence over these defaults.
 
 - Model `k2-fsa/OmniVoice-Base` with default voice `SonjaV2`. The `SonjaV2` (8.2 s,
   the first two sentences of `Sonja`) and `Sonja` (14.4 s) clone profiles ship with
@@ -166,6 +171,11 @@ an install that never saved settings picks these defaults up on its next start.
   (`GET/PUT/DELETE /api/admin/settings/presets`, saved ones in
   `data/settings_presets.json`). `24+8 VRAM` picks the 24 GB card as
   `preferred_device`. See `docs/API.md` "Settings Presets".
+- **First start** - a fresh install (no `data/runtime_settings.json` yet) starts
+  with the `24GB VRAM` tier on top of the defaults below (batch / parallel 4,
+  VRAM budget 5000 MB, batch wait 30 ms) and saves those tier keys, so the
+  dashboard shows what runs. An explicit `OMNIVOICE_TTS_<KEY>` env var beats the
+  tier for that key. Existing installs keep their saved settings.
 - **Audiobook chunking controls** - `audio_chunk_threshold` and
   `audio_chunk_duration` accept values up to 3600s, so internal chunking can be
   effectively disabled for continuous prosody on long, single-pass narration.

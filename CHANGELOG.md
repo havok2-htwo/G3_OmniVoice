@@ -4,6 +4,15 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - fresh installs start with the 24GB VRAM tier
+
+- Without `data/runtime_settings.json` the server now starts with the defaults plus the
+  `24GB VRAM` tier (batch / parallel 4, `vram_budget_mb` 5000, `batch_wait_ms` 30) and
+  saves those tier keys, so the dashboard shows what runs; the log names the preset.
+  Explicit `OMNIVOICE_TTS_<KEY>` env vars beat the tier for their key, and URLs/paths
+  are not written, so Docker env values keep applying. Existing installs keep their
+  settings. Tests and tools that pass their own `Settings` are not affected.
+
 ### Changed - local G3_WHISPER by default
 
 - `whisper_base_url` defaults to `http://127.0.0.1:7861` (was `http://192.168.0.200:7861`), also for

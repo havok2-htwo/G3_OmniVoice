@@ -25,11 +25,11 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import ValidationError
 
-from .config import RUNTIME_SETTINGS_FIELDS
+from .config import RUNTIME_SETTINGS_FIELDS, RUNTIME_SETTINGS_FILE, Settings, save_runtime_settings
 from .domain.models import ServerSettingsUpdateRequest
 from .runtime_v2 import (
     normalize_attention_implementation,
@@ -41,6 +41,8 @@ from .runtime_v2 import (
 logger = logging.getLogger('omnivoice_tts_server.presets')
 
 PRESETS_FILE = 'settings_presets.json'
+# A fresh install (no data/runtime_settings.json yet) starts with this tier; the same in every G3 service.
+FIRST_START_PRESET = '24GB VRAM'
 PRESET_NAME_MAX_LENGTH = 64
 _LOCK = threading.RLock()
 
@@ -298,6 +300,28 @@ def delete_preset(data_dir: Path, name: str) -> bool:
         presets.pop(clean)
         _write(data_dir, presets)
     return True
+
+
+def apply_first_start_preset(settings: Settings, environ: Mapping[str, str] | None = None) -> dict[str, Any] | None:
+    """Apply FIRST_START_PRESET when the data dir has no runtime settings file yet.
+
+    Returns None on later starts (the saved settings stay untouched). On a first start
+    the tier values go through the same validation as PUT /api/admin/settings, except
+    keys the environment sets explicitly (OMNIVOICE_TTS_<KEY>): the env value wins.
+    Only the applied tier keys are written to runtime_settings.json, so URLs and paths
+    (Docker sets them via env) keep coming from the environment. Returns {'applied':
+    [...], 'env_kept': [...]}.
+    """
+    if (settings.data_dir / RUNTIME_SETTINGS_FILE).exists():
+        return None
+    env_prefix = str(Settings.model_config.get('env_prefix') or '').upper()
+    env_names = {name.upper() for name in (os.environ if environ is None else environ)}
+    values = preset_values(BUILTIN_PRESETS[FIRST_START_PRESET]['values'])
+    applied = {key: value for key, value in values.items() if f'{env_prefix}{key}'.upper() not in env_names}
+    for key, value in applied.items():
+        setattr(settings, key, value)
+    save_runtime_settings(settings, fields=applied)
+    return {'applied': sorted(applied), 'env_kept': sorted(set(values) - set(applied))}
 
 
 def _write(data_dir: Path, presets: dict[str, dict[str, Any]]) -> None:

@@ -454,6 +454,15 @@ are the code defaults. The VRAM figures were measured on the RTX 5090 with the 1
 Cloning throughput is ~35x realtime from batch 4 on and flat above it, so the tiers
 stop at 8 and 4.
 
+First start: when `data/runtime_settings.json` does not exist yet, the server applies
+`24GB VRAM` (`presets.FIRST_START_PRESET`) on top of the code defaults, validated like
+`PUT /api/admin/settings`, and writes only those tier keys to that file, so
+`GET /api/admin/settings` shows what runs. A tier key the environment sets explicitly
+(`OMNIVOICE_TTS_<KEY>`, e.g. `OMNIVOICE_TTS_ENABLE_FLASHINFER` in the Docker image)
+keeps the env value and is not written. URLs and paths stay out of the file, so
+Docker's env values for them keep applying. If the file exists, nothing is applied.
+Two-card tiers are never applied automatically; `24GB VRAM` sets no GPU.
+
 The number in front names the card OmniVoice runs on; OmniVoice has no `8+24 VRAM`
 tier. `24+8 VRAM` sets `preferred_device` to the CUDA card whose total memory is
 within ~2 GiB of 24 GB, because machines number their cards differently. If no card

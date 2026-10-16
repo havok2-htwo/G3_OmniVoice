@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Iterable, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -194,10 +194,13 @@ def load_runtime_settings(settings: Settings) -> None:
         setattr(settings, field_name, value)
 
 
-def save_runtime_settings(settings: Settings) -> None:
+def save_runtime_settings(settings: Settings, fields: Iterable[str] | None = None) -> None:
+    """Persist the runtime settings (or only `fields` of them; keys left out of the file
+    keep coming from the environment / code defaults on the next start)."""
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     payload = {}
-    for field_name in sorted(RUNTIME_SETTINGS_FIELDS):
+    names = RUNTIME_SETTINGS_FIELDS if fields is None else RUNTIME_SETTINGS_FIELDS & set(fields)
+    for field_name in sorted(names):
         value = getattr(settings, field_name)
         payload[field_name] = str(value) if isinstance(value, Path) else value
     path = settings.data_dir / RUNTIME_SETTINGS_FILE

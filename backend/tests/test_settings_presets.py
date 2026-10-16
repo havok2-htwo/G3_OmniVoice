@@ -7,7 +7,7 @@ import os
 import pytest
 
 from omnivoice_tts_server import presets
-from omnivoice_tts_server.config import RUNTIME_SETTINGS_FIELDS, Settings
+from omnivoice_tts_server.config import RUNTIME_SETTINGS_FIELDS, Settings, load_runtime_settings
 from omnivoice_tts_server.domain.models import ServerSettingsUpdateRequest
 
 from test_app import make_client
@@ -227,3 +227,63 @@ def test_admin_preset_routes(monkeypatch) -> None:
     finally:
         client.__exit__(None, None, None)
         client._temp_data_dir.cleanup()
+
+
+def _no_env() -> dict[str, str]:
+    return {}
+
+
+def test_first_start_applies_the_24gb_tier_and_saves_it(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path)
+    result = presets.apply_first_start_preset(settings, environ=_no_env())
+    tier = presets.BUILTIN_PRESETS[presets.FIRST_START_PRESET]['values']
+    assert presets.FIRST_START_PRESET == '24GB VRAM'
+    assert result == {'applied': sorted(tier), 'env_kept': []}
+    for key, value in tier.items():
+        assert getattr(settings, key) == value, key
+    assert settings.preferred_device == Settings().preferred_device, 'a single-card tier sets no GPU'
+
+    # Only the tier keys are saved; URLs and paths keep coming from env / code defaults.
+    saved = json.loads((tmp_path / 'runtime_settings.json').read_text(encoding='utf-8'))
+    assert saved == tier
+    reloaded = Settings(data_dir=tmp_path)
+    load_runtime_settings(reloaded)
+    for key, value in tier.items():
+        assert getattr(reloaded, key) == value, key
+
+
+def test_saved_settings_are_kept_on_later_starts(tmp_path) -> None:
+    (tmp_path / 'runtime_settings.json').write_text(json.dumps({'max_batch_size': 2, 'vram_budget_mb': 3000}), encoding='utf-8')
+    settings = Settings(data_dir=tmp_path)
+    load_runtime_settings(settings)
+    assert presets.apply_first_start_preset(settings, environ=_no_env()) is None
+    assert (settings.max_batch_size, settings.vram_budget_mb, settings.batch_wait_ms) == (2, 3000, 0)
+    assert json.loads((tmp_path / 'runtime_settings.json').read_text(encoding='utf-8')) == {
+        'max_batch_size': 2,
+        'vram_budget_mb': 3000,
+    }
+
+
+def test_first_start_keeps_explicit_env_values(tmp_path) -> None:
+    environ = {'OMNIVOICE_TTS_MAX_BATCH_SIZE': '6', 'omnivoice_tts_enable_flashinfer': 'true'}
+    settings = Settings(data_dir=tmp_path, max_batch_size=6, enable_flashinfer=True)
+    result = presets.apply_first_start_preset(settings, environ=environ)
+    assert result['env_kept'] == ['enable_flashinfer', 'max_batch_size']
+    assert (settings.max_batch_size, settings.enable_flashinfer, settings.vram_budget_mb) == (6, True, 5000)
+    saved = json.loads((tmp_path / 'runtime_settings.json').read_text(encoding='utf-8'))
+    assert 'max_batch_size' not in saved and 'enable_flashinfer' not in saved
+    assert saved['vram_budget_mb'] == 5000
+
+
+def test_create_app_applies_the_tier_only_to_the_server_settings(monkeypatch, tmp_path) -> None:
+    from omnivoice_tts_server import app as app_module
+
+    server_dir, explicit_dir = tmp_path / 'server', tmp_path / 'explicit'
+    monkeypatch.setattr(app_module, 'get_settings', lambda: Settings(runtime_backend='mock', data_dir=server_dir))
+    for key in presets.PRESET_KEYS:
+        monkeypatch.delenv(f'OMNIVOICE_TTS_{key.upper()}', raising=False)
+    app_module.create_app()
+    assert json.loads((server_dir / 'runtime_settings.json').read_text(encoding='utf-8'))['max_batch_size'] == 4
+
+    app_module.create_app(Settings(runtime_backend='mock', data_dir=explicit_dir))
+    assert not (explicit_dir / 'runtime_settings.json').exists()

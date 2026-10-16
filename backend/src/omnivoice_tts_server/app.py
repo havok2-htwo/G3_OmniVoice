@@ -20,6 +20,7 @@ from .config import Settings, get_settings
 from .domain.state import InMemoryStore
 from .finetune import FinetuneService, FinetuneTrainer
 from .finetune.registry import seed_supported_models
+from .presets import FIRST_START_PRESET, apply_first_start_preset
 from .runtime_v2 import build_synthesizer
 from .services_v2 import (
     BenchmarkService,
@@ -116,11 +117,22 @@ def _json_safe(value):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or get_settings()
+    first_start = None
+    if settings is None:
+        settings = get_settings()
+        # Only the real server settings get the first-start tier; an explicit Settings
+        # (tests, tools) is used as given.
+        first_start = apply_first_start_preset(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _install_uvicorn_log_filter()
+        if first_start is not None:
+            logger.info(
+                "startup first start: no saved settings, applied the '%s' preset (env kept: %s)",
+                FIRST_START_PRESET,
+                ', '.join(first_start['env_kept']) or 'none',
+            )
         settings.models_root_dir.mkdir(parents=True, exist_ok=True)
         store = InMemoryStore(max_queue_size=settings.max_queue_size)
         store.load_secrets(settings.data_dir)

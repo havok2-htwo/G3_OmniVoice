@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Settings
 from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
-from . import row_seeds
+from . import decode_overlap, row_seeds
 from .domain.state import InMemoryStore, VoiceProfileRecord
 from .voice_design import DEFAULT_VOICE_DESIGN_INSTRUCT, normalize_voice_design_instruct
 
@@ -963,7 +963,7 @@ class OmniVoiceSynthesizer:
             row_seeds.per_item_seeds(seeds, self._model.device) if mixed_seeds else contextlib.nullcontext()
         )
         try:
-            with self._torch.inference_mode(), seed_scope:
+            with self._torch.inference_mode(), seed_scope, decode_overlap.overlapped_decode(self._model):
                 if not mixed_seeds:
                     self._apply_seed(items[0].request.seed)
                 if task_type == TaskType.voice_design:

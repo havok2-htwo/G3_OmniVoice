@@ -4,6 +4,14 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - codec decode overlaps the post-processing of the previous item
+
+- After the diffusion loop, `generate()` decoded each item, waited for its copy to the host and only then removed
+  silences on the CPU, so GPU and CPU took turns. The next item's decode is now launched (with an async copy into
+  pinned memory) before the CPU works on the current one (`omnivoice_tts_server/decode_overlap.py`).
+- Bit-identical audio (checked for batch 1, 4 and 8, SonjaV2, fixed seed). Measured on the RTX 5090 with the other
+  services running: batch 8 1.237 -> 1.207 s (-30 ms, 2.4 %), batch 4 -2.5 ms, batch 1 unchanged.
+
 ### Changed - batch_wait_ms is a real coalescing window; GPU stats off the event loop
 
 - `batch_wait_ms` now counts from the arrival of the oldest request that has not had a batch yet, and the worker keeps

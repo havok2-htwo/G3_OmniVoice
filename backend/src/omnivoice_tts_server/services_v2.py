@@ -121,6 +121,7 @@ class QueueService:
         self.synthesizer = synthesizer
         self.events = events
         self.settings = settings
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def start_worker(self) -> None:
         if self.store.worker_task and not self.store.worker_task.done():
@@ -213,8 +214,13 @@ class QueueService:
                 start_event['text_optimization'] = {**text_optimization, 'spoken_text': spoken_text}
             job.push_stream_event(start_event)
             self.store.job_condition.notify_all()
+            preempt = self._preemption_possible(request)
 
         await self._publish_state()
+        if preempt:
+            task = asyncio.create_task(self._preempt_first_sentence(job.job_id))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         return job
 
     @staticmethod
@@ -462,39 +468,8 @@ class QueueService:
                 self.store.worker_state = 'idle'
                 self._mark_loaded_model_locked(model_used)
                 self.store.recent_batches.append(current_batch)
-                results_by_key = {(item.job_id, item.sentence_index): item for item in results}
 
-                for job_id in involved_job_ids:
-                    job = self.store.jobs.get(job_id)
-                    state = self.store.request_states.get(job_id)
-                    if job is None or state is None:
-                        continue
-
-                    job.model_used = model_used
-                    if job.metrics.get('model_warm_ms') is None:
-                        job.metrics['model_warm_ms'] = warm_ms
-                    job.metrics['batch_count'] = state.batch_count
-
-                    if job.cancel_requested:
-                        self._mark_cancelled_locked(job, 'Cancelled during synthesis.')
-                        continue
-
-                    for sentence_index in list(state.inflight_sentence_indices):
-                        result = results_by_key.get((job_id, sentence_index))
-                        if result is None:
-                            self._fail_job_locked(job, 'Batch result was incomplete.')
-                            break
-                        state.ready_sentence_pcm[sentence_index] = result.pcm
-                        state.sentence_duration_ms[sentence_index] = result.duration_ms
-                        state.sample_rate = result.sample_rate
-                        state.inflight_sentence_indices.discard(sentence_index)
-
-                    if job.status == JobStatus.failed:
-                        continue
-
-                    self._flush_ready_sentences_locked(job, state)
-                    if state.is_complete():
-                        self._complete_job_locked(job, state)
+                self._apply_batch_results_locked(involved_job_ids, batch_items, results, model_used, warm_ms)
 
                 self._recompute_positions_locked()
                 self.store.prune_terminal_jobs(
@@ -514,6 +489,120 @@ class QueueService:
                 await trim_idle()
 
         self.store.worker_state = 'stopped'
+        await self._publish_state()
+
+    def _apply_batch_results_locked(
+        self,
+        involved_job_ids: list[str],
+        batch_items: list[BatchSynthesisItem],
+        results: list[Any],
+        model_used: str,
+        warm_ms: int,
+    ) -> None:
+        """Store a finished batch's audio on its jobs, emit what is in order, complete finished jobs.
+
+        Only the sentences of this batch are checked: a job can have another sentence in flight elsewhere (a stream's
+        first sentence rendered at a step boundary, see _preempt_first_sentence).
+        """
+        results_by_key = {(item.job_id, item.sentence_index): item for item in results}
+        for job_id in involved_job_ids:
+            job = self.store.jobs.get(job_id)
+            state = self.store.request_states.get(job_id)
+            if job is None or state is None:
+                continue
+
+            job.model_used = model_used
+            if job.metrics.get('model_warm_ms') is None:
+                job.metrics['model_warm_ms'] = warm_ms
+            job.metrics['batch_count'] = state.batch_count
+
+            if job.cancel_requested:
+                self._mark_cancelled_locked(job, 'Cancelled during synthesis.')
+                continue
+
+            for sentence_index in [item.sentence_index for item in batch_items if item.job_id == job_id]:
+                result = results_by_key.get((job_id, sentence_index))
+                if result is None:
+                    self._fail_job_locked(job, 'Batch result was incomplete.')
+                    break
+                state.ready_sentence_pcm[sentence_index] = result.pcm
+                state.sentence_duration_ms[sentence_index] = result.duration_ms
+                state.sample_rate = result.sample_rate
+                state.inflight_sentence_indices.discard(sentence_index)
+
+            if job.status == JobStatus.failed:
+                continue
+
+            self._flush_ready_sentences_locked(job, state)
+            if state.is_complete():
+                self._complete_job_locked(job, state)
+
+    def _preemption_possible(self, request: SpeechRequest) -> bool:
+        return (
+            bool(getattr(self.settings, 'stream_first_preempt', False))
+            and bool(request.stream)
+            and self.store.current_batch is not None
+            and callable(getattr(self.synthesizer, 'render_urgent', None))
+        )
+
+    async def _preempt_first_sentence(self, job_id: str) -> None:
+        """Render a new stream's first sentence at the running batch's next step boundary instead of after it.
+
+        The running batch pauses for one solo generate (~0.15-0.25 s) and continues unchanged (its random state is
+        restored). If the batch ends before the next step boundary, the sentence goes back to the queue, where the
+        stream-first plan picks it up first.
+        """
+        async with self.store.job_condition:
+            self._promote_waiting_locked()
+            job = self.store.jobs.get(job_id)
+            state = self.store.request_states.get(job_id)
+            if (
+                job is None
+                or state is None
+                or job.cancel_requested
+                or job_id not in self.store.active_request_ids
+                or state.batch_count != 0
+                or not state.pending_sentence_indices
+                or state.pending_sentence_indices[0] != 0
+                or self.store.current_batch is None
+            ):
+                return
+            target_model = job.request.model or self.store.active_model
+            if not target_model or target_model not in self._resident_models():
+                return
+            items, _, _ = self._reserve_batch_locked([(job_id, 0)])
+            if job.started_at is None:
+                job.started_at = utcnow()
+                job.metrics['queue_wait_ms'] = int((job.started_at - job.created_at).total_seconds() * 1000)
+            job.status = JobStatus.running
+            job.metrics['first_sentence_preempted'] = True
+            job.updated_at = utcnow()
+
+        try:
+            results = await self.synthesizer.render_urgent(items)
+        except Exception as exc:
+            async with self.store.job_condition:
+                if job.cancel_requested:
+                    self._mark_cancelled_locked(job, 'Cancelled during synthesis.')
+                else:
+                    self._fail_job_locked(job, str(exc))
+                self._recompute_positions_locked()
+                self.store.job_condition.notify_all()
+            await self._publish_state()
+            return
+
+        async with self.store.job_condition:
+            if results is None:
+                # No step boundary left in the running batch: hand the sentence back to the queue.
+                state.inflight_sentence_indices.discard(0)
+                state.pending_sentence_indices.appendleft(0)
+                state.batch_count = max(0, state.batch_count - 1)
+                job.metrics.pop('first_sentence_preempted', None)
+            else:
+                model_used = getattr(self.synthesizer, '_loaded_model_id', None) or self.store.active_model or ''
+                self._apply_batch_results_locked([job_id], items, results, model_used, 0)
+            self._recompute_positions_locked()
+            self.store.job_condition.notify_all()
         await self._publish_state()
 
     def _can_use_native_streaming(self, batch_items: list[BatchSynthesisItem]) -> bool:

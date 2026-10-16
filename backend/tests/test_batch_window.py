@@ -150,3 +150,74 @@ def test_cuda_trim_runs_when_the_queue_runs_empty_not_after_every_batch(tmp_path
 
     asyncio.run(run())
     assert synth.events == ['batch2:trim_after=False', 'batch2:trim_after=False', 'batch1:trim_after=False', 'trim_idle']
+
+
+class SlowUrgentSynthesizer(MockSynthesizer):
+    """A batch takes 0.3 s; render_urgent answers at once while a batch runs (like a step-boundary preemption)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rendering = False
+        self.log: list[str] = []
+
+    def resident_models(self) -> set[str]:
+        return {AUTO}
+
+    async def render_batch(self, items, *, trim_after: bool = True):
+        self.rendering = True
+        self.log.append(f'batch:{[(i.job_id[-4:], i.sentence_index) for i in items]}')
+        await asyncio.sleep(0.3)
+        self.rendering = False
+        return await super().render_batch(items)
+
+    async def render_urgent(self, items):
+        if not self.rendering:
+            return None
+        self.log.append(f'urgent:{[(i.job_id[-4:], i.sentence_index) for i in items]}')
+        return await super().render_batch(items)
+
+
+def test_stream_first_sentence_jumps_into_a_running_batch(tmp_path) -> None:
+    synth = SlowUrgentSynthesizer()
+    queue = _queue(tmp_path, synth, batch_wait_ms=0, stream_first_preempt=True)
+    queue.store.active_model = AUTO
+
+    async def run():
+        await queue.start_worker()
+        long_job = await queue.submit(SpeechRequest(input=SENTENCE, model=AUTO))
+        await asyncio.sleep(0.05)  # the batch is running now
+        stream_job = await queue.submit(SpeechRequest(input=f'{SENTENCE} Zweiter Satz folgt hier.', model=AUTO, stream=True))
+        for _ in range(300):
+            if long_job.completed_at and stream_job.completed_at:
+                break
+            await asyncio.sleep(0.01)
+        queue.store.worker_stop.set()
+        async with queue.store.job_condition:
+            queue.store.job_condition.notify_all()
+        await queue.store.worker_task
+        return long_job, stream_job
+
+    long_job, stream_job = asyncio.run(run())
+    assert stream_job.metrics.get('first_sentence_preempted') is True
+    assert synth.log[0].startswith('batch:') and synth.log[1].startswith('urgent:')
+    # First audio long before the running batch (0.3 s) finished.
+    assert (stream_job.first_audio_at - stream_job.created_at).total_seconds() < 0.2
+    assert stream_job.completed_at is not None and long_job.completed_at is not None
+    assert stream_job.final_audio and long_job.final_audio
+
+
+def test_preempted_sentence_goes_back_to_the_queue_when_no_batch_runs(tmp_path) -> None:
+    synth = SlowUrgentSynthesizer()
+    queue = _queue(tmp_path, synth, batch_wait_ms=0, stream_first_preempt=True)
+    queue.store.active_model = AUTO
+
+    async def run():
+        job = await queue.submit(SpeechRequest(input=SENTENCE, model=AUTO, stream=True))
+        queue.store.current_batch = {'batch_id': 'x'}  # pretend a batch runs, but the synthesizer is idle
+        await queue._preempt_first_sentence(job.job_id)
+        return job
+
+    job = asyncio.run(run())
+    state = queue.store.request_states[job.job_id]
+    assert list(state.pending_sentence_indices)[0] == 0 and not state.inflight_sentence_indices
+    assert state.batch_count == 0 and 'first_sentence_preempted' not in job.metrics

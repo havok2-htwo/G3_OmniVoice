@@ -9,9 +9,12 @@ import importlib.util
 import io
 import logging
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import Future
 import wave
 from dataclasses import dataclass
 from types import MethodType
@@ -441,6 +444,12 @@ class OmniVoiceSynthesizer:
         # 'flashinfer', ...) and why it differs from the setting, if it does.
         self.attention_backend: str | None = None
         self.attention_backend_note: str | None = None
+        # Step-boundary preemption: while a batch renders, urgent items (a stream's first sentence) queued here run
+        # solo at the next diffusion step boundary (forward pre-hook), see render_urgent.
+        self._urgent: queue.SimpleQueue[tuple[list[BatchSynthesisItem], Future]] = queue.SimpleQueue()
+        self._urgent_lock = threading.Lock()
+        self._rendering = False
+        self._in_urgent = False
 
     def runtime_info(self) -> dict[str, Any]:
         return {
@@ -503,7 +512,77 @@ class OmniVoiceSynthesizer:
     async def render_batch(self, items: list[BatchSynthesisItem], *, trim_after: bool = True) -> list[BatchSynthesisResult]:
         if not items:
             return []
-        return await asyncio.to_thread(self._generate_batch_sync, items, trim_after=trim_after)
+        return await asyncio.to_thread(self._render_batch_thread, items, trim_after)
+
+    def _render_batch_thread(self, items: list[BatchSynthesisItem], trim_after: bool) -> list[BatchSynthesisResult]:
+        with self._urgent_lock:
+            self._rendering = True
+        try:
+            return self._generate_batch_sync(items, trim_after=trim_after)
+        finally:
+            with self._urgent_lock:
+                self._rendering = False
+            # Urgent items that arrived after the last step boundary run now, before the worker plans again.
+            self._run_urgent_sync()
+
+    async def render_urgent(self, items: list[BatchSynthesisItem]) -> list[BatchSynthesisResult] | None:
+        """Render ``items`` inside the running batch, at its next diffusion step boundary.
+
+        Returns None when no batch is rendering (the caller then leaves the items to the normal queue). The running
+        batch's random state is saved and restored around the urgent items, so its audio does not change; it only
+        pauses for the urgent generate.
+        """
+        if not items or self._model is None:
+            return None
+        future: Future = Future()
+        with self._urgent_lock:
+            if not self._rendering:
+                return None
+            self._urgent.put((items, future))
+        return await asyncio.wrap_future(future)
+
+    def _run_urgent_sync(self) -> None:
+        """Run queued urgent items now (worker thread, between two diffusion steps or right after the batch)."""
+        if self._in_urgent:
+            return
+        while True:
+            try:
+                items, future = self._urgent.get_nowait()
+            except queue.Empty:
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            torch = self._torch
+            cuda = torch is not None and torch.cuda.is_available()
+            cpu_state = torch.get_rng_state() if torch is not None else None
+            cuda_state = torch.cuda.get_rng_state() if cuda else None
+            active_seeds = row_seeds._ACTIVE
+            row_seeds._ACTIVE = None
+            self._in_urgent = True
+            try:
+                result = self._generate_batch_sync(items, trim_after=False)
+            except BaseException as exc:  # handed to the waiting request
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+            finally:
+                self._in_urgent = False
+                row_seeds._ACTIVE = active_seeds
+                if cpu_state is not None:
+                    torch.set_rng_state(cpu_state)
+                if cuda_state is not None:
+                    torch.cuda.set_rng_state(cuda_state)
+
+    def _install_urgent_hook(self, model: Any) -> None:
+        register = getattr(model, 'register_forward_pre_hook', None)
+        if not callable(register):
+            return
+
+        def hook(module: Any, args: Any) -> None:
+            if not self._in_urgent and not self._urgent.empty():
+                self._run_urgent_sync()
+
+        register(hook)
 
     async def trim_idle(self) -> None:
         """Release the CUDA cache once the queue has run empty (the queue calls this instead of a per-batch trim)."""
@@ -630,6 +709,7 @@ class OmniVoiceSynthesizer:
         if getattr(self.settings, 'compile_model', False) and not use_flashinfer:
             self._compile_model(model)
 
+        self._install_urgent_hook(model)
         self._model = model
         self._loaded_model_id = model_id
         self._loaded_model_source = model_source

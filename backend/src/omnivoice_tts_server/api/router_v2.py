@@ -248,6 +248,7 @@ def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettings
         compile_cudagraphs=settings.compile_cudagraphs,
         sdpa_prefer_cudnn=bool(getattr(settings, 'sdpa_prefer_cudnn', False)),
         packed_cfg=bool(getattr(settings, 'packed_cfg', False)),
+        stream_first_preempt=bool(getattr(settings, 'stream_first_preempt', True)),
         cudagraph_skip_dynamic_graphs=settings.cudagraph_skip_dynamic_graphs,
         cuda_memory_trim_after_batch=settings.cuda_memory_trim_after_batch,
         warmup_on_startup=settings.warmup_on_startup,
@@ -853,6 +854,8 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.sdpa_prefer_cudnn = payload.sdpa_prefer_cudnn
     if payload.packed_cfg is not None:
         settings.packed_cfg = payload.packed_cfg
+    if payload.stream_first_preempt is not None:
+        settings.stream_first_preempt = payload.stream_first_preempt
     if payload.cudagraph_skip_dynamic_graphs is not None:
         settings.cudagraph_skip_dynamic_graphs = payload.cudagraph_skip_dynamic_graphs
     if payload.cuda_memory_trim_after_batch is not None:

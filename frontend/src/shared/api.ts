@@ -77,6 +77,7 @@ export interface ServerSettings {
   compile_cudagraphs: boolean;
   sdpa_prefer_cudnn?: boolean;
   packed_cfg?: boolean;
+  stream_first_preempt?: boolean;
   cudagraph_skip_dynamic_graphs: boolean;
   cuda_memory_trim_after_batch: boolean;
   warmup_on_startup: boolean;

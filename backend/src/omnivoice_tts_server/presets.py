@@ -58,6 +58,7 @@ PRESET_KEYS = (
     'compile_cudagraphs',
     'sdpa_prefer_cudnn',
     'packed_cfg',
+    'stream_first_preempt',
     'cudagraph_skip_dynamic_graphs',
     'cuda_memory_trim_after_batch',
     'warmup_on_startup',

@@ -4,6 +4,18 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - a stream's first sentence jumps into the running batch (`stream_first_preempt`, on)
+
+- A streaming request that arrives while a batch renders no longer waits for the batch. Its first sentence is queued
+  for the synthesizer, and a forward pre-hook runs it solo at the running batch's next diffusion step boundary (or
+  right after the batch if no boundary is left). The running batch's random state and per-item seeds are saved and
+  restored around it, so its audio is unchanged; it pauses for the solo generate.
+- Measured on the RTX 5090 (32GB tier, batch of 8 running, new sentence after 200 ms): the new sentence was ready
+  after 234 ms instead of ~1.1 s (rest of the batch + solo), 189 ms with `packed_cfg` + `sdpa_prefer_cudnn`. The
+  running batch took 1142 -> 1314 ms. Both bit-identical to their undisturbed runs.
+- Batch results are now matched against the sentences of that batch only, so a job's preempted sentence in flight
+  does not fail the job as "Batch result was incomplete".
+
 ### Added - optional packed CFG decoding (`packed_cfg`, off by default)
 
 - Stock OmniVoice runs 2B rows per diffusion step, B conditional and B unconditional, all padded to the longest

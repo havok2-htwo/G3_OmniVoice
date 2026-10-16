@@ -35,6 +35,7 @@ RUNTIME_SETTINGS_FIELDS = {
     'compile_cudagraphs',
     'sdpa_prefer_cudnn',
     'packed_cfg',
+    'stream_first_preempt',
     'cudagraph_skip_dynamic_graphs',
     'cuda_memory_trim_after_batch',
     'warmup_on_startup',
@@ -109,6 +110,9 @@ class Settings(BaseSettings):
     # One row per item [conditional | unconditional] instead of 2B padded rows (packed_decode.py). Not
     # bit-identical; ~20-33 % faster per generate on the RTX 5090. Applied at model load.
     packed_cfg: bool = False
+    # A stream's first sentence that arrives while a batch renders runs solo at the batch's next diffusion step
+    # boundary instead of after the batch. The running batch's audio is unchanged (random state restored).
+    stream_first_preempt: bool = True
     cudagraph_skip_dynamic_graphs: bool = True
     cuda_memory_trim_after_batch: bool = True
     warmup_on_startup: bool = True

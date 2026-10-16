@@ -92,6 +92,12 @@ def overlapped_decode(model: Any) -> Iterator[None]:
         return
 
     overlap = _Overlap(decode, device)
+    # Restore instance attributes that were there before (e.g. the packed decoding loop), drop the rest.
+    previous = {
+        (owner, name): vars(owner)[name]
+        for owner, name in ((model, '_generate_iterative'), (tokenizer, 'decode'))
+        if name in vars(owner)
+    }
 
     def generate_iterative(*args: Any, **kwargs: Any) -> Any:
         tokens = iterative(*args, **kwargs)
@@ -105,6 +111,9 @@ def overlapped_decode(model: Any) -> Iterator[None]:
     finally:
         # Drop the instance attributes so the class methods show through again.
         for owner, name in ((model, '_generate_iterative'), (tokenizer, 'decode')):
+            if (owner, name) in previous:
+                setattr(owner, name, previous[(owner, name)])
+                continue
             try:
                 delattr(owner, name)
             except AttributeError:

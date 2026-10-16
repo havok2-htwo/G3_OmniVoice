@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Settings
 from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
-from . import decode_overlap, fast_silence, row_seeds
+from . import decode_overlap, fast_silence, packed_decode, row_seeds
 from .domain.state import InMemoryStore, VoiceProfileRecord
 from .voice_design import DEFAULT_VOICE_DESIGN_INSTRUCT, normalize_voice_design_instruct
 
@@ -620,6 +620,11 @@ class OmniVoiceSynthesizer:
         self.attention_backend_note = note
         logger.info('model=%s attention backend=%s', model_id, backend)
 
+        if getattr(self.settings, 'packed_cfg', False) and not use_flashinfer:
+            # One row per item [cond | uncond] instead of 2B padded rows (packed_decode). Installed before the
+            # compile and the warm-up, so the warm-up compiles the shapes real requests use.
+            if packed_decode.install(model):
+                logger.info('packed CFG decoding active')
         # torch.compile would trace around FlashInfer's patched forwards and planned
         # wrapper; upstream runs that path eager.
         if getattr(self.settings, 'compile_model', False) and not use_flashinfer:

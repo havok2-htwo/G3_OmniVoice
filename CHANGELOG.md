@@ -4,6 +4,19 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - optional packed CFG decoding (`packed_cfg`, off by default)
+
+- Stock OmniVoice runs 2B rows per diffusion step, B conditional and B unconditional, all padded to the longest
+  conditional row; with an 8 s voice prompt ~31 % of the computed tokens are padding. `packed_cfg` runs one row per
+  item, `[conditional | unconditional]`, with a block-diagonal mask and positions restarting at 0 for the
+  unconditional part (`omnivoice_tts_server/packed_decode.py`). Same inputs, schedule and sampler calls; a unit test
+  checks the layout reproduces the stock loop exactly on a per-row model.
+- Measured on the RTX 5090 (24GB tier, other services running), batch 1/4/8: SonjaV2 0.222/0.634/1.223 s ->
+  0.146/0.431/0.840 s (-31 to -34 %), Ero2 0.283/0.904/1.800 s -> 0.255/0.731/1.436 s (-10 to -20 %). Together with
+  `sdpa_prefer_cudnn`: SonjaV2 0.154/0.385/0.745 s, Ero2 0.215/0.609/1.185 s (-24 to -39 %).
+- Not bit-identical, but reproducible across restarts (16/16 identical). Whisper: SonjaV2 0 % WER in every
+  variant; Ero2 0.96 % packed vs 4.0 % stock (the difference is the voice's occasional "Oh," onset).
+
 ### Changed - the CUDA cache trim runs when the queue runs empty, not after every batch
 
 - `cuda_memory_trim_after_batch` released the CUDA cache after every batch, and the next batch of a busy period had

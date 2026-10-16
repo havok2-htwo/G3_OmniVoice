@@ -273,6 +273,7 @@ class ServerSettingsResponse(BaseModel):
     compile_model: bool
     compile_cudagraphs: bool
     sdpa_prefer_cudnn: bool = False
+    packed_cfg: bool = False
     cudagraph_skip_dynamic_graphs: bool
     cuda_memory_trim_after_batch: bool
     warmup_on_startup: bool
@@ -328,6 +329,7 @@ class ServerSettingsUpdateRequest(BaseModel):
     compile_model: bool | None = None
     compile_cudagraphs: bool | None = None
     sdpa_prefer_cudnn: bool | None = None
+    packed_cfg: bool | None = None
     cudagraph_skip_dynamic_graphs: bool | None = None
     cuda_memory_trim_after_batch: bool | None = None
     warmup_on_startup: bool | None = None

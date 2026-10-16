@@ -192,7 +192,7 @@ const ADMIN_HELP = {
   vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel (gemessen auf der RTX 5090): ~2,7 GB Modell + ~15,5 MB pro Sekunde Audio im Batch, wobei jeder Batch-Eintrag sein erzeugtes Audio plus den Referenz-Prompt der Stimme mitbringt (SonjaV2 8,2 s, Sonja 14,4 s). \"Saetze\" = Batch-Eintraege mit ~110 Zeichen und SonjaV2.",
   streamPrebuffer: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.",
   modelDirectory: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache.",
-  whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://192.168.0.200:7861; ein voller Endpoint wie /transcribe/ geht auch.",
+  whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://127.0.0.1:7861 (Default, G3_WHISPER auf demselben Rechner); ein voller Endpoint wie /transcribe/ geht auch.",
   vllmBaseUrl: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.",
   vllmModel: "vLLM Modell fuer WER-Saetze. Default: Qwen/Qwen3.6-35B-A3B-FP8. Leer lassen nutzt das erste Modell aus /v1/models.",
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
@@ -1668,7 +1668,7 @@ export function AdminApp() {
               {runtimeDeviceOptions.map((device) => <option key={device.id} value={device.id}>{device.label}{device.available ? "" : " (nicht verfuegbar)"}</option>)}
             </select></label>
             <label className="with-help" title={ADMIN_HELP.modelDirectory}>Model directory<input value={settingsDraft.model_directory} onChange={(event) => setSettingsDraft({ ...settingsDraft, model_directory: event.target.value })} /></label>
-            <label className="with-help" title={ADMIN_HELP.whisperUrl}>Whisper URL<input value={settingsDraft.whisper_base_url || ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, whisper_base_url: event.target.value, whisper_path: "" })} placeholder="http://192.168.0.200:7861" /></label>
+            <label className="with-help" title={ADMIN_HELP.whisperUrl}>Whisper URL<input value={settingsDraft.whisper_base_url || ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, whisper_base_url: event.target.value, whisper_path: "" })} placeholder="http://127.0.0.1:7861" /></label>
             <label className="with-help" title={ADMIN_HELP.vllmBaseUrl}>vLLM Base URL<input value={settingsDraft.vllm_base_url} onChange={(event) => setSettingsDraft({ ...settingsDraft, vllm_base_url: event.target.value })} placeholder="http://192.168.20.126:8000" /></label>
             <label className="with-help" title={ADMIN_HELP.vllmModel}>vLLM Model
               {vllmModels.length > 1 ? (

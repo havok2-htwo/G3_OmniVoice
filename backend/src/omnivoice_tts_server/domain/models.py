@@ -529,7 +529,7 @@ class WerBenchmarkCreateRequest(BaseModel):
     transcription_concurrency: int = Field(default=16, ge=1, le=64)
     vllm_base_url: str = 'http://192.168.20.126:8000'
     vllm_model: str | None = None
-    whisper_base_url: str = 'http://192.168.0.200:7861'
+    whisper_base_url: str = 'http://127.0.0.1:7861'
     whisper_path: str | None = None
     language: str = 'Deutsch'
     prompt: str | None = None

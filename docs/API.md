@@ -417,7 +417,7 @@ Common fields:
   "guidance_scale": 2.0,
   "vllm_base_url": "http://192.168.20.126:8000",
   "vllm_model": "Qwen/Qwen3.6-35B-A3B-FP8",
-  "whisper_base_url": "http://192.168.0.200:7861",
+  "whisper_base_url": "http://127.0.0.1:7861",
   "wer_concurrency": 4,
   "wer_transcription_concurrency": 16,
   "text_optimization_default": "off"
@@ -646,7 +646,7 @@ WER benchmark request:
   "transcription_concurrency": 16,
   "vllm_base_url": "http://192.168.20.126:8000",
   "vllm_model": "",
-  "whisper_base_url": "http://192.168.0.200:7861",
+  "whisper_base_url": "http://127.0.0.1:7861",
   "language": "Deutsch",
   "min_words": 5,
   "max_words": 16,

@@ -69,7 +69,8 @@ class Settings(BaseSettings):
     app_name: str = 'G3_OmniVoice Server'
     host: str = '0.0.0.0'
     port: int = 8091
-    whisper_base_url: str | None = 'http://192.168.0.200:7861'
+    # The suite runs on one box, so G3_WHISPER is local by default; Docker sets OMNIVOICE_TTS_WHISPER_BASE_URL.
+    whisper_base_url: str | None = 'http://127.0.0.1:7861'
     whisper_path: str = ''
     vllm_base_url: str = 'http://192.168.20.126:8000'
     vllm_model: str = 'Qwen/Qwen3.6-35B-A3B-FP8'

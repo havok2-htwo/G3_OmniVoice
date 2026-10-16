@@ -4,6 +4,13 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - local G3_WHISPER by default
+
+- `whisper_base_url` defaults to `http://127.0.0.1:7861` (was `http://192.168.0.200:7861`), also for
+  WER benchmark runs: the G3 suite runs on one box. The Docker stack keeps setting
+  `OMNIVOICE_TTS_WHISPER_BASE_URL=http://whisper:7861`; saved settings are unchanged. vLLM stays
+  external (`http://192.168.20.126:8000`).
+
 ### Fixed - VRAM budget counts the clone prompt
 
 - `vram_budget_mb` is now a real upper bound for the process. The batch planner

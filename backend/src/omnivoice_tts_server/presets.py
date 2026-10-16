@@ -56,6 +56,7 @@ PRESET_KEYS = (
     'torch_dtype',
     'compile_model',
     'compile_cudagraphs',
+    'sdpa_prefer_cudnn',
     'cudagraph_skip_dynamic_graphs',
     'cuda_memory_trim_after_batch',
     'warmup_on_startup',

@@ -366,6 +366,48 @@ def _reset_flashinfer_context() -> None:
         ctx['wrapper'] = None
 
 
+_DEFAULT_SDP_PRIORITY: list[int] | None = None
+_SDPA_CACHE_TAG = 'g3-sdpa-cudnn-first'
+
+
+def apply_sdpa_backend_preference(torch_module: Any, prefer_cudnn: bool) -> bool:
+    """Put cuDNN first in PyTorch's SDPA backend order, or restore the default order.
+
+    With OmniVoice's dense bool mask the default order picks the mem-efficient kernel (this Windows build has no
+    flash kernel); cuDNN is 2-2.7x faster per attention call on the RTX 5090 (~15-22 % per generate), not
+    bit-identical. torch.compile bakes the chosen kernel into the graph, and Inductor's on-disk cache key does not
+    include the order, so the order is also written into torch.compiler.config.cache_key_tag: otherwise a cached
+    graph compiled under the other order would be reused. Takes effect for graphs compiled after the call (model
+    load). Returns True if cuDNN is first.
+    """
+    global _DEFAULT_SDP_PRIORITY
+    c_api = getattr(torch_module, '_C', None)
+    get_order = getattr(c_api, '_get_sdp_priority_order', None)
+    set_order = getattr(c_api, '_set_sdp_priority_order', None)
+    if not callable(get_order) or not callable(set_order):
+        return False
+    try:
+        from torch.nn.attention import SDPBackend
+
+        cudnn = int(SDPBackend.CUDNN_ATTENTION)
+        current = [int(value) for value in get_order()]
+        if _DEFAULT_SDP_PRIORITY is None:
+            _DEFAULT_SDP_PRIORITY = list(current)
+        order = [cudnn] + [value for value in _DEFAULT_SDP_PRIORITY if value != cudnn] if prefer_cudnn else list(_DEFAULT_SDP_PRIORITY)
+        if order != current:
+            set_order(order)
+        compiler_config = getattr(getattr(torch_module, 'compiler', None), 'config', None)
+        if compiler_config is not None and hasattr(compiler_config, 'cache_key_tag'):
+            tags = [tag for tag in str(compiler_config.cache_key_tag or '').split(',') if tag and tag != _SDPA_CACHE_TAG]
+            if prefer_cudnn:
+                tags.append(_SDPA_CACHE_TAG)
+            compiler_config.cache_key_tag = ','.join(tags)
+        return prefer_cudnn
+    except Exception as exc:
+        logger.warning('could not set the SDPA backend order: %s', exc)
+        return False
+
+
 @dataclass
 class BatchSynthesisItem:
     job_id: str
@@ -796,6 +838,7 @@ class OmniVoiceSynthesizer:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             torch.set_float32_matmul_precision('high')
+            apply_sdpa_backend_preference(torch, bool(getattr(self.settings, 'sdpa_prefer_cudnn', False)))
 
         self._torch = torch
         self._soundfile = soundfile

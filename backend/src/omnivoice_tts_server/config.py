@@ -33,6 +33,7 @@ RUNTIME_SETTINGS_FIELDS = {
     'torch_dtype',
     'compile_model',
     'compile_cudagraphs',
+    'sdpa_prefer_cudnn',
     'cudagraph_skip_dynamic_graphs',
     'cuda_memory_trim_after_batch',
     'warmup_on_startup',
@@ -101,6 +102,9 @@ class Settings(BaseSettings):
     enable_cpu_offload: bool = False
     compile_model: bool = True
     compile_cudagraphs: bool = False
+    # Put cuDNN first in PyTorch's SDPA backend order (default order picks the mem-efficient kernel). Not
+    # bit-identical; on the RTX 5090 ~15-22 % faster per generate. Applied at model load.
+    sdpa_prefer_cudnn: bool = False
     cudagraph_skip_dynamic_graphs: bool = True
     cuda_memory_trim_after_batch: bool = True
     warmup_on_startup: bool = True

@@ -272,6 +272,7 @@ class ServerSettingsResponse(BaseModel):
     torch_dtype: str
     compile_model: bool
     compile_cudagraphs: bool
+    sdpa_prefer_cudnn: bool = False
     cudagraph_skip_dynamic_graphs: bool
     cuda_memory_trim_after_batch: bool
     warmup_on_startup: bool
@@ -326,6 +327,7 @@ class ServerSettingsUpdateRequest(BaseModel):
     torch_dtype: str | None = None
     compile_model: bool | None = None
     compile_cudagraphs: bool | None = None
+    sdpa_prefer_cudnn: bool | None = None
     cudagraph_skip_dynamic_graphs: bool | None = None
     cuda_memory_trim_after_batch: bool | None = None
     warmup_on_startup: bool | None = None

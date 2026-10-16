@@ -75,6 +75,7 @@ export interface ServerSettings {
   torch_dtype: string;
   compile_model: boolean;
   compile_cudagraphs: boolean;
+  sdpa_prefer_cudnn?: boolean;
   cudagraph_skip_dynamic_graphs: boolean;
   cuda_memory_trim_after_batch: boolean;
   warmup_on_startup: boolean;

@@ -4,6 +4,18 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - optional cuDNN attention (`sdpa_prefer_cudnn`, off by default)
+
+- With OmniVoice's dense bool mask, PyTorch's default SDPA order picks the mem-efficient kernel (this Windows build
+  has no flash kernel). The new setting puts cuDNN first at model load. Measured on the RTX 5090 (24GB tier, seed
+  9305, other services running): SonjaV2 batch 1/4/8 0.222/0.634/1.223 s -> 0.190/0.528/1.021 s; Ero2
+  0.283/0.904/1.800 s -> 0.218/0.708/1.424 s (-15 to -23 %).
+- Not bit-identical (bf16 rounding of a different kernel, max 0.004 per attention output). Whisper transcribes all 16
+  A/B sentences correctly in both variants.
+- torch.compile bakes the kernel into the graph and Inductor's on-disk cache key does not include the SDPA order, so
+  the setting also tags the compile cache key (`torch.compiler.config.cache_key_tag`); without that a restart reused
+  the cached mem-efficient graph and the setting had no effect. Admin UI: "cuDNN-Attention bevorzugen" (reload needed).
+
 ### Changed - silence trimming in numpy, same samples as pydub
 
 - OmniVoice trims every generated item (and every voice-clone reference) with pydub, which measures one RMS window

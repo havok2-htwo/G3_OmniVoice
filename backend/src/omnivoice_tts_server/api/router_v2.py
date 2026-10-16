@@ -246,6 +246,7 @@ def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettings
         torch_dtype=settings.torch_dtype,
         compile_model=settings.compile_model,
         compile_cudagraphs=settings.compile_cudagraphs,
+        sdpa_prefer_cudnn=bool(getattr(settings, 'sdpa_prefer_cudnn', False)),
         cudagraph_skip_dynamic_graphs=settings.cudagraph_skip_dynamic_graphs,
         cuda_memory_trim_after_batch=settings.cuda_memory_trim_after_batch,
         warmup_on_startup=settings.warmup_on_startup,
@@ -847,6 +848,8 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.compile_model = payload.compile_model
     if payload.compile_cudagraphs is not None:
         settings.compile_cudagraphs = payload.compile_cudagraphs
+    if payload.sdpa_prefer_cudnn is not None:
+        settings.sdpa_prefer_cudnn = payload.sdpa_prefer_cudnn
     if payload.cudagraph_skip_dynamic_graphs is not None:
         settings.cudagraph_skip_dynamic_graphs = payload.cudagraph_skip_dynamic_graphs
     if payload.cuda_memory_trim_after_batch is not None:

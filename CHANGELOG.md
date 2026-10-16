@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - batch_wait_ms is a real coalescing window; GPU stats off the event loop
+
+- `batch_wait_ms` now counts from the arrival of the oldest request that has not had a batch yet, and the worker keeps
+  waiting until that deadline or a full plan. Before, the wait restarted when the worker looked and ended at the first
+  new arrival, so a burst arriving over a few ms split into two batches (test: three requests 20 ms apart gave batches
+  2 + 1, now 3), while a request that had already waited through a running batch waited another 30 ms on top.
+- The dashboard snapshot no longer runs nvidia-smi (30-50 ms) on the event loop for every SSE event. The last reading is
+  served and refreshed in a background thread when it is older than 1 s.
+- Audio is unchanged: both only change when a batch starts, not what it computes.
+
 ### Changed - requests with different seeds share a batch
 
 - Seeds no longer split batch groups. A batch whose items ask for one seed (or none) runs the stock sampler exactly as

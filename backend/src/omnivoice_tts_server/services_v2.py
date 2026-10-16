@@ -10,6 +10,8 @@ import math
 import random
 import re
 import statistics
+import threading
+import time
 import unicodedata
 import uuid
 from typing import Any
@@ -378,17 +380,20 @@ class QueueService:
                     break
 
                 self._promote_waiting_locked()
-                if self._should_batch_wait_locked():
+                # Coalescing window: until the batch is full or batch_wait_ms after the oldest new request arrived.
+                # A request that already waited through a running batch is past its window and starts at once.
+                remaining_s = self._batch_wait_remaining_s_locked()
+                while remaining_s > 0:
                     try:
-                        await asyncio.wait_for(
-                            self.store.job_condition.wait(),
-                            timeout=self.settings.batch_wait_ms / 1000.0,
-                        )
+                        await asyncio.wait_for(self.store.job_condition.wait(), timeout=remaining_s)
                     except asyncio.TimeoutError:
                         pass
                     if self.store.worker_stop.is_set():
                         break
                     self._promote_waiting_locked()
+                    remaining_s = self._batch_wait_remaining_s_locked()
+                if self.store.worker_stop.is_set():
+                    break
 
                 batch_plan = self._build_batch_plan_locked()
                 if not batch_plan:
@@ -619,21 +624,34 @@ class QueueService:
             self._recompute_positions_locked()
             self.store.job_condition.notify_all()
 
-    def _should_batch_wait_locked(self) -> bool:
-        if self.settings.batch_wait_ms <= 0:
-            return False
+    def _batch_wait_remaining_s_locked(self) -> float:
+        """Seconds the worker should still wait for more requests before planning a batch (0 = plan now).
+
+        The window opens when the oldest new request (no batch yet) arrived, not when the worker looks, so a request
+        that arrived while a batch was running does not wait batch_wait_ms a second time. It closes early once the
+        plan is full.
+        """
+        wait_ms = self.settings.batch_wait_ms
+        if wait_ms <= 0:
+            return 0.0
         if len(self.store.active_request_ids) >= self.settings.max_parallel_requests and not self.store.waiting_requests:
-            return False
-        has_new_request = False
-        for job_id in self.store.active_request_ids:
+            return 0.0
+        oldest_new = None
+        for job_id in list(self.store.active_request_ids) + list(self.store.waiting_requests):
             state = self.store.request_states.get(job_id)
             job = self.store.jobs.get(job_id)
-            if state is not None and job is not None and not job.cancel_requested and state.batch_count == 0:
-                has_new_request = True
-                break
-        if not has_new_request and not self.store.waiting_requests:
-            return False
-        return 0 < len(self._build_batch_plan_locked()) < self.settings.max_batch_size
+            if state is None or job is None or job.cancel_requested or state.batch_count != 0:
+                continue
+            if oldest_new is None or job.created_at < oldest_new:
+                oldest_new = job.created_at
+        if oldest_new is None:
+            return 0.0
+        remaining_s = wait_ms / 1000.0 - (utcnow() - oldest_new).total_seconds()
+        if remaining_s <= 0:
+            return 0.0
+        if not 0 < len(self._build_batch_plan_locked()) < self.settings.max_batch_size:
+            return 0.0
+        return remaining_s
 
     def _emit_native_chunk_locked(
         self,
@@ -1133,8 +1151,17 @@ class QueueService:
 
 
 class StatsService:
+    # nvidia-smi takes 30-50 ms. The dashboard stream builds a snapshot per event, so a direct call would block the
+    # event loop (and the worker's hand-offs) that often. Serve the last reading and refresh it in a thread instead.
+    GPU_STATS_MAX_AGE_S = 1.0
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._gpu_lock = threading.Lock()
+        self._gpu_stats: dict[str, Any] | None = None
+        self._gpu_stats_key: str | None = None
+        self._gpu_stats_at = 0.0
+        self._gpu_refreshing = False
 
     @staticmethod
     def _avg(values: list[float]) -> float | None:
@@ -1167,7 +1194,33 @@ class StatsService:
         )
 
     def build_gpu_stats(self) -> GpuStatsResponse:
-        return GpuStatsResponse(**query_nvidia_smi(self.settings.preferred_device))
+        device = self.settings.preferred_device
+        with self._gpu_lock:
+            cached = self._gpu_stats if self._gpu_stats_key == device else None
+            stale = cached is None or time.monotonic() - self._gpu_stats_at >= self.GPU_STATS_MAX_AGE_S
+            start_refresh = stale and cached is not None and not self._gpu_refreshing
+            if start_refresh:
+                self._gpu_refreshing = True
+        if cached is None:
+            # First reading (or the device changed): read once synchronously.
+            cached = self._read_gpu_stats(device)
+        elif start_refresh:
+            threading.Thread(target=self._read_gpu_stats, args=(device,), name='gpu-stats', daemon=True).start()
+        return GpuStatsResponse(**cached)
+
+    def _read_gpu_stats(self, device: str | None) -> dict[str, Any]:
+        try:
+            stats = query_nvidia_smi(device)
+        except Exception:
+            stats = None
+        with self._gpu_lock:
+            self._gpu_refreshing = False
+            if stats is None:
+                return self._gpu_stats or {}
+            self._gpu_stats = stats
+            self._gpu_stats_key = device
+            self._gpu_stats_at = time.monotonic()
+        return stats
 
 
 class TranscriptionService:

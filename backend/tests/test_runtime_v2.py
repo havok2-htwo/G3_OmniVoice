@@ -751,6 +751,7 @@ def test_clone_requests_of_different_voices_share_a_batch(tmp_path) -> None:
     other_language = queue._group_key_for_request(SpeechRequest(**{**base, 'language': 'en'}, voice='SonjaV2'))
 
     assert voice_a == voice_b
-    assert voice_a != other_seed
+    # Seeds no longer split groups: a batch with mixed seeds draws per item (row_seeds).
+    assert voice_a == other_seed
     assert voice_a != other_language
 

@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - requests with different seeds share a batch
+
+- Seeds no longer split batch groups. A batch whose items ask for one seed (or none) runs the stock sampler exactly as
+  before. A batch with mixed seeds draws each item's diffusion noise from that item's own generator
+  (`omnivoice_tts_server/row_seeds.py`), so one item's audio depends only on its own seed, not on its batch. Measured
+  in process on the 24GB tier, batch of 4: mixed seeds 0.663 s vs same seed 0.665 s, and every item identical to its
+  solo run. Through the queue, 16 requests with 16 seeds: 1.27 s (was 1.93 s, every batch of 1); same seed unchanged.
+- Note: a seed's audio can differ between a batch with one seed (stock noise stream) and a batch with mixed seeds
+  (per-item stream). See the performance notes before using seed benchmarks across batch compositions.
+
 ### Changed - clone requests of different voices share a batch
 
 - Base (clone) requests no longer key their batch group on the voice. The batch runner already passes one clone prompt

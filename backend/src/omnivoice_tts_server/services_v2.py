@@ -1101,11 +1101,9 @@ class QueueService:
         model_id = request.model or self.store.active_model or self.settings.active_model
         language = (request.language or 'Auto').strip()
         instructions_hash = hashlib.sha1((request.instructions or '').encode('utf-8')).hexdigest()[:12]
-        seed_key = str(request.seed) if request.seed is not None else 'random'
         if task_type == TaskType.base:
             # Clone requests of different voices share a batch: the batch runner passes one clone prompt per item
-            # (runtime_v2 _generate_batch_sync), so the voice does not have to match. The seed and generation
-            # settings below still do, because one seed is applied per batch.
+            # (runtime_v2 _generate_batch_sync), so the voice does not have to match.
             voice_key = 'clone'
         elif task_type == TaskType.voice_design:
             voice_key = instructions_hash
@@ -1127,7 +1125,8 @@ class QueueService:
             'class_temperature': self.settings.class_temperature,
         }
         generation_hash = hashlib.sha1(json.dumps(generation_payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]
-        return '|'.join([model_id, task_type.value, language, voice_key, instructions_hash, seed_key, generation_hash])
+        # The seed is not part of the group: items with different seeds share a batch (see runtime_v2 / row_seeds).
+        return '|'.join([model_id, task_type.value, language, voice_key, instructions_hash, generation_hash])
 
     async def _publish_state(self) -> None:
         await self.events.publish('dashboard.snapshot', self.queue_snapshot())

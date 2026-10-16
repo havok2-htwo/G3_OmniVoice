@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import Settings
 from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
+from . import row_seeds
 from .domain.state import InMemoryStore, VoiceProfileRecord
 from .voice_design import DEFAULT_VOICE_DESIGN_INSTRUCT, normalize_voice_design_instruct
 
@@ -954,9 +955,17 @@ class OmniVoiceSynthesizer:
         languages = [self._normalize_language(item.request.language) for item in items]
         kwargs = self._generation_kwargs(items)
 
+        # One seed per batch keeps the stock sampler (bit-identical to before). Items that ask for different seeds get
+        # per-item generators instead, so they can share a batch (row_seeds).
+        seeds = [item.request.seed for item in items]
+        mixed_seeds = len({seed for seed in seeds}) > 1
+        seed_scope = (
+            row_seeds.per_item_seeds(seeds, self._model.device) if mixed_seeds else contextlib.nullcontext()
+        )
         try:
-            with self._torch.inference_mode():
-                self._apply_seed(items[0].request.seed)
+            with self._torch.inference_mode(), seed_scope:
+                if not mixed_seeds:
+                    self._apply_seed(items[0].request.seed)
                 if task_type == TaskType.voice_design:
                     wavs = self._model.generate(
                         text=texts,

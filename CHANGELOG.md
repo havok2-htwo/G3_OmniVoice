@@ -4,6 +4,36 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - VRAM budget counts the clone prompt
+
+- `vram_budget_mb` is now a real upper bound for the process. The batch planner
+  modelled VRAM from generated audio alone and missed that every batch item carries
+  the voice's reference prompt. With the 14.4 s `Sonja` prompt the RTX 5090 measured
+  5.3 GB under budget 5000, 7.7 GB under 7000 and 11.6 GB under 10000.
+  - Each item now costs its estimated speech plus its prompt length. The prompt
+    length is the voice profile's audio length, read from the WAV header; silence
+    trimming only shortens it by a few ms. AutoVoice and VoiceDesign count 0 s. A
+    `ref_audio` that cannot be read counts 15 s.
+  - The planner also counts the first item of a batch. Before, it was free.
+  - New constants, the upper envelope of all measured points (batch 1-32 of 7 s and
+    22 s sentences; 0-8 % above the measured peak, never below): 2700 MB resident
+    + 15.5 MB per second of generated + prompt audio, 0.07 s of speech per char
+    (measured 0.069-0.071). Before: 3000 MB + 42 MB/s, 0.06 s per char.
+  - Effect: budget 7000 still fits a batch of 8 normal sentences with `Sonja`
+    (~5.4 GB estimated) and with `SonjaV2`. A batch of 32 short sentences is split
+    into batches of up to 12 (`Sonja`) or 18 (`SonjaV2`); before, it was 17. 22 s
+    sentences go 7 per batch; before, it was 6.
+  - `max_chars_per_chunk` (one sequence) keeps the old 42 MB per second, because a
+    raised `audio_chunk_threshold` turns off the 30 s internal chunking and long
+    unchunked sequences were only measured at that rate. It also reserves 15 s for
+    the prompt. At 7000 MB it is now 1248 chars (before: 1587), at 5000 MB 568 (793).
+  - The admin VRAM estimate mirrors the new model. It also shows about how many
+    ~110-char `SonjaV2` sentences fit in one batch.
+- The Base startup warmup clones the configured `default_voice` when that profile
+  exists. Before, it used the first stored profile with audio, so it warmed a
+  different prompt length than the default voice uses. Without a usable default
+  voice it still falls back to the first profile that can clone.
+
 ### Added - SonjaV2 default voice and per-voice seeds
 
 - New shipped clone preset `SonjaV2` (`voice_presets/sonjav2.wav`, 8.2 s, transcript =
@@ -28,8 +58,15 @@ All notable changes to G3_OmniVoice are recorded here.
   - `24+8 VRAM` sets `preferred_device` to the card whose total memory matches 24 GB
     (within ~2 GiB), wherever that card sits. Without such a card the GPU is left
     alone and the preset carries a `note`.
-  - The tier values are the current code defaults for now. Measured values per
-    machine replace them in a later step (`presets.BUILTIN_PRESETS`).
+  - Tier values, measured on the RTX 5090 (`presets.BUILTIN_PRESETS`):
+    - `32GB VRAM`: `max_batch_size` / `max_parallel_requests` 8, `vram_budget_mb`
+      7000. About 2.6 GB idle and 5 GB peak for the process (batch 8 with `Sonja`).
+    - `24GB VRAM` and `24+8 VRAM`: batch / parallel 4, `vram_budget_mb` 5000. About
+      2.6 GB idle and 3.8 GB peak (batch 4 with `Sonja`).
+    - All tiers: `batch_wait_ms` 30, `cuda_memory_trim_after_batch` on, `num_step`
+      20, compile on, `bfloat16`, FlashInfer off. The other keys are the code
+      defaults. With `Sonja`, throughput is ~35x realtime from batch 4 on and flat
+      above it, so larger batches would only cost VRAM and latency.
   - Saving or deleting under a built-in name returns 400.
 - Saved presets now keep only an allowlist of runtime/VRAM keys (`PRESET_KEYS`:
   device, dtype, attention, compile, batching, VRAM budget, `num_step`, audio

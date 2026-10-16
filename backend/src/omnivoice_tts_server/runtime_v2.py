@@ -729,7 +729,7 @@ class OmniVoiceSynthesizer:
                         ],
                     )
                 elif task_type == TaskType.base:
-                    profile = next((item for item in self.store.voice_profiles.values() if item.audio_bytes and item.ref_text), None)
+                    profile = self._warmup_voice_profile()
                     if profile is None:
                         logger.info('warmup skipped for Base model (requires saved voice profile with ref_text)')
                         return
@@ -743,6 +743,24 @@ class OmniVoiceSynthesizer:
             logger.info('warmup model_id=%s done', model_id)
         except Exception as exc:
             logger.warning('warmup failed (non-critical): %s', exc)
+
+    def _warmup_voice_profile(self) -> VoiceProfileRecord | None:
+        """The configured default voice when it can clone, else the first profile that can.
+
+        Warming the default voice compiles the prompt length real default-voice requests use
+        and caches its clone prompt. The lookup matches QueueService._apply_default_voice
+        (voice_id or name, exact first, then case-insensitive).
+        """
+        usable = [item for item in self.store.voice_profiles.values() if item.audio_bytes and item.ref_text]
+        default_voice = (self.settings.default_voice or '').strip()
+        if default_voice:
+            lowered = default_voice.casefold()
+            profile = next((p for p in usable if default_voice in (p.voice_id, p.name)), None) or next(
+                (p for p in usable if lowered in (p.voice_id.casefold(), str(p.name or '').casefold())), None
+            )
+            if profile is not None:
+                return profile
+        return usable[0] if usable else None
 
     def _load_runtime_dependencies(self) -> tuple[Any, Any]:
         try:

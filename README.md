@@ -175,7 +175,17 @@ an install that never saved settings picks these defaults up on its next start.
   per-batch trim skips `gc.collect()` (~215 ms per batch, frees no VRAM); unload
   and the admin free-memory action still run it. A
   `vram_budget_mb` / `max_input_chars` capacity budget derives chunk sizes and a
-  per-batch audio-second limit.
+  per-batch audio-second limit. `vram_budget_mb` is an upper bound for the process:
+  the planner counts each batch item's generated speech plus its voice-clone
+  reference prompt (~2.7 GB + ~15.5 MB per second, see `capacity.py`).
+- **Batching** - measured on the RTX 5090 (bf16, compile, `num_step` 18), Base
+  cloning with the 14.4 s `Sonja` prompt runs ~30x realtime at batch 1 and ~35x
+  from batch 4 on, flat up to batch 32: every item carries the prompt, so bigger
+  batches only add VRAM (3.8 GB at batch 4, 5.0 GB at 8, 7.7 GB at 16) and latency.
+  Long sentences (~22 s each) amortise the prompt and reach ~53x. AutoVoice has no
+  prompt and keeps scaling: 39x at batch 1, 69x at 4, 84x at 16. The built-in GPU
+  tiers therefore use batch 8 (32 GB) and 4 (24 GB), with `batch_wait_ms` 30 so
+  concurrent requests actually coalesce.
 - **Attention backends** - `attention_implementation` takes `sdpa` (default),
   `flex_attention` or `eager` (both get a mask patch: OmniVoice's bool mask would
   otherwise be added as a +1/+0 bias); `enable_flashinfer` switches to upstream's FlashInfer

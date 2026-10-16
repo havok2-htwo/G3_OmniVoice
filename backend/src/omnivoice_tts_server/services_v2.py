@@ -42,7 +42,13 @@ from .domain.models import (
 from .domain.state import InMemoryStore, JobRecord, RequestState, utcnow
 from .prompt_batch import chunk_pcm16le, split_sentences
 from .runtime_v2 import BatchSynthesisItem, query_nvidia_smi
-from .capacity import batch_audio_budget_seconds, estimate_audio_seconds, max_chars_per_chunk
+from .capacity import (
+    DEFAULT_PROMPT_SECONDS,
+    batch_audio_budget_seconds,
+    estimate_item_seconds,
+    max_chars_per_chunk,
+    prompt_audio_seconds,
+)
 from .voice_design import normalize_voice_design_instruct
 
 logger = logging.getLogger('omnivoice_tts_server.services')
@@ -180,7 +186,12 @@ class QueueService:
             spoken_text=spoken_text if text_optimization is not None else None,
         )
         job.metrics['sentences_total'] = len(sentences)
-        state = RequestState(job_id=job.job_id, group_key=self._group_key_for_request(request), sentences=sentences)
+        state = RequestState(
+            job_id=job.job_id,
+            group_key=self._group_key_for_request(request),
+            sentences=sentences,
+            prompt_seconds=self._prompt_seconds_for_request(request),
+        )
 
         async with self.store.job_condition:
             total_outstanding = len(self.store.waiting_requests) + len(self.store.active_request_ids)
@@ -736,7 +747,8 @@ class QueueService:
             return first_audio_plan
 
         # VRAM-aware budget: cap the batch by estimated audio seconds (not just count),
-        # so a batch of long sentences uses no more VRAM than one of short ones. 0 = off.
+        # so a batch of long sentences uses no more VRAM than one of short ones. Each item
+        # counts its generated speech plus the clone prompt it carries. 0 = off.
         audio_budget = batch_audio_budget_seconds(getattr(self.settings, 'vram_budget_mb', 0))
         plan: list[tuple[str, int]] = []
         planned_audio_s = 0.0
@@ -750,12 +762,12 @@ class QueueService:
                 if offset >= len(state.pending_sentence_indices):
                     continue
                 sentence_index = state.pending_sentence_indices[offset]
-                if audio_budget > 0 and plan:
+                if audio_budget > 0:
                     # Always include at least one sentence; stop before exceeding budget.
-                    sentence_s = estimate_audio_seconds(state.sentences[sentence_index])
-                    if planned_audio_s + sentence_s > audio_budget:
+                    item_s = estimate_item_seconds(state.sentences[sentence_index], state.prompt_seconds)
+                    if plan and planned_audio_s + item_s > audio_budget:
                         return plan
-                    planned_audio_s += sentence_s
+                    planned_audio_s += item_s
                 plan.append((job_id, sentence_index))
                 per_request_offsets[job_id] = offset + 1
                 made_progress = True
@@ -1010,6 +1022,17 @@ class QueueService:
             if profile.voice_id == voice or profile.name == voice:
                 return profile
         return None
+
+    def _prompt_seconds_for_request(self, request: SpeechRequest) -> float:
+        """Reference audio each batch item of this request carries (Base cloning only)."""
+        if self._task_type_for_request(request) != TaskType.base:
+            return 0.0
+        profile = self._voice_profile_for_request(request)
+        if profile is not None and profile.audio_bytes:
+            return prompt_audio_seconds(profile.audio_bytes)
+        if request.ref_audio:
+            return prompt_audio_seconds(request.ref_audio)
+        return DEFAULT_PROMPT_SECONDS
 
     def _apply_default_voice(self, request: SpeechRequest) -> None:
         # Base clones a voice, so a request without one (e.g. an OpenAI stock voice that

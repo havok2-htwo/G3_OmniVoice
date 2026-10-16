@@ -110,6 +110,8 @@ class RequestState:
     emitted_audio_ms: int = 0
     batch_count: int = 0
     sample_rate: int = 24_000
+    # Voice-clone reference length every batch item of this request carries (0 = no prompt).
+    prompt_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         self.pending_sentence_indices = deque(range(len(self.sentences)))

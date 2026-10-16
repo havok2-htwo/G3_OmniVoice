@@ -73,14 +73,20 @@ type SettingsPreset = {
 };
 
 // Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
-const VRAM_BASE_MB = 3000;
-const VRAM_MB_PER_AUDIO_S = 42;
-const VRAM_EST_S_PER_CHAR = 0.06;
-function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number } | null {
+// Batch seconds count generated audio plus each item's clone prompt (SonjaV2 8.2 s).
+const VRAM_BASE_MB = 2700;
+const VRAM_MB_PER_AUDIO_S = 15.5;
+const VRAM_EST_S_PER_CHAR = 0.07;
+const VRAM_MB_PER_SEQUENCE_S = 42;
+const VRAM_CHUNK_PROMPT_ALLOWANCE_S = 15;
+const VRAM_TYPICAL_ITEM_S = 110 * VRAM_EST_S_PER_CHAR + 8.2; // ~110-char sentence with SonjaV2
+function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number; items: number } | null {
   if (!budgetMb || budgetMb <= 0) return null;
   const budgetS = Math.max(15, (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_AUDIO_S);
-  const chars = Math.max(240, Math.floor(budgetS / VRAM_EST_S_PER_CHAR));
-  return { peakGb: ((VRAM_BASE_MB + budgetS * VRAM_MB_PER_AUDIO_S) / 1024).toFixed(1), budgetS: Math.round(budgetS), chars };
+  const sequenceS = (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_SEQUENCE_S - VRAM_CHUNK_PROMPT_ALLOWANCE_S;
+  const chars = Math.max(240, Math.floor(sequenceS / VRAM_EST_S_PER_CHAR));
+  const items = Math.max(1, Math.floor(budgetS / VRAM_TYPICAL_ITEM_S));
+  return { peakGb: ((VRAM_BASE_MB + budgetS * VRAM_MB_PER_AUDIO_S) / 1024).toFixed(1), budgetS: Math.round(budgetS), chars, items };
 }
 
 const OMNIVOICE_DEFAULTS = {
@@ -181,9 +187,9 @@ const ADMIN_HELP = {
   activeRequests: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.",
   batchSize: "Maximale Anzahl kompatibler Saetze/Requests pro echtem OmniVoice generate(text=[...]) Batch.",
   batchWait: "Wartezeit, um kompatible Queue-Items fuer einen groesseren Batch zu sammeln.",
-  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). Default: 7000 (geteilte RTX 4090: realer Peak ~5 GB); RTX 5090 allein: ~24000-28000 moeglich.",
+  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). Obergrenze fuer den VRAM dieses Prozesses. Default: 7000 (Batch 8 passt; gemessen ~5 GB Peak mit Sonja, SonjaV2 braucht weniger); 5000 fuer Batch 4 auf geteilten 24-GB-Karten. Ab Batch 4 steigt der Durchsatz mit Klon-Stimmen kaum noch (~35x Echtzeit).",
   maxInputChars: "Harte Obergrenze fuer die Zeichenzahl eines einzelnen Requests. Darueber kommt 413. 0 = aus.",
-  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel: ~3 GB Modell + ~2,3 GB pro Audio-Minute.",
+  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel (gemessen auf der RTX 5090): ~2,7 GB Modell + ~15,5 MB pro Sekunde Audio im Batch, wobei jeder Batch-Eintrag sein erzeugtes Audio plus den Referenz-Prompt der Stimme mitbringt (SonjaV2 8,2 s, Sonja 14,4 s). \"Saetze\" = Batch-Eintraege mit ~110 Zeichen und SonjaV2.",
   streamPrebuffer: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.",
   modelDirectory: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache.",
   whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://192.168.0.200:7861; ein voller Endpoint wie /transcribe/ geht auch.",
@@ -1684,7 +1690,7 @@ export function AdminApp() {
             {(() => {
               const est = vramEstimate(settingsDraft.vram_budget_mb ?? 0);
               return (
-                <label className="with-help" title={ADMIN_HELP.vramEstimate}>Est. VRAM peak<input type="text" readOnly value={est ? `~${est.peakGb} GB · ${est.budgetS}s/Batch · ${est.chars} Zeichen/Chunk` : "Budget aus (unbegrenzt)"} /></label>
+                <label className="with-help" title={ADMIN_HELP.vramEstimate}>Est. VRAM peak<input type="text" readOnly value={est ? `~${est.peakGb} GB · ${est.budgetS}s/Batch (~${est.items} Saetze) · ${est.chars} Zeichen/Chunk` : "Budget aus (unbegrenzt)"} /></label>
               );
             })()}
             <label className="with-help" title={ADMIN_HELP.streamPrebuffer}>Stream prebuffer ms<input type="number" value={settingsDraft.stream_prebuffer_ms} onChange={(event) => setSettingsDraft({ ...settingsDraft, stream_prebuffer_ms: Number(event.target.value) || 0 })} /></label>

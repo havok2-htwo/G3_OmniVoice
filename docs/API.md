@@ -441,11 +441,18 @@ only fills the settings draft; it takes effect through the normal
 
 `GET` lists the built-in GPU tiers first, in this order, then saved presets by name:
 
-| Name | Machine |
-| --- | --- |
-| `32GB VRAM` | RTX 5090, all G3 services on one card (whole-card peak <= 30 GB) |
-| `24GB VRAM` | RTX 4090, all G3 services on one card (whole-card peak <= 23 GB) |
-| `24+8 VRAM` | RTX 3090 (24 GB) + RTX 2070S (8 GB), OmniVoice on the 24 GB card |
+| Name | Machine | Batch / parallel | `vram_budget_mb` | Process VRAM idle / peak |
+| --- | --- | --- | --- | --- |
+| `32GB VRAM` | RTX 5090, all G3 services on one card (whole-card peak <= 30 GB) | 8 / 8 | 7000 | ~2.6 / ~5.0 GB |
+| `24GB VRAM` | RTX 4090, all G3 services on one card (whole-card peak <= 23 GB) | 4 / 4 | 5000 | ~2.6 / ~3.8 GB |
+| `24+8 VRAM` | RTX 3090 (24 GB) + RTX 2070S (8 GB), OmniVoice on the 24 GB card | 4 / 4 | 5000 | ~2.6 / ~3.8 GB |
+
+All tiers: `batch_wait_ms` 30, `cuda_memory_trim_after_batch` on, `num_step` 20,
+`compile_model` on, `torch_dtype` `bfloat16`, FlashInfer off; the other preset keys
+are the code defaults. The VRAM figures were measured on the RTX 5090 with the 14.4 s
+`Sonja` prompt at batch 8 / batch 4 (the shorter `SonjaV2` default needs less).
+Cloning throughput is ~35x realtime from batch 4 on and flat above it, so the tiers
+stop at 8 and 4.
 
 The number in front names the card OmniVoice runs on; OmniVoice has no `8+24 VRAM`
 tier. `24+8 VRAM` sets `preferred_device` to the CUDA card whose total memory is
@@ -460,11 +467,11 @@ environment sets it), so `cuda:N` is `nvidia-smi` GPU N.
     {
       "name": "24+8 VRAM",
       "built_in": true,
-      "description": "3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte.",
+      "description": "3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte. Batch 4, VRAM-Budget 5000 MB: ...",
       "target_vram_gb": 24,
       "note": null,
       "created_at": null,
-      "values": { "preferred_device": "cuda:0", "torch_dtype": "bfloat16", "max_batch_size": 8, "vram_budget_mb": 7000 }
+      "values": { "preferred_device": "cuda:0", "torch_dtype": "bfloat16", "max_batch_size": 4, "vram_budget_mb": 5000 }
     }
   ]
 }

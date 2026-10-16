@@ -7,7 +7,7 @@ import os
 import pytest
 
 from omnivoice_tts_server import presets
-from omnivoice_tts_server.config import RUNTIME_SETTINGS_FIELDS
+from omnivoice_tts_server.config import RUNTIME_SETTINGS_FIELDS, Settings
 from omnivoice_tts_server.domain.models import ServerSettingsUpdateRequest
 
 from test_app import make_client
@@ -51,6 +51,28 @@ def test_builtin_values_are_valid_settings(name) -> None:
     assert set(values) <= set(presets.PRESET_KEYS)
     assert 'preferred_device' not in values, 'built-ins get the GPU only from card matching'
     assert presets.preset_values(values) == values, 'a built-in value would be changed or rejected by the settings PUT'
+
+
+@pytest.mark.parametrize(
+    ('name', 'batch', 'budget'), [('32GB VRAM', 8, 7000), ('24GB VRAM', 4, 5000), ('24+8 VRAM', 4, 5000)]
+)
+def test_builtin_tiers_carry_the_measured_values(name, batch, budget) -> None:
+    values = presets.BUILTIN_PRESETS[name]['values']
+    assert (values['max_batch_size'], values['max_parallel_requests'], values['vram_budget_mb']) == (batch, batch, budget)
+    assert values['batch_wait_ms'] == 30
+    assert values['cuda_memory_trim_after_batch'] is True
+    assert (values['num_step'], values['compile_model'], values['torch_dtype']) == (20, True, 'bfloat16')
+    assert values['enable_flashinfer'] is False
+    assert 'RTX 5090' in presets.BUILTIN_PRESETS[name]['description'], 'the description names where the VRAM was measured'
+
+
+def test_untuned_tier_keys_stay_at_the_code_defaults(tmp_path) -> None:
+    defaults = Settings(data_dir=tmp_path)
+    tuned = {'max_batch_size', 'max_parallel_requests', 'vram_budget_mb', 'batch_wait_ms'}
+    for name in TIER_NAMES:
+        for key, value in presets.BUILTIN_PRESETS[name]['values'].items():
+            if key not in tuned:
+                assert value == getattr(defaults, key), f'{name}: {key}'
 
 
 @pytest.mark.parametrize(('cards', 'expected'), [((24576, 8192), 'cuda:0'), ((8192, 24576), 'cuda:1'), ((8192, 24268), 'cuda:1')])

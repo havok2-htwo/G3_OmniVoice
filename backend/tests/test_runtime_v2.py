@@ -705,3 +705,33 @@ def test_eager_attention_load_installs_the_mask_patch(tmp_path, monkeypatch) -> 
     assert FakeOmniVoice.load_calls[-1]['attn_implementation'] == 'eager'
     assert synthesizer.attention_backend == 'eager'
     assert hasattr(FakeOmniVoiceModel.instances[-1], '_g3_eager_additive_mask_cache')
+
+
+def _clone_profile(voice_id: str, name: str, ref_text: str) -> VoiceProfileRecord:
+    return VoiceProfileRecord(
+        voice_id=voice_id,
+        name=name,
+        source='custom',
+        created_at=utcnow(),
+        audio_bytes=make_wav_bytes(),
+        content_type='audio/wav',
+        ref_text=ref_text,
+        consent=True,
+    )
+
+
+@pytest.mark.parametrize(('default_voice', 'expected_ref_text'), [('SonjaV2', 'Zweite.'), ('sonjav2', 'Zweite.'), ('voice_b', 'Zweite.'), ('Missing', 'Erste.'), ('', 'Erste.')])
+def test_base_warmup_uses_the_default_voice(tmp_path, monkeypatch, default_voice, expected_ref_text) -> None:
+    install_fake_omnivoice(monkeypatch)
+    store = InMemoryStore(max_queue_size=8)
+    store.voice_profiles['voice_none'] = VoiceProfileRecord(voice_id='voice_none', name='NoAudio', source='custom', created_at=utcnow())
+    store.voice_profiles['voice_a'] = _clone_profile('voice_a', 'Sonja', 'Erste.')
+    store.voice_profiles['voice_b'] = _clone_profile('voice_b', 'SonjaV2', 'Zweite.')
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path, default_voice=default_voice), store=store)
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_BASE_ALIAS))
+
+    synthesizer._run_warmup_inference(OMNIVOICE_BASE_ALIAS, None)
+
+    # Without a usable default voice the first profile that can clone is warmed, as before.
+    call = FakeOmniVoiceModel.instances[-1].calls[-1]
+    assert call['voice_clone_prompt'][0]['ref_text'] == expected_ref_text

@@ -77,12 +77,20 @@ CARD_MATCH_TOLERANCE_MB = 2048
 
 # ---------------------------------------------------------------------------
 # BUILT-IN TIER VALUES
-# PLACEHOLDER: every tier currently carries the service's code defaults (config.Settings)
-# for the preset keys. The real per-tier values come from VRAM/throughput measurements
-# on each target machine in a later step and replace these. Do not tune them by guess.
+# Measured on the RTX 5090 (2026-10-16, Base cloning the 14.4 s "Sonja" prompt, bf16,
+# compile, trim on): idle process ~2.6 GB; peak 3.8 GB at batch 4, 5.0 GB at batch 8,
+# 7.7 GB at batch 16 of ~7 s sentences. Throughput is ~35x realtime from batch 4 on and
+# flat above it, so bigger batches only cost VRAM and latency. batch_wait_ms 30 lets
+# concurrent requests actually coalesce (0 runs them as batches of 1). Trim on: without
+# it the reserved pool stays at the batch high-water (7.7 GB idle after one batch of 16).
+# vram_budget_mb is the process upper bound under capacity.py: 7000 still fits a batch of
+# 8 normal sentences with Sonja (~5.4 GB estimated) and caps 22 s sentences at 7 items;
+# 5000 fits 4 such long sentences with Sonja. The 3090 has bf16 but no FP8; FlashInfer is
+# Linux-only and fp16-only, so it stays off everywhere. There is no "8+24 VRAM" tier: the
+# 2070S (Turing) has no bf16, and fp16 output of the model is untested here.
 # preferred_device is never listed here: two-card tiers get it from card matching.
 # ---------------------------------------------------------------------------
-_CURRENT_DEFAULTS: dict[str, Any] = {
+_TIER_COMMON: dict[str, Any] = {
     'attention_implementation': 'sdpa',
     'enable_flashinfer': False,
     'torch_dtype': 'bfloat16',
@@ -91,30 +99,33 @@ _CURRENT_DEFAULTS: dict[str, Any] = {
     'cudagraph_skip_dynamic_graphs': True,
     'cuda_memory_trim_after_batch': True,
     'warmup_on_startup': True,
-    'max_parallel_requests': 8,
-    'max_batch_size': 8,
-    'batch_wait_ms': 0,
-    'vram_budget_mb': 7000,
+    'batch_wait_ms': 30,
     'max_input_chars': 25000,
     'num_step': 20,
     'audio_chunk_duration': 30.1,
     'audio_chunk_threshold': 30.0,
 }
+_TIER_SMALL: dict[str, Any] = {**_TIER_COMMON, 'max_parallel_requests': 4, 'max_batch_size': 4, 'vram_budget_mb': 5000}
 BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
     '32GB VRAM': {
-        'description': 'RTX 5090, alle G3-Dienste auf einer Karte (Spitze der ganzen Karte <= 30 GB).',
+        'description': 'RTX 5090, alle G3-Dienste auf einer Karte (Spitze der ganzen Karte <= 30 GB). Batch 8, '
+        'VRAM-Budget 7000 MB: etwa 2,6 GB Leerlauf, 5 GB Spitze fuer diesen Prozess (gemessen auf der RTX 5090 '
+        'bei Batch 8 mit der 14,4-s-Stimme Sonja; SonjaV2 braucht weniger).',
         'target_vram_gb': None,
-        'values': dict(_CURRENT_DEFAULTS),
+        'values': {**_TIER_COMMON, 'max_parallel_requests': 8, 'max_batch_size': 8, 'vram_budget_mb': 7000},
     },
     '24GB VRAM': {
-        'description': 'RTX 4090, alle G3-Dienste auf einer Karte (Spitze der ganzen Karte <= 23 GB).',
+        'description': 'RTX 4090, alle G3-Dienste auf einer Karte (Spitze der ganzen Karte <= 23 GB). Batch 4, '
+        'VRAM-Budget 5000 MB: etwa 2,6 GB Leerlauf, 3,8 GB Spitze fuer diesen Prozess (gemessen auf der RTX 5090 '
+        'bei Batch 4 mit Sonja).',
         'target_vram_gb': None,
-        'values': dict(_CURRENT_DEFAULTS),
+        'values': dict(_TIER_SMALL),
     },
     '24+8 VRAM': {
-        'description': '3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte.',
+        'description': '3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte. Batch 4, VRAM-Budget 5000 MB: '
+        'etwa 2,6 GB Leerlauf, 3,8 GB Spitze fuer diesen Prozess (gemessen auf der RTX 5090 bei Batch 4 mit Sonja).',
         'target_vram_gb': 24,
-        'values': dict(_CURRENT_DEFAULTS),
+        'values': dict(_TIER_SMALL),
     },
 }
 

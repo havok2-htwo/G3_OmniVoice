@@ -742,14 +742,14 @@ class QueueService:
         if not eligible:
             return []
 
-        first_audio_plan = self._stream_first_audio_plan_locked(eligible)
-        if first_audio_plan:
-            return first_audio_plan
-
         # VRAM-aware budget: cap the batch by estimated audio seconds (not just count),
         # so a batch of long sentences uses no more VRAM than one of short ones. Each item
         # counts its generated speech plus the clone prompt it carries. 0 = off.
         audio_budget = batch_audio_budget_seconds(getattr(self.settings, 'vram_budget_mb', 0))
+        first_audio_plan = self._stream_first_audio_plan_locked(eligible, audio_budget)
+        if first_audio_plan:
+            return first_audio_plan
+
         plan: list[tuple[str, int]] = []
         planned_audio_s = 0.0
         per_request_offsets = {job_id: 0 for job_id in eligible}
@@ -775,8 +775,11 @@ class QueueService:
                     break
         return plan
 
-    def _stream_first_audio_plan_locked(self, eligible_job_ids: list[str]) -> list[tuple[str, int]]:
+    def _stream_first_audio_plan_locked(
+        self, eligible_job_ids: list[str], audio_budget: float = 0.0
+    ) -> list[tuple[str, int]]:
         plan: list[tuple[str, int]] = []
+        planned_audio_s = 0.0
         for job_id in eligible_job_ids:
             job = self.store.jobs[job_id]
             state = self.store.request_states[job_id]
@@ -784,7 +787,14 @@ class QueueService:
                 continue
             if not state.pending_sentence_indices:
                 continue
-            plan.append((job_id, state.pending_sentence_indices[0]))
+            sentence_index = state.pending_sentence_indices[0]
+            if audio_budget > 0:
+                # Same VRAM budget as the main plan; the rest get their first audio next batch.
+                item_s = estimate_item_seconds(state.sentences[sentence_index], state.prompt_seconds)
+                if plan and planned_audio_s + item_s > audio_budget:
+                    break
+                planned_audio_s += item_s
+            plan.append((job_id, sentence_index))
             if len(plan) >= self.settings.max_batch_size:
                 break
         return plan

@@ -15,6 +15,10 @@ All notable changes to G3_OmniVoice are recorded here.
     trimming only shortens it by a few ms. AutoVoice and VoiceDesign count 0 s. A
     `ref_audio` that cannot be read counts 15 s.
   - The planner also counts the first item of a batch. Before, it was free.
+  - The first-audio batch of streaming requests (their first sentence goes ahead of
+    the rest) keeps the same budget. Before, it took up to `max_batch_size` items
+    regardless of `vram_budget_mb`; the remaining streams get their first sentence
+    in the next batch.
   - New constants, the upper envelope of all measured points (batch 1-32 of 7 s and
     22 s sentences; 0-8 % above the measured peak, never below): 2700 MB resident
     + 15.5 MB per second of generated + prompt audio, 0.07 s of speech per char

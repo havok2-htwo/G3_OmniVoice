@@ -265,3 +265,13 @@ def test_planner_without_budget_or_prompt(tmp_path) -> None:
 def test_planner_always_takes_one_item_over_budget(tmp_path) -> None:
     queue = _queue(tmp_path, vram_budget_mb=3000)
     assert _plan_size(queue, 4, voice='voice_long') == 1
+
+
+def test_streaming_first_audio_batch_respects_the_budget(tmp_path) -> None:
+    # Streaming requests get their first sentence batched ahead of the rest; that batch
+    # must stay within the VRAM budget too (it used to take max_batch_size items).
+    item_long = estimate_item_seconds(SENTENCE, SONJA_PROMPT_S)
+    budget_s = batch_audio_budget_seconds(5000)
+    queue = _queue(tmp_path / 'a', vram_budget_mb=5000)
+    assert _plan_size(queue, 32, voice='voice_long', stream=True) == int(budget_s // item_long)
+    assert _plan_size(_queue(tmp_path / 'b', vram_budget_mb=0), 32, voice='voice_long', stream=True) == 32

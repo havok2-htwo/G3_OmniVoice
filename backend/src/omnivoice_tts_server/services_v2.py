@@ -1103,9 +1103,10 @@ class QueueService:
         instructions_hash = hashlib.sha1((request.instructions or '').encode('utf-8')).hexdigest()[:12]
         seed_key = str(request.seed) if request.seed is not None else 'random'
         if task_type == TaskType.base:
-            voice_key = request.voice or hashlib.sha1(
-                f"{request.ref_audio or ''}|{request.ref_text or ''}|{request.x_vector_only_mode}".encode('utf-8')
-            ).hexdigest()[:12]
+            # Clone requests of different voices share a batch: the batch runner passes one clone prompt per item
+            # (runtime_v2 _generate_batch_sync), so the voice does not have to match. The seed and generation
+            # settings below still do, because one seed is applied per batch.
+            voice_key = 'clone'
         elif task_type == TaskType.voice_design:
             voice_key = instructions_hash
         else:

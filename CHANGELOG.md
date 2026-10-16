@@ -4,6 +4,14 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - clone requests of different voices share a batch
+
+- Base (clone) requests no longer key their batch group on the voice. The batch runner already passes one clone prompt
+  per item, so requests for SonjaV2 and Sonja fill the same batch. The seed, language and generation settings still
+  separate groups, because one seed is applied per batch. Measured in process on the 24GB VRAM tier (16 concurrent
+  requests, batch 4): mixed voices went from 4 batches (1.76 s) to 2 full batches (1.71 s); single-voice load is
+  unchanged (1.27 s). Single-request time to first audio, streamed, idle worker: median 0.23 s.
+
 ### Changed - fresh installs start with the 24GB VRAM tier
 
 - Without `data/runtime_settings.json` the server now starts with the defaults plus the

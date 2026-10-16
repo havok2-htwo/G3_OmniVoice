@@ -735,3 +735,22 @@ def test_base_warmup_uses_the_default_voice(tmp_path, monkeypatch, default_voice
     # Without a usable default voice the first profile that can clone is warmed, as before.
     call = FakeOmniVoiceModel.instances[-1].calls[-1]
     assert call['voice_clone_prompt'][0]['ref_text'] == expected_ref_text
+
+
+def test_clone_requests_of_different_voices_share_a_batch(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    store = InMemoryStore(max_queue_size=8)
+    from omnivoice_tts_server.services_v2 import EventHub, QueueService
+    from omnivoice_tts_server.runtime_v2 import MockSynthesizer
+
+    queue = QueueService(store, MockSynthesizer(), EventHub(store), settings)
+    base = dict(input='A', model=OMNIVOICE_BASE_ALIAS, task_type=TaskType.base, language='de', seed=9305)
+    voice_a = queue._group_key_for_request(SpeechRequest(**base, voice='SonjaV2'))
+    voice_b = queue._group_key_for_request(SpeechRequest(**base, voice='Sonja'))
+    other_seed = queue._group_key_for_request(SpeechRequest(**{**base, 'seed': 12}, voice='SonjaV2'))
+    other_language = queue._group_key_for_request(SpeechRequest(**{**base, 'language': 'en'}, voice='SonjaV2'))
+
+    assert voice_a == voice_b
+    assert voice_a != other_seed
+    assert voice_a != other_language
+

@@ -112,3 +112,51 @@ Environment for all of them: `OMNIVOICE_TTS_DATA_DIR` pointing at a copy of `dat
 - Committed: clone requests of different voices share a batch (`01baf21`), with a test in `tests/test_runtime_v2.py`.
 - Not committed: nothing. The experiments above are in the scratch folder only.
 - Live OmniVoice on port 8091 runs the current committed code with the `32GB VRAM` tier values.
+
+## Second round (evening of 2026-10-16)
+
+A six-lens analysis with adversarial verification ranked the remaining ideas; the user ruled out every quality knob
+(num_step stays 20, below that too many artefacts; no shorter prompts for existing voices; no CFG skipping). What
+was built, measured in-process on the RTX 5090 with the other G3 services running (so absolute numbers carry some
+noise), seed 9305:
+
+### Bit-identical, active by default
+
+| Change | Effect |
+|---|---|
+| `batch_wait_ms` is a real window from the oldest new request's arrival until the deadline or a full plan | a burst 20 ms apart: batches 2 + 1 -> 3; no second wait after waiting through a running batch |
+| nvidia-smi off the event loop (cached, refreshed in a thread) | 30-50 ms less blocking per dashboard event |
+| Codec decode of item i+1 overlaps the CPU post-processing of item i (`decode_overlap.py`) | together with the next row: batch 1/4/8 0.228/0.653/1.259 -> 0.222/0.632/1.218 s |
+| `remove_silence` as an exact numpy port of pydub (`fast_silence.py`, self-check at load) | 7 ms -> ~1.5 ms CPU per 7 s item, 0 differences over 916 cases |
+| CUDA cache trim when the queue runs empty instead of after every batch | 8 ms per batch at batch 4, 11 ms at batch 8 |
+| A stream's first sentence runs solo at the running batch's next step boundary (`stream_first_preempt`) | first audio after 234 ms instead of ~1.1 s with a batch of 8 running; the batch pauses ~170 ms |
+
+### Not bit-identical, off until the listening test (`C:\Users\havok2\Desktop\OmniVoice_Hoerprobe`)
+
+| Setting | SonjaV2 batch 1/4/8 | Ero2 batch 1/4/8 |
+|---|---|---|
+| stock | 0.222 / 0.634 / 1.223 s | 0.283 / 0.904 / 1.800 s |
+| `sdpa_prefer_cudnn` | 0.190 / 0.528 / 1.021 s | 0.218 / 0.708 / 1.424 s |
+| `packed_cfg` | 0.146 / 0.431 / 0.840 s | 0.255 / 0.731 / 1.436 s |
+| both | 0.154 / 0.385 / 0.745 s | 0.215 / 0.609 / 1.185 s |
+
+- cuDNN: the default SDPA order picks the mem-efficient kernel for the dense bool mask (no flash kernel on this
+  Windows build); cuDNN is 2-2.7x faster per attention call. Inductor's on-disk cache key does not include the SDPA
+  order: without the cache-key tag the setting silently reused the old graph (audio identical, no speed-up).
+- Packed CFG: one row `[cond | uncond]` per item instead of 2B rows padded to the longest cond row (~31 % padding
+  with an 8 s prompt). Reproducible across restarts; the output depends slightly on the first compiled shape, which
+  the fixed warm-up sentence pins.
+- Whisper on 8 sentences x 2 voices: SonjaV2 0 % WER in all four variants; Ero2 4.0 % stock vs ~1-2 % new (the
+  difference is the voice's occasional "Oh," onset).
+
+### Tried and dropped
+
+- Vectorising the per-item sampling loop: bit-identical but 18-25 ms slower. The small kernels are launched while
+  the GPU still runs the forward, so launches are not on the critical path; the gather costs more than it saves.
+- Logits/heads only on target positions: estimated < 1 % from the profile, not built.
+- Profile (packed + cuDNN, batch 8): the compiled forward is ~620 of ~750 ms; GEMMs run on sm80 CUTLASS kernels.
+
+### Environment finding
+
+- The `.conda-env` has omnivoice **0.1.5** installed, not upstream `08be0b4` as `docs/RUNTIME_VERSIONS.md` says, so
+  `pad_duration` / `fade_duration` from request metadata are ignored at the moment.

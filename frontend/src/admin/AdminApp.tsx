@@ -213,7 +213,7 @@ const ADMIN_HELP = {
   compileModel: "Aktiviert torch.compile fuer das LLM im OmniVoice-Modell. Erst nach Reload/Restart wirksam.",
   sdpaCudnn: "Setzt cuDNN an die erste Stelle der SDPA-Kernelwahl (sonst mem-efficient). Auf der RTX 5090 etwa 15-22 % schneller, Audio numerisch minimal anders. Erst nach Reload/Restart wirksam.",
   cudagraphSkip: "Laesst Inductor dynamische CUDAGraph-Shapes ueberspringen und unterdrueckt viele Shape-Warnungen.",
-  autoVramTrim: "Leert nach jedem Batch den PyTorch CUDA Cache. Hilft nach zu grossen Batches, kann Durchsatz minimal senken.",
+  autoVramTrim: "Leert den PyTorch CUDA Cache, sobald die Queue nach einem Batch leer ist (nicht mehr nach jedem Batch, das kostete 8-11 ms pro Batch). Gibt VRAM nach einer Lastphase an die anderen Dienste zurueck.",
   warmupStartup: "Fuehrt beim Start automatisch Warmup aus. Gut fuer erste Latenz, verlaengert Startup.",
   denoise: "Fuegt den OmniVoice-Denoise-Token in die Generierung ein. Default: an.",
   preprocessPrompt: "Bereitet Referenzprompt und Clone-Audio vor dem Generieren auf. Default: an.",
@@ -1727,7 +1727,7 @@ export function AdminApp() {
             <label className="checkbox-row with-help" title={ADMIN_HELP.compileModel}><input type="checkbox" checked={settingsDraft.compile_model} onChange={(event) => setSettingsDraft({ ...settingsDraft, compile_model: event.target.checked })} />torch.compile fuer llm</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.sdpaCudnn}><input type="checkbox" checked={settingsDraft.sdpa_prefer_cudnn ?? false} onChange={(event) => setSettingsDraft({ ...settingsDraft, sdpa_prefer_cudnn: event.target.checked })} />cuDNN-Attention bevorzugen</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.cudagraphSkip}><input type="checkbox" checked={settingsDraft.cudagraph_skip_dynamic_graphs} onChange={(event) => setSettingsDraft({ ...settingsDraft, cudagraph_skip_dynamic_graphs: event.target.checked })} />CUDAGraph dynamic shapes skippen</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.autoVramTrim}><input type="checkbox" checked={settingsDraft.cuda_memory_trim_after_batch} onChange={(event) => setSettingsDraft({ ...settingsDraft, cuda_memory_trim_after_batch: event.target.checked })} />Auto VRAM trim nach Batch</label>
+            <label className="checkbox-row with-help" title={ADMIN_HELP.autoVramTrim}><input type="checkbox" checked={settingsDraft.cuda_memory_trim_after_batch} onChange={(event) => setSettingsDraft({ ...settingsDraft, cuda_memory_trim_after_batch: event.target.checked })} />Auto VRAM trim wenn Queue leer</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.warmupStartup}><input type="checkbox" checked={settingsDraft.warmup_on_startup} onChange={(event) => setSettingsDraft({ ...settingsDraft, warmup_on_startup: event.target.checked })} />Warmup beim Start</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.denoise}><input type="checkbox" checked={Boolean(settingsDraft.denoise)} onChange={(event) => setSettingsDraft({ ...settingsDraft, denoise: event.target.checked })} />Denoise</label>
             <label className="checkbox-row with-help" title={ADMIN_HELP.preprocessPrompt}><input type="checkbox" checked={Boolean(settingsDraft.preprocess_prompt)} onChange={(event) => setSettingsDraft({ ...settingsDraft, preprocess_prompt: event.target.checked })} />Preprocess prompt</label>

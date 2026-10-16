@@ -116,3 +116,37 @@ def test_gpu_stats_are_served_from_cache_and_refreshed_in_the_background(tmp_pat
         threading.Event().wait(0.01)
     assert stats.build_gpu_stats().memory_used_mb == 2
     assert len(calls) == 2 and calls[0] is main and calls[1] is not main
+
+
+class TrimRecordingSynthesizer(MockSynthesizer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+
+    async def render_batch(self, items, *, trim_after: bool = True):
+        self.events.append(f'batch{len(items)}:trim_after={trim_after}')
+        return await super().render_batch(items)
+
+    async def trim_idle(self) -> None:
+        self.events.append('trim_idle')
+
+
+def test_cuda_trim_runs_when_the_queue_runs_empty_not_after_every_batch(tmp_path) -> None:
+    synth = TrimRecordingSynthesizer()
+    queue = _queue(tmp_path, synth, max_batch_size=2, batch_wait_ms=0)
+
+    async def run() -> None:
+        jobs = [await queue.submit(SpeechRequest(input=SENTENCE, model=AUTO)) for _ in range(5)]
+        await queue.start_worker()
+        for _ in range(300):
+            if all(job.completed_at for job in jobs):
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        queue.store.worker_stop.set()
+        async with queue.store.job_condition:
+            queue.store.job_condition.notify_all()
+        await queue.store.worker_task
+
+    asyncio.run(run())
+    assert synth.events == ['batch2:trim_after=False', 'batch2:trim_after=False', 'batch1:trim_after=False', 'trim_idle']

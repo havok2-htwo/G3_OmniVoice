@@ -4,6 +4,13 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - the CUDA cache trim runs when the queue runs empty, not after every batch
+
+- `cuda_memory_trim_after_batch` released the CUDA cache after every batch, and the next batch of a busy period had
+  to allocate it again: 8 ms per batch at batch 4, 11 ms at batch 8 (eight back-to-back batches, RTX 5090). The trim
+  now runs once the queue has no pending sentence left, so VRAM still goes back to the other services after a
+  busy period. Audio unchanged.
+
 ### Added - optional cuDNN attention (`sdpa_prefer_cudnn`, off by default)
 
 - With OmniVoice's dense bool mask, PyTorch's default SDPA order picks the mem-efficient kernel (this Windows build

@@ -755,3 +755,15 @@ def test_clone_requests_of_different_voices_share_a_batch(tmp_path) -> None:
     assert voice_a == other_seed
     assert voice_a != other_language
 
+
+
+def test_render_batch_can_skip_the_trim_and_trim_idle_does_it(tmp_path, monkeypatch) -> None:
+    install_fake_omnivoice(monkeypatch)
+    synthesizer = OmniVoiceSynthesizer(settings=make_settings(tmp_path, cuda_memory_trim_after_batch=True), store=InMemoryStore(max_queue_size=8))
+    asyncio.run(synthesizer.ensure_model(OMNIVOICE_AUTO_ALIAS))
+    calls = _record_trims(synthesizer, monkeypatch)
+
+    asyncio.run(synthesizer.render_batch([_auto_item()], trim_after=False))
+    assert calls == []
+    asyncio.run(synthesizer.trim_idle())
+    assert calls == [{'collect_garbage': False}]

@@ -433,7 +433,13 @@ class QueueService:
                     )
                     await self._publish_state()
                     continue
-                results = await self.synthesizer.render_batch(batch_items)
+                trim_idle = getattr(self.synthesizer, 'trim_idle', None)
+                if callable(trim_idle):
+                    # Trim once the queue runs empty instead of after every batch (8-11 ms per batch measured);
+                    # the next batch of a busy period reuses the cached blocks.
+                    results = await self.synthesizer.render_batch(batch_items, trim_after=False)
+                else:
+                    results = await self.synthesizer.render_batch(batch_items)
             except Exception as exc:
                 async with self.store.job_condition:
                     self.store.current_batch = None
@@ -497,8 +503,15 @@ class QueueService:
                     max_retained_audio_bytes=int(getattr(self.settings, 'max_retained_audio_mb', 0) or 0) * 1024 * 1024,
                 )
                 self.store.job_condition.notify_all()
+                queue_idle = not self.store.waiting_requests and not any(
+                    self.store.request_states.get(job_id) and self.store.request_states[job_id].has_pending_sentences()
+                    for job_id in self.store.active_request_ids
+                )
 
             await self._publish_state()
+            trim_idle = getattr(self.synthesizer, 'trim_idle', None)
+            if queue_idle and callable(trim_idle):
+                await trim_idle()
 
         self.store.worker_state = 'stopped'
         await self._publish_state()

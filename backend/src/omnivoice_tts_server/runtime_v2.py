@@ -500,10 +500,16 @@ class OmniVoiceSynthesizer:
     async def free_memory(self) -> dict[str, int | str | bool | None]:
         return await asyncio.to_thread(self._free_memory_sync)
 
-    async def render_batch(self, items: list[BatchSynthesisItem]) -> list[BatchSynthesisResult]:
+    async def render_batch(self, items: list[BatchSynthesisItem], *, trim_after: bool = True) -> list[BatchSynthesisResult]:
         if not items:
             return []
-        return await asyncio.to_thread(self._generate_batch_sync, items)
+        return await asyncio.to_thread(self._generate_batch_sync, items, trim_after=trim_after)
+
+    async def trim_idle(self) -> None:
+        """Release the CUDA cache once the queue has run empty (the queue calls this instead of a per-batch trim)."""
+        if self._model is None or not self.settings.cuda_memory_trim_after_batch:
+            return
+        await asyncio.to_thread(self._trim_cuda_cache_sync, collect_garbage=False)
 
     def _load_model_sync(self, model_id: str) -> int:
         start = time.perf_counter()
@@ -988,7 +994,7 @@ class OmniVoiceSynthesizer:
             except Exception:
                 pass
 
-    def _generate_batch_sync(self, items: list[BatchSynthesisItem]) -> list[BatchSynthesisResult]:
+    def _generate_batch_sync(self, items: list[BatchSynthesisItem], trim_after: bool = True) -> list[BatchSynthesisResult]:
         if self._model is None:
             raise RuntimeError('No model loaded. Call ensure_model before generation.')
 
@@ -1054,7 +1060,7 @@ class OmniVoiceSynthesizer:
                 )
             )
         del wavs
-        if self.settings.cuda_memory_trim_after_batch:
+        if trim_after and self.settings.cuda_memory_trim_after_batch:
             # Hot path: release the reserved pool only. A full gc.collect() walks the
             # ~700k tracked objects of the loaded stack (~215 ms on a 5900X) on every
             # batch while freeing no VRAM -- batch tensors die by refcount.

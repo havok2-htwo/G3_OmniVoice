@@ -11,5 +11,12 @@
     "audio_file": "sonjav2.wav",
     "ref_text": "Franz jagt im komplett verwahrlosten Taxi quer durch Bayern. Vorbei an dichten Wäldern, kleinen Dörfern und alten Bahnhöfen.",
     "seed": 9305
+  },
+  {
+    "voice_id": "voice_preset_sonjav3",
+    "name": "SonjaV3",
+    "audio_file": "sonjav3.wav",
+    "ref_text": "Franz jagt im komplett verwahrlosten Taxi quer durch Bayern.",
+    "seed": 9301
   }
 ]

@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - SonjaV3 voice preset (3.9 s reference, seed 9301)
+
+- A shorter Sonja clip ("Franz jagt im komplett verwahrlosten Taxi quer durch Bayern.", 3.88 s, 24 kHz mono) ships
+  as preset `SonjaV3` with its benchmarked seed 9301. Existing installs get it on the next start (presets are
+  seeded once per data dir); the default voice is unchanged.
+- Seed search without vLLM (its backend was unreachable): 25 seeds 9300-9324 on the 200 sentences of the SonjaV2
+  runs, batch 4, local Whisper, the server's WER with tolerance 2, in both the stock configuration and with
+  `packed_cfg` + `sdpa_prefer_cudnn`. 9301 was first in both (199/200 exact each, 0.05 % WER; 9305 had 195/194).
+  Confirmed on 100 fresh sentences: 99/100 exact in both configurations.
+
 ### Added - a stream's first sentence jumps into the running batch (`stream_first_preempt`, on)
 
 - A streaming request that arrives while a batch renders no longer waits for the batch. Its first sentence is queued

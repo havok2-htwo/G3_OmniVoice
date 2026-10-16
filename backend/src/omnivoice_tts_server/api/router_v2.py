@@ -63,6 +63,7 @@ from ..runtime_v2 import (
     OMNIVOICE_MODEL_ID,
     normalize_attention_implementation,
     normalize_runtime_device,
+    normalize_torch_dtype,
     query_runtime_devices,
 )
 from ..security import (
@@ -837,11 +838,10 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
     if payload.enable_flashinfer is not None:
         settings.enable_flashinfer = payload.enable_flashinfer
     if payload.torch_dtype is not None:
-        dtype_aliases = {'fp16': 'float16', 'bf16': 'bfloat16', 'fp32': 'float32', 'float8': 'fp8'}
-        requested_dtype = dtype_aliases.get(payload.torch_dtype.lower(), payload.torch_dtype.lower())
-        if requested_dtype not in {'float16', 'bfloat16', 'float32', 'fp8'}:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported torch dtype')
-        settings.torch_dtype = requested_dtype
+        try:
+            settings.torch_dtype = normalize_torch_dtype(payload.torch_dtype)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if payload.compile_model is not None:
         settings.compile_model = payload.compile_model
     if payload.compile_cudagraphs is not None:
@@ -919,7 +919,9 @@ async def list_runtime_devices(request: Request) -> RuntimeDeviceListResponse:
 @admin.get('/settings/presets', response_model=SettingsPresetListResponse)
 async def list_settings_presets(request: Request) -> SettingsPresetListResponse:
     data_dir = request.app.state.settings.data_dir
-    return SettingsPresetListResponse(presets=[SettingsPresetItem(**item) for item in _list_presets(data_dir)])
+    # Off the event loop: card matching for the two-card tier queries the CUDA devices.
+    items = await asyncio.to_thread(_list_presets, data_dir)
+    return SettingsPresetListResponse(presets=[SettingsPresetItem(**item) for item in items])
 
 
 @admin.put('/settings/presets/{name}', response_model=SettingsPresetItem)
@@ -934,7 +936,11 @@ async def save_settings_preset(request: Request, name: str, payload: SettingsPre
 
 @admin.delete('/settings/presets/{name}')
 async def delete_settings_preset(request: Request, name: str) -> dict[str, bool]:
-    if not _delete_preset(request.app.state.settings.data_dir, name):
+    try:
+        deleted = _delete_preset(request.app.state.settings.data_dir, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Preset not found')
     return {'ok': True}
 

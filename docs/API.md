@@ -385,7 +385,7 @@ DELETE /api/admin/api-keys/{key_id}
 
 ```http
 GET /api/admin/settings
-PATCH /api/admin/settings
+PUT /api/admin/settings
 ```
 
 Patch only the fields you want to change. Persisted runtime settings are stored
@@ -426,6 +426,67 @@ Common fields:
 
 `text_optimization_default` (`off` | `deterministic`) is used by public synthesis
 requests without their own `text_optimization` field.
+
+### Settings Presets
+
+```http
+GET    /api/admin/settings/presets
+PUT    /api/admin/settings/presets/{name}
+DELETE /api/admin/settings/presets/{name}
+```
+
+A preset is a named set of runtime/VRAM settings. Loading one in the admin panel
+only fills the settings draft; it takes effect through the normal
+`PUT /api/admin/settings`, so presets never bypass validation.
+
+`GET` lists the built-in GPU tiers first, in this order, then saved presets by name:
+
+| Name | Machine |
+| --- | --- |
+| `32GB VRAM` | RTX 5090, all G3 services on one card (whole-card peak <= 30 GB) |
+| `24GB VRAM` | RTX 4090, all G3 services on one card (whole-card peak <= 23 GB) |
+| `24+8 VRAM` | RTX 3090 (24 GB) + RTX 2070S (8 GB), OmniVoice on the 24 GB card |
+
+The number in front names the card OmniVoice runs on; OmniVoice has no `8+24 VRAM`
+tier. `24+8 VRAM` sets `preferred_device` to the CUDA card whose total memory is
+within ~2 GiB of 24 GB, because machines number their cards differently. If no card
+matches, `preferred_device` is left out and `note` says why. Single-card tiers never
+set `preferred_device`. The server sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` (unless the
+environment sets it), so `cuda:N` is `nvidia-smi` GPU N.
+
+```json
+{
+  "presets": [
+    {
+      "name": "24+8 VRAM",
+      "built_in": true,
+      "description": "3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte.",
+      "target_vram_gb": 24,
+      "note": null,
+      "created_at": null,
+      "values": { "preferred_device": "cuda:0", "torch_dtype": "bfloat16", "max_batch_size": 8, "vram_budget_mb": 7000 }
+    }
+  ]
+}
+```
+
+`PUT` body: `{ "values": { ... } }`. The response is the stored preset. Only these keys
+are kept, each validated and normalised exactly like `PUT /api/admin/settings`
+(`bf16` -> `bfloat16`, `CUDA:1` -> `cuda:1`); everything else (URLs, paths,
+voices, theme, unknown keys) is dropped, and `null` values are skipped:
+
+`preferred_device`, `attention_implementation`, `enable_flashinfer`, `torch_dtype`,
+`compile_model`, `compile_cudagraphs`, `cudagraph_skip_dynamic_graphs`,
+`cuda_memory_trim_after_batch`, `warmup_on_startup`, `max_parallel_requests`,
+`max_batch_size`, `batch_wait_ms`, `vram_budget_mb`, `max_input_chars`, `num_step`,
+`audio_chunk_duration`, `audio_chunk_threshold`.
+
+Names are trimmed (inner whitespace collapsed), at most 64 characters. Saved presets
+are written atomically to `data/settings_presets.json`.
+
+Errors: `400` for a built-in name (save or delete), an empty or too long name, an
+invalid value, or a preset without any preset key; `404` when deleting an unknown
+preset.
 
 ### Dashboard Snapshot And SSE
 

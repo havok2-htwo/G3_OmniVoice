@@ -360,6 +360,13 @@ class SettingsPresetItem(BaseModel):
     name: str
     values: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
+    # Built-in GPU tiers are read-only (saving or deleting under their name is a 400).
+    built_in: bool = False
+    description: str = ''
+    # Card size a two-card tier targets; preferred_device is picked by matching it.
+    target_vram_gb: int | None = None
+    # Set when no detected card matches target_vram_gb (preferred_device left out).
+    note: str | None = None
 
 
 class SettingsPresetListResponse(BaseModel):

@@ -61,7 +61,16 @@ function isRunActive(status: string | undefined): boolean {
   return !!status && !TERMINAL_RUN_STATUSES.includes(status);
 }
 
-type SettingsPreset = { name: string; values: Partial<ServerSettings>; created_at?: string | null };
+// Built-in GPU tiers ("32GB VRAM", ...) come first and are read-only; saved presets follow by name.
+type SettingsPreset = {
+  name: string;
+  values: Partial<ServerSettings>;
+  created_at?: string | null;
+  built_in?: boolean;
+  description?: string;
+  target_vram_gb?: number | null;
+  note?: string | null;
+};
 
 // Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
 const VRAM_BASE_MB = 3000;
@@ -398,6 +407,9 @@ export function AdminApp() {
   const [settingsDraft, setSettingsDraft] = useState<ServerSettings | null>(null);
   const [presets, setPresets] = useState<SettingsPreset[]>([]);
   const [presetName, setPresetName] = useState("");
+  const builtInPresets = presets.filter((preset) => preset.built_in);
+  const savedPresets = presets.filter((preset) => !preset.built_in);
+  const selectedPreset = presets.find((preset) => preset.name === presetName.trim()) ?? null;
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -986,17 +998,21 @@ export function AdminApp() {
   }
 
   function handleApplyPreset(name: string) {
-    setPresetName(name);
     const preset = presets.find((item) => item.name === name);
     if (!preset || !settingsDraft) return;
     // Load preset values into the draft only; the user reviews and clicks Save to apply.
     setSettingsDraft(applyOmniVoiceDefaults({ ...settingsDraft, ...preset.values } as ServerSettings));
-    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.`);
+    const note = preset.note ? ` Hinweis: ${preset.note}` : "";
+    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.${note}`);
   }
 
   async function handleSavePreset() {
     const name = presetName.trim();
     if (!adminKey || !settingsDraft || !name) return;
+    if (presets.some((preset) => preset.built_in && preset.name === name)) {
+      setError(`"${name}" ist ein eingebautes Preset; bitte unter einem anderen Namen speichern.`);
+      return;
+    }
     setError("");
     try {
       await apiFetch<SettingsPreset>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, {
@@ -1711,24 +1727,39 @@ export function AdminApp() {
           </div>
           <div className="button-row" style={{ flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
             <button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button>
-            <span className="pill" title="Benannte Parametersaetze: laden (in den Entwurf), speichern, loeschen.">Presets</span>
+            <span className="pill" title="Benannte Parametersaetze: auswaehlen, in den Entwurf laden, speichern, loeschen. GPU-Stufen sind eingebaut und schreibgeschuetzt.">Presets</span>
             <select
-              value={presets.some((preset) => preset.name === presetName) ? presetName : ""}
-              onChange={(event) => handleApplyPreset(event.target.value)}
-              title="Preset laden (Werte in den Entwurf uebernehmen, dann speichern)"
+              value={selectedPreset ? selectedPreset.name : ""}
+              onChange={(event) => setPresetName(event.target.value)}
+              title={selectedPreset?.description || "Preset auswaehlen"}
             >
-              <option value="">— Preset laden —</option>
-              {presets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+              <option value="">— Preset waehlen —</option>
+              {builtInPresets.length ? (
+                <optgroup label="GPU-Stufen (eingebaut)">
+                  {builtInPresets.map((preset) => <option key={preset.name} value={preset.name} title={preset.description}>{preset.name}</option>)}
+                </optgroup>
+              ) : null}
+              {savedPresets.length ? (
+                <optgroup label="Gespeichert">
+                  {savedPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+                </optgroup>
+              ) : null}
             </select>
+            <button className="link-chip" type="button" onClick={() => selectedPreset && handleApplyPreset(selectedPreset.name)} disabled={!selectedPreset} title="Werte in den Entwurf uebernehmen; angewendet wird erst mit Settings speichern">In Entwurf laden</button>
             <input
               value={presetName}
               onChange={(event) => setPresetName(event.target.value)}
               placeholder="Preset-Name"
               style={{ maxWidth: "170px" }}
             />
-            <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim()}>Als Preset speichern</button>
-            <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!presets.some((preset) => preset.name === presetName.trim())}>Preset loeschen</button>
+            <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim() || Boolean(selectedPreset?.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets sind schreibgeschuetzt" : "Runtime-/VRAM-Werte des Entwurfs als Preset speichern"}>Als Preset speichern</button>
+            <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || Boolean(selectedPreset.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets koennen nicht geloescht werden" : "Gespeichertes Preset loeschen"}>Preset loeschen</button>
+            {selectedPreset?.built_in ? <span className="pill" title={selectedPreset.description}>eingebaut</span> : null}
+            {selectedPreset?.note ? <span className="pill" title={selectedPreset.note}>keine passende GPU</span> : null}
           </div>
+          {selectedPreset?.description || selectedPreset?.note ? (
+            <p className="muted" style={{ margin: "4px 0 0" }}>{[selectedPreset.description, selectedPreset.note].filter(Boolean).join(" ")}</p>
+          ) : null}
         </section>
 
         <section className="widget span-6"><div className="widget-header"><h2>Benchmark</h2></div>

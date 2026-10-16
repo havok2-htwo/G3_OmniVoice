@@ -4,6 +4,29 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - built-in GPU tier presets
+
+- `GET /api/admin/settings/presets` lists three read-only built-in tiers first:
+  `32GB VRAM` (RTX 5090), `24GB VRAM` (RTX 4090) and `24+8 VRAM` (3090 + 2070S box,
+  OmniVoice on the 3090). The names are the same in every G3 service.
+  - `24+8 VRAM` sets `preferred_device` to the card whose total memory matches 24 GB
+    (within ~2 GiB), wherever that card sits. Without such a card the GPU is left
+    alone and the preset carries a `note`.
+  - The tier values are the current code defaults for now. Measured values per
+    machine replace them in a later step (`presets.BUILTIN_PRESETS`).
+  - Saving or deleting under a built-in name returns 400.
+- Saved presets now keep only an allowlist of runtime/VRAM keys (`PRESET_KEYS`:
+  device, dtype, attention, compile, batching, VRAM budget, `num_step`, audio
+  chunking). Each value is validated and normalised like `PUT /api/admin/settings`;
+  invalid values return 400. Before, any values were stored unchecked, including
+  URLs and paths from the settings draft. Stored presets are filtered the same way on
+  load, and the file is written atomically.
+- Admin panel: the preset menu groups "GPU-Stufen (eingebaut)" and "Gespeichert".
+  "In Entwurf laden" fills the settings draft, and save/delete are disabled for
+  built-in tiers. Description and card-match notes are shown below the menu.
+- The server sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` when the package is imported (an
+  explicit environment value wins), so `cuda:N` matches `nvidia-smi` GPU N.
+
 ### Changed - omnivoice 0.1.5 -> upstream master 08be0b4 (0.2.1 core), flex + FlashInfer
 
 - `omnivoice` is pinned to upstream commit `08be0b4` (2026-08-24) through its GitHub

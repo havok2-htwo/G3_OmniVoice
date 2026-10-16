@@ -117,6 +117,19 @@ def normalize_runtime_device(value: str | None) -> str:
     raise ValueError('Unsupported runtime device. Use cpu or cuda:<index>.')
 
 
+_TORCH_DTYPE_ALIASES = {'fp16': 'float16', 'bf16': 'bfloat16', 'fp32': 'float32', 'float8': 'fp8'}
+SUPPORTED_TORCH_DTYPES = ('float16', 'bfloat16', 'float32', 'fp8')
+
+
+def normalize_torch_dtype(value: str | None) -> str:
+    """Map a dtype setting (aliases like bf16 accepted) to one of SUPPORTED_TORCH_DTYPES."""
+    raw = (value or '').strip().lower()
+    dtype = _TORCH_DTYPE_ALIASES.get(raw, raw)
+    if dtype not in SUPPORTED_TORCH_DTYPES:
+        raise ValueError('Unsupported torch dtype')
+    return dtype
+
+
 def _cuda_index_for_device(device: str | None) -> int | None:
     normalized = normalize_runtime_device(device)
     if not normalized.startswith('cuda:'):

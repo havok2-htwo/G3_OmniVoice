@@ -157,9 +157,12 @@ an install that never saved settings picks these defaults up on its next start.
 
 ## Operator Features
 
-- **Settings presets** - save, load, and delete named parameter sets from the
-  admin panel (`GET/PUT/DELETE /api/admin/settings/presets`, persisted in
-  `data/settings_presets.json`).
+- **Settings presets** - read-only built-in GPU tiers (`32GB VRAM`, `24GB VRAM`,
+  `24+8 VRAM`) plus named runtime/VRAM parameter sets you save, load into the
+  settings draft, and delete from the admin panel
+  (`GET/PUT/DELETE /api/admin/settings/presets`, saved ones in
+  `data/settings_presets.json`). `24+8 VRAM` picks the 24 GB card as
+  `preferred_device`. See `docs/API.md` "Settings Presets".
 - **Audiobook chunking controls** - `audio_chunk_threshold` and
   `audio_chunk_duration` accept values up to 3600s, so internal chunking can be
   effectively disabled for continuous prosody on long, single-pass narration.

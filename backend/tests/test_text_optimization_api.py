@@ -32,7 +32,7 @@ SPOKEN_GERMAN = (
 def sonja_profile() -> VoiceProfileRecord:
     return VoiceProfileRecord(
         voice_id='voice_sonja',
-        name='Sonja',
+        name='SonjaV2',
         source='upload',
         created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
         audio_bytes=b'RIFF',

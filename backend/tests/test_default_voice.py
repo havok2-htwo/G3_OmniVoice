@@ -22,7 +22,7 @@ def make_queue(tmp_path, *profiles: VoiceProfileRecord) -> tuple[QueueService, I
 def sonja_profile(ref_text: str = 'Hallo, ich bin Sonja.') -> VoiceProfileRecord:
     return VoiceProfileRecord(
         voice_id='voice_sonja',
-        name='Sonja',
+        name='SonjaV2',
         source='upload',
         created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
         audio_bytes=b'RIFF',
@@ -31,10 +31,11 @@ def sonja_profile(ref_text: str = 'Hallo, ich bin Sonja.') -> VoiceProfileRecord
     )
 
 
-def test_defaults_are_base_with_sonja(tmp_path) -> None:
+def test_defaults_are_base_with_sonja_v2(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path)
     assert settings.active_model == 'k2-fsa/OmniVoice-Base'
-    assert settings.default_voice == 'Sonja'
+    assert settings.default_voice == 'SonjaV2'
+    assert settings.num_step == 20
     assert settings.torch_dtype == 'bfloat16'
     assert (settings.max_parallel_requests, settings.max_batch_size) == (8, 8)
     assert settings.vram_budget_mb == 7000
@@ -86,7 +87,29 @@ def test_built_in_voice_with_explicit_base_model_is_still_rejected(tmp_path) -> 
 def test_default_voice_matches_profile_name_ignoring_case(tmp_path) -> None:
     lowercase = sonja_profile()
     lowercase.voice_id = 'voice_own'
-    lowercase.name = 'sonja'
+    lowercase.name = 'sonjav2'
     queue, _ = make_queue(tmp_path, lowercase)
     job = asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.')))
     assert job.request.voice == 'voice_own'
+
+
+def test_voice_seed_applies_when_the_request_sends_none(tmp_path) -> None:
+    profile = sonja_profile()
+    profile.seed = 4711
+    queue, _ = make_queue(tmp_path, profile)
+    job = asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.')))
+    assert job.request.seed == 4711
+
+
+def test_explicit_request_seed_wins_over_the_voice_seed(tmp_path) -> None:
+    profile = sonja_profile()
+    profile.seed = 4711
+    queue, _ = make_queue(tmp_path, profile)
+    job = asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.', seed=12)))
+    assert job.request.seed == 12
+
+
+def test_voice_without_seed_leaves_the_request_random(tmp_path) -> None:
+    queue, _ = make_queue(tmp_path, sonja_profile())
+    job = asyncio.run(queue.submit(SpeechRequest(input='Guten Tag.')))
+    assert job.request.seed is None

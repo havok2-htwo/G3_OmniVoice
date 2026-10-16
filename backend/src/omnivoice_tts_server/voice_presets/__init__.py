@@ -57,6 +57,7 @@ def seed_voice_presets(store: InMemoryStore, data_dir: Path) -> list[str]:
             filename=preset['audio_file'],
             ref_text=preset['ref_text'],
             consent=True,
+            seed=preset.get('seed'),
         )
         taken_names.add(preset['name'].casefold())
         added.append(voice_id)

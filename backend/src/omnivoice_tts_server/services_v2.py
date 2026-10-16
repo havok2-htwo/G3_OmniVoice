@@ -151,6 +151,7 @@ class QueueService:
                 'Split it into smaller requests.'
             )
         self._apply_default_voice(request)
+        self._apply_voice_seed(request)
         self._validate_request_voice_model(request)
         spoken_text, text_optimization = await self._optimize_spoken_text(request, text, owner_scope)
         request = self._drop_upstream_normalize_after_optimization(request, text_optimization)
@@ -1037,6 +1038,14 @@ class QueueService:
         )
         if profile is not None:
             request.voice = profile.voice_id
+
+    def _apply_voice_seed(self, request: SpeechRequest) -> None:
+        # A voice profile may carry its benchmarked seed; it applies only when the request sends no seed.
+        if request.seed is not None:
+            return
+        profile = self._voice_profile_for_request(request)
+        if profile is not None and profile.seed is not None:
+            request.seed = int(profile.seed)
 
     def _validate_request_voice_model(self, request: SpeechRequest) -> None:
         task_type = self._task_type_for_request(request)

@@ -96,7 +96,7 @@ _CURRENT_DEFAULTS: dict[str, Any] = {
     'batch_wait_ms': 0,
     'vram_budget_mb': 7000,
     'max_input_chars': 25000,
-    'num_step': 18,
+    'num_step': 20,
     'audio_chunk_duration': 30.1,
     'audio_chunk_threshold': 30.0,
 }

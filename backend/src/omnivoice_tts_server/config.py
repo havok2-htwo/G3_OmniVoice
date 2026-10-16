@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     finetune_audio_tokenizer: str = 'eustlb/higgs-audio-v2-tokenizer'
     active_model: str = 'k2-fsa/OmniVoice-Base'
     # Base clones a saved voice profile; this one must exist (matched by name or voice_id).
-    default_voice: str = 'Sonja'
+    default_voice: str = 'SonjaV2'
     supported_models: list[str] = Field(
         default_factory=lambda: [
             'k2-fsa/OmniVoice-AutoVoice',
@@ -134,7 +134,7 @@ class Settings(BaseSettings):
     max_input_chars: int = 25000       # hard reject single requests above this (abuse guard)
     stream_chunk_ms: int = 140
     stream_prebuffer_ms: int = 0
-    num_step: int | None = Field(default=18, ge=1, le=256)
+    num_step: int | None = Field(default=20, ge=1, le=256)
     guidance_scale: float | None = Field(default=2.0, ge=0.0, le=20.0)
     duration: float | None = Field(default=None, ge=0.1, le=120.0)
     t_shift: float | None = Field(default=0.1, ge=0.0, le=10.0)

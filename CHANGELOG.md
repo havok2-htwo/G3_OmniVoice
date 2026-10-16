@@ -4,6 +4,22 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - SonjaV2 default voice and per-voice seeds
+
+- New shipped clone preset `SonjaV2` (`voice_presets/sonjav2.wav`, 8.2 s, transcript =
+  the first two sentences of `Sonja`), the default voice of fresh installs
+  (`default_voice = "SonjaV2"`). Upstream recommends 3-10 s of reference audio; every
+  batch item carries the reference, so the shorter prompt cuts compute and about half of
+  the per-item VRAM (~210 MB per item with the 14.4 s `Sonja`, measured on the RTX 5090).
+  `Sonja` stays shipped. Existing installs get `SonjaV2` added on their next start; their
+  saved `default_voice` is not changed.
+- Voice profiles have an optional `seed` (stored in `voice_profiles.json`, listed by the
+  voice catalog with details). A request for that voice without its own seed uses it; an
+  explicit request seed always wins. Presets in `voice_presets/presets.json` can ship it.
+  `SonjaV2` ships `seed: null` until the WER seed benchmark has picked one. Note: the seed
+  is applied once per batch, so the best seed depends on `max_batch_size` and `num_step`.
+- `num_step` default 18 -> 20.
+
 ### Added - built-in GPU tier presets
 
 - `GET /api/admin/settings/presets` lists three read-only built-in tiers first:

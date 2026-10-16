@@ -88,6 +88,8 @@ class VoiceProfileRecord:
     filename: str | None = None
     ref_text: str | None = None
     consent: bool = False
+    # Seed used when a request for this voice sends none (the WER-benchmarked seed of a shipped preset).
+    seed: int | None = None
 
 
 @dataclass
@@ -516,7 +518,8 @@ class InMemoryStore:
                             content_type=item.get("content_type", "audio/wav"),
                             filename=item.get("filename"),
                             ref_text=item.get("ref_text"),
-                            consent=item.get("consent", False)
+                            consent=item.get("consent", False),
+                            seed=item.get("seed"),
                         )
 
     def save_voices(self, data_dir: Path) -> None:
@@ -538,7 +541,8 @@ class InMemoryStore:
                     "content_type": record.content_type,
                     "filename": record.filename,
                     "ref_text": record.ref_text,
-                    "consent": record.consent
+                    "consent": record.consent,
+                    "seed": record.seed,
                 }
             _json_dump(voices_path, payload)
 

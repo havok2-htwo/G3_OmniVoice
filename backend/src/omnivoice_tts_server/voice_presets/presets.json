@@ -4,5 +4,12 @@
     "name": "Sonja",
     "audio_file": "sonja.wav",
     "ref_text": "Franz jagt im komplett verwahrlosten Taxi quer durch Bayern. Vorbei an dichten Wäldern, kleinen Dörfern und alten Bahnhöfen. Zwölf Boxkämpfer jagen Victor quer über den Sylter Deich, während kalter Wind weht."
+  },
+  {
+    "voice_id": "voice_preset_sonjav2",
+    "name": "SonjaV2",
+    "audio_file": "sonjav2.wav",
+    "ref_text": "Franz jagt im komplett verwahrlosten Taxi quer durch Bayern. Vorbei an dichten Wäldern, kleinen Dörfern und alten Bahnhöfen.",
+    "seed": null
   }
 ]

@@ -84,7 +84,7 @@ function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; char
 }
 
 const OMNIVOICE_DEFAULTS = {
-  num_step: 18,
+  num_step: 20,
   guidance_scale: 2.0,
   t_shift: 0.1,
   denoise: true,

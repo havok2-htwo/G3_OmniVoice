@@ -317,6 +317,7 @@ def _voice_items(request: Request, *, include_details: bool = False) -> list[Voi
             ref_text=voice.ref_text if include_details else None,
             filename=voice.filename if include_details else None,
             has_audio=bool(voice.audio_bytes) if include_details else False,
+            seed=voice.seed if include_details else None,
         )
         for voice in sorted(store.voice_profiles.values(), key=lambda item: item.created_at, reverse=True)
     ]

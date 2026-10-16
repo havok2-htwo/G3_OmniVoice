@@ -182,6 +182,7 @@ class VoiceProfileListItem(BaseModel):
     ref_text: str | None = None
     filename: str | None = None
     has_audio: bool = False
+    seed: int | None = None
 
 
 class VoiceCatalogResponse(BaseModel):

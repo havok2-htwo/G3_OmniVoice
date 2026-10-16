@@ -140,16 +140,19 @@ Fresh installs start with these values (`backend/src/omnivoice_tts_server/config
 Values saved in the admin panel (`data/runtime_settings.json`) take precedence;
 an install that never saved settings picks these defaults up on its next start.
 
-- Model `k2-fsa/OmniVoice-Base` with default voice `Sonja`. The `Sonja` clone
-  profile ships with the server (`backend/src/omnivoice_tts_server/voice_presets/`)
-  and is added to the voice store on first start; requests without a voice use it,
-  and `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
-  (`data/voice_presets_seeded.json`).
+- Model `k2-fsa/OmniVoice-Base` with default voice `SonjaV2`. The `SonjaV2` (8.2 s,
+  the first two sentences of `Sonja`) and `Sonja` (14.4 s) clone profiles ship with
+  the server (`backend/src/omnivoice_tts_server/voice_presets/`) and are added to the
+  voice store on start when missing; requests without a voice use `SonjaV2`, and
+  `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
+  (`data/voice_presets_seeded.json`). A voice profile can carry a `seed` that applies
+  to requests for that voice without their own seed (the shipped value comes from the
+  WER seed benchmark; `null` means random).
 - `bfloat16`, `sdpa` attention, `torch.compile` on, CUDA cache trim after each batch,
   warmup on start
 - Queue limit 32, 8 active requests, batch size 8, batch wait 0 ms,
   VRAM budget 7000 MB, max 25000 input chars, stream prebuffer 0 ms
-- `num_step` 18, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
+- `num_step` 20, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
   class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
   preprocessing + output postprocessing on, sentence chunking on
 - WER: TTS wave 4, ASR concurrency 16, vLLM model `Qwen/Qwen3.6-35B-A3B-FP8`

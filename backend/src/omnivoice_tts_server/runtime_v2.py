@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Settings
 from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
-from . import decode_overlap, row_seeds
+from . import decode_overlap, fast_silence, row_seeds
 from .domain.state import InMemoryStore, VoiceProfileRecord
 from .voice_design import DEFAULT_VOICE_DESIGN_INSTRUCT, normalize_voice_design_instruct
 
@@ -466,6 +466,8 @@ class OmniVoiceSynthesizer:
     def _load_model_sync(self, model_id: str) -> int:
         start = time.perf_counter()
         torch, omnivoice_cls = self._load_runtime_dependencies()
+        # Same samples as OmniVoice's pydub silence trimming at a fraction of the CPU time (self-checked on install).
+        fast_silence.install()
         model_source, extra_kwargs = self._resolve_model_source(model_id)
         if self._model is not None and self._loaded_model_id != model_id:
             self._release_model()

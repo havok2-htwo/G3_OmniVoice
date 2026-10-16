@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - silence trimming in numpy, same samples as pydub
+
+- OmniVoice trims every generated item (and every voice-clone reference) with pydub, which measures one RMS window
+  per 10 ms step in a Python loop: ~7 ms of CPU per 7 s item, holding the GIL. `omnivoice_tts_server/fast_silence.py`
+  is a line-by-line numpy port that keeps pydub's rounding, zero padding and integer RMS, and returns the same samples
+  (0 differences over 916 real-voice and edge cases; parity tests in `tests/test_fast_silence.py`). It checks itself
+  against pydub when the model loads and stays off if they differ.
+- Together with the decode overlap, measured on the RTX 5090 with the other services running, audio bit-identical:
+  batch 1 0.228 -> 0.222 s, batch 4 0.653 -> 0.632 s, batch 8 1.259 -> 1.218 s (-3.3 %).
+
 ### Changed - codec decode overlaps the post-processing of the previous item
 
 - After the diffusion loop, `generate()` decoded each item, waited for its copy to the host and only then removed

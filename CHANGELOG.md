@@ -4,6 +4,17 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - WER benchmark per voice, best seed per voice, cancel
+
+- The WER benchmark has a voice selector (default: the voice from the settings). An unknown voice is rejected with 400
+  instead of failing every sentence.
+- Each custom voice has a "bester Seed" field (`PATCH /api/admin/voices/{id}`, `seed` may be null). A request without
+  a seed already uses the voice's seed; a WER run without a seed now uses it too, and its results carry the seed that
+  actually ran.
+- `POST /api/admin/wer-benchmarks/runs/{run_id}/cancel` stops a running benchmark: its task ends, its queued and
+  running synthesis jobs are cancelled, and the run finishes with status `cancelled` and the results so far.
+- The run card shows the voice and a cancel button while the run is active.
+
 ### Changed - packed CFG and cuDNN attention on by default
 
 - The listening test passed (SonjaV2, Ero2, SonjaV3; all variants clean), so `packed_cfg` and `sdpa_prefer_cudnn`

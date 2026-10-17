@@ -9,6 +9,7 @@ export interface VoiceItem {
   ref_text?: string | null;
   filename?: string | null;
   has_audio?: boolean;
+  seed?: number | null;
 }
 
 export interface ModelInfo {
@@ -364,6 +365,7 @@ export interface WerBenchmarkRunResponse {
   sentence_cache_hit: boolean;
   sentence_cache_key?: string | null;
   exclusive: boolean;
+  voice?: string | null;
   summary: {
     total: number;
     completed: number;

@@ -35,6 +35,7 @@ import {
   type TextOptimizationMode,
   type TextOptimizeResponse,
   type VllmModelsResponse,
+  type VoiceItem,
   type WerBenchmarkRunResponse,
 } from "../shared/api";
 import {
@@ -241,6 +242,9 @@ const ADMIN_HELP = {
   werTimeout: "Maximale Wartezeit pro TTS+Whisper Sample. Hilft, haengende Einzelrequests abzubrechen.",
   werSeed: "TTS-Seed fuer den WER-Run. Einzelwert oder kommagetrennte Liste wie 8888,8890,2912. Bei einer Liste wird Seed range ignoriert.",
   werSeedRange: "Wenn groesser 0, testet der WER-Benchmark alle Seeds von Seed bis Seed + Range. Wird ignoriert, wenn Seed eine kommagetrennte Liste ist.",
+  werVoice: "Stimme, mit der der WER-Benchmark rechnet. Standard = Stimme aus den Einstellungen. Nur eigene Stimmen (Klon-Profile) stehen zur Wahl.",
+  werCancel: "Stoppt den laufenden WER-Benchmark: laufende und wartende TTS-Jobs werden abgebrochen, der Lauf endet mit Status cancelled. Bereits fertige Ergebnisse bleiben sichtbar.",
+  voiceSeed: "Bester Seed dieser Stimme (aus dem WER-Benchmark). Ohne eigenen Seed im Request und ohne Seed im WER-Benchmark nutzt OmniVoice diesen Wert. Leer = kein Seed, dann zufaellig.",
   werPrompt: "Optionaler eigener vLLM Prompt. Er sollte ein JSON-Array von Saetzen erzeugen.",
 };
 
@@ -470,6 +474,9 @@ export function AdminApp() {
   const [werPrompt, setWerPrompt] = useState("");
   const [werSeed, setWerSeed] = useState("");
   const [werSeedRange, setWerSeedRange] = useState(0);
+  const [werVoice, setWerVoice] = useState("");
+  const [werCancelling, setWerCancelling] = useState("");
+  const [voiceSeedEdits, setVoiceSeedEdits] = useState<Record<string, string>>({});
   const [modelOpsBusy, setModelOpsBusy] = useState(false);
   const [modelDownloadAction, setModelDownloadAction] = useState<{ kind: "refresh" | "download" | "delete"; modelId: string } | null>(null);
   const [memoryCleanupBusy, setMemoryCleanupBusy] = useState(false);
@@ -1278,7 +1285,7 @@ export function AdminApp() {
           exclusive: true,
           request: {
             model: settingsDraft.default_model,
-            voice: taskType === "VoiceDesign" ? null : settingsDraft.default_voice,
+            voice: taskType === "VoiceDesign" ? null : (werVoice || settingsDraft.default_voice),
             task_type: taskType,
             language: "Auto",
             instructions: taskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickInstructions,
@@ -1292,6 +1299,48 @@ export function AdminApp() {
       setError(werError instanceof Error ? werError.message : "WER-Benchmark konnte nicht gestartet werden.");
     } finally {
       setWerBenchmarkBusy(false);
+    }
+  }
+
+  async function handleCancelWerBenchmark(runId: string) {
+    if (!adminKey) return;
+    setError("");
+    setWerCancelling(runId);
+    try {
+      await apiFetch<WerBenchmarkRunResponse>(`/api/admin/wer-benchmarks/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", adminKey });
+      setMessage("WER-Benchmark abgebrochen.");
+      await loadWerBenchmarks(adminKey);
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "WER-Benchmark konnte nicht abgebrochen werden.");
+    } finally {
+      setWerCancelling("");
+    }
+  }
+
+  async function handleSaveVoiceSeed(voice: VoiceItem) {
+    if (!adminKey) return;
+    const raw = (voiceSeedEdits[voice.voice_id] ?? String(voice.seed ?? "")).trim();
+    let seed: number | null = null;
+    if (raw !== "") {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2147483647) {
+        setError("Seed muss eine ganze Zahl zwischen 0 und 2147483647 sein.");
+        return;
+      }
+      seed = parsed;
+    }
+    setError("");
+    try {
+      await apiFetch(`/api/admin/voices/${encodeURIComponent(voice.voice_id)}`, { method: "PATCH", adminKey, body: { seed } });
+      setVoiceSeedEdits((current) => {
+        const next = { ...current };
+        delete next[voice.voice_id];
+        return next;
+      });
+      setMessage(seed === null ? `Seed fuer ${voice.name} entfernt.` : `Bester Seed fuer ${voice.name}: ${seed}.`);
+      await loadSnapshot(adminKey);
+    } catch (seedError) {
+      setError(seedError instanceof Error ? seedError.message : "Seed konnte nicht gespeichert werden.");
     }
   }
 
@@ -1835,7 +1884,11 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.werWords}>Max words<input type="number" min="1" max="120" value={werMaxWords} onChange={(event) => setWerMaxWords(Number(event.target.value) || 1)} /></label>
             <label className="with-help" title={ADMIN_HELP.werTolerance}>Tolerance<input type="number" min="0" max="8" value={werTolerance} onChange={(event) => setWerTolerance(Number(event.target.value) || 0)} /></label>
             <label className="with-help" title={ADMIN_HELP.werTimeout}>Timeout sec<input type="number" min="1" max="3600" value={werTimeout} onChange={(event) => setWerTimeout(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer, 8888 oder 8888,8890,2912" /></label>
+            <label className="with-help" title={ADMIN_HELP.werVoice}>Stimme<select value={werVoice} onChange={(event) => setWerVoice(event.target.value)}>
+              <option value="">Standard-Stimme aus den Einstellungen</option>
+              {customVoices.map((voice) => <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{voice.seed != null ? ` (bester Seed ${voice.seed})` : " (ohne Seed)"}</option>)}
+            </select></label>
+            <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer = bester Seed der Stimme, 8888 oder 8888,8890,2912" /></label>
             <label className="with-help" title={ADMIN_HELP.werSeedRange}>Seed range<input type="number" min="0" max="1024" value={werSeedRange} onChange={(event) => setWerSeedRange(Number(event.target.value) || 0)} /></label>
           </div>
           <label className="with-help" title={ADMIN_HELP.werPrompt}>Optionaler vLLM Prompt<textarea value={werPrompt} onChange={(event) => setWerPrompt(event.target.value)} placeholder="Leer lassen fuer den eingebauten JSON-Satzgenerator." /></label>
@@ -1854,7 +1907,15 @@ export function AdminApp() {
                   <span className="pill">worst {formatPercent(run.summary.wer_max)}</span>
                   <span className="pill">exact {formatPercent(run.summary.exact_rate)}</span>
                   <span className={`pill ${run.sentence_cache_hit ? "active" : ""}`}>{run.sentence_cache_hit ? "cached sentences" : "new sentences"}</span>
+                  <span className="pill">Stimme: {voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice ?? "Standard"}</span>
                 </div>
+                {isRunActive(run.status) ? (
+                  <div className="button-row">
+                    <button className="ghost-button danger-button" type="button" disabled={werCancelling === run.run_id} onClick={() => void handleCancelWerBenchmark(run.run_id)} title={ADMIN_HELP.werCancel}>
+                      {werCancelling === run.run_id ? "Breche ab..." : "WER-Benchmark abbrechen"}
+                    </button>
+                  </div>
+                ) : null}
                 {run.seed_leaderboard.length > 1 ? (
                   <div className="table-wrap wer-leaderboard-wrap">
                     <table className="downloads-table wer-leaderboard-table">
@@ -2021,6 +2082,19 @@ export function AdminApp() {
                 <div className="voice-ref-text">
                   <span>Referenztext</span>
                   <p>{voice.ref_text || "-"}</p>
+                </div>
+                <div className="voice-seed-row">
+                  <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed
+                    <input
+                      type="number"
+                      min="0"
+                      max="2147483647"
+                      placeholder="kein Seed"
+                      value={voiceSeedEdits[voice.voice_id] ?? (voice.seed ?? "")}
+                      onChange={(event) => setVoiceSeedEdits((current) => ({ ...current, [voice.voice_id]: event.target.value }))}
+                    />
+                  </label>
+                  <button className="secondary-button" type="button" onClick={() => void handleSaveVoiceSeed(voice)}>Seed speichern</button>
                 </div>
                 {voiceAudioUrls[voice.voice_id] ? <audio controls src={voiceAudioUrls[voice.voice_id]} /> : null}
               </article>

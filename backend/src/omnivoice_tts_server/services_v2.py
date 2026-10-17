@@ -1857,6 +1857,48 @@ class WerBenchmarkService:
         self.transcription_service = transcription_service
         self.events = events
         self.settings = settings
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
+
+    def best_seed_for_voice(self, voice_name: str | None) -> int | None:
+        """The seed saved on the voice (its benchmarked best), or None. An unknown or empty voice has none."""
+        name = (voice_name or self.settings.default_voice or '').strip()
+        if not name:
+            return None
+        lowered = name.casefold()
+        profile = next(
+            (p for p in self.store.voice_profiles.values() if name in (p.voice_id, p.name)),
+            None,
+        ) or next(
+            (p for p in self.store.voice_profiles.values() if lowered in (p.voice_id.casefold(), str(p.name or '').casefold())),
+            None,
+        )
+        return profile.seed if profile is not None else None
+
+    async def cancel_run(self, run_id: str) -> WerBenchmarkRunResponse:
+        """Stop a running benchmark: end its task and cancel its queued and running synthesis jobs."""
+        run = self.store.wer_benchmark_runs.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run['status'] != 'running':
+            return self._to_response(run)
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+        for job in list(self.store.jobs.values()):
+            if job.owner_scope != 'wer-benchmark' or job.status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
+                continue
+            try:
+                await self.queue_service.cancel(job.job_id)
+            except Exception:
+                pass
+        if task is not None:
+            # A task cancelled before it started never runs its own cleanup, so wait briefly and finish here.
+            await asyncio.wait({task}, timeout=15)
+        if run['status'] == 'running':
+            run['status'] = 'cancelled'
+            run['completed_at'] = utcnow()
+        await self.events.publish('dashboard.snapshot', {'reason': 'wer_benchmark.cancelled', 'run_id': run_id})
+        return self._to_response(run)
 
     async def create_run(self, payload: WerBenchmarkCreateRequest) -> WerBenchmarkRunResponse:
         run_id = f'wer_{uuid.uuid4().hex[:10]}'
@@ -1883,6 +1925,7 @@ class WerBenchmarkService:
             'sentence_cache_hit': False,
             'sentence_cache_key': None,
             'exclusive': payload.exclusive,
+            'voice': payload.request.voice,
             'results': [],
             'error_message': None,
         }
@@ -1894,7 +1937,7 @@ class WerBenchmarkService:
         self.store.wer_benchmark_runs.clear()
         self.store.wer_benchmark_runs[run_id] = run
         await self.events.publish('dashboard.snapshot', {'reason': 'wer_benchmark.started', 'run_id': run_id})
-        spawn_tracked_task(self.store, self._execute_run(run, payload), label=f'wer:{run_id}')
+        self._tasks[run_id] = spawn_tracked_task(self.store, self._execute_run(run, payload), label=f'wer:{run_id}')
         return self._to_response(run)
 
     async def list_runs(self) -> list[WerBenchmarkRunResponse]:
@@ -1911,11 +1954,14 @@ class WerBenchmarkService:
             else:
                 await self._execute_payload(run, payload)
             run['status'] = 'completed'
+        except asyncio.CancelledError:
+            run['status'] = 'cancelled'
         except Exception as exc:
             run['status'] = 'failed'
             run['error_message'] = str(exc)
         finally:
             run['completed_at'] = utcnow()
+            self._tasks.pop(run['run_id'], None)
             await self.events.publish('dashboard.snapshot', {'reason': 'wer_benchmark.completed', 'run_id': run['run_id']})
 
     async def _execute_payload(self, run: dict[str, Any], payload: WerBenchmarkCreateRequest) -> None:
@@ -1929,7 +1975,9 @@ class WerBenchmarkService:
         wave_size = max(1, int(payload.concurrency))
         transcription_concurrency = max(1, int(payload.transcription_concurrency))
 
-        for seed in seed_values:
+        for requested_seed in seed_values:
+            # No seed in the benchmark means the voice's saved best seed, the same seed a request without one gets.
+            seed = requested_seed if requested_seed is not None else self.best_seed_for_voice(payload.request.voice)
             syntheses: list[dict[str, Any]] = []
 
             # Keep TTS batching honest: submit a whole wave together, wait for that wave's audio,
@@ -2556,6 +2604,7 @@ class WerBenchmarkService:
             sentence_cache_hit=bool(run.get('sentence_cache_hit', False)),
             sentence_cache_key=run.get('sentence_cache_key'),
             exclusive=run.get('exclusive', True),
+            voice=run.get('voice'),
             summary=self._summary(results, total_per_seed * seed_count),
             seed_leaderboard=self._seed_leaderboard(results, total_per_seed),
             results=results,

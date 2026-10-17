@@ -185,6 +185,12 @@ class VoiceProfileListItem(BaseModel):
     seed: int | None = None
 
 
+class VoiceProfilePatchRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    # The seed a request for this voice uses when it sends none (the benchmarked best seed). null clears it.
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
+
 class VoiceCatalogResponse(BaseModel):
     voices: list[VoiceProfileListItem] = Field(default_factory=list)
 
@@ -613,6 +619,7 @@ class WerBenchmarkRunResponse(BaseModel):
     sentence_cache_hit: bool = False
     sentence_cache_key: str | None = None
     exclusive: bool
+    voice: str | None = None
     summary: WerBenchmarkSummary
     seed_leaderboard: list[WerBenchmarkSeedSummary] = Field(default_factory=list)
     results: list[WerBenchmarkItemResult] = Field(default_factory=list)

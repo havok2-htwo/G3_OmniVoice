@@ -51,6 +51,7 @@ from ..domain.models import (
     TextOptimizeResponse,
     TranscriptionResponse,
     VoiceCatalogResponse,
+    VoiceProfilePatchRequest,
     VoiceProfileCreateResponse,
     VoiceProfileListItem,
     VllmModelsResponse,
@@ -1150,7 +1151,24 @@ async def admin_list_benchmarks(request: Request) -> list[BenchmarkRunResponse]:
 @admin.post('/wer-benchmarks/runs', response_model=WerBenchmarkRunResponse)
 async def admin_create_wer_benchmark(request: Request, payload: WerBenchmarkCreateRequest) -> WerBenchmarkRunResponse:
     service: WerBenchmarkService = request.app.state.wer_benchmark_service
+    voice = (payload.request.voice or '').strip()
+    if voice:
+        store = request.app.state.store
+        known = {p.voice_id.casefold() for p in store.voice_profiles.values()}
+        known |= {p.name.casefold() for p in store.voice_profiles.values() if p.name}
+        known |= {name.casefold() for name in request.app.state.settings.built_in_voices}
+        if voice.casefold() not in known:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f'Voice {voice!r} not found.')
     return await service.create_run(payload)
+
+
+@admin.post('/wer-benchmarks/runs/{run_id}/cancel', response_model=WerBenchmarkRunResponse)
+async def admin_cancel_wer_benchmark(request: Request, run_id: str) -> WerBenchmarkRunResponse:
+    service: WerBenchmarkService = request.app.state.wer_benchmark_service
+    try:
+        return await service.cancel_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='WER run not found') from exc
 
 
 @admin.get('/wer-benchmarks/runs', response_model=list[WerBenchmarkRunResponse])
@@ -1229,6 +1247,24 @@ def _transcode_to_wav(raw: bytes) -> bytes:
     out = io.BytesIO()
     sf.write(out, audio.astype(np.float32), sr, format='WAV', subtype='PCM_16')
     return out.getvalue()
+
+
+@admin.patch('/voices/{voice_id}', response_model=VoiceProfileListItem)
+async def update_voice_profile(request: Request, voice_id: str, payload: VoiceProfilePatchRequest) -> VoiceProfileListItem:
+    store = request.app.state.store
+    voice = store.voice_profiles.get(voice_id)
+    if voice is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Voice not found')
+    if 'name' in payload.model_fields_set and payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Name must not be empty.')
+        voice.name = name
+    if 'seed' in payload.model_fields_set:
+        voice.seed = payload.seed
+    store.save_voices(request.app.state.settings.data_dir)
+    await request.app.state.events.publish('dashboard.snapshot', {'reason': 'voice.updated'})
+    return next(item for item in _voice_items(request, include_details=True) if item.voice_id == voice_id)
 
 
 @admin.delete('/voices/{voice_id}')

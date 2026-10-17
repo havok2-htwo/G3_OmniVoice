@@ -123,6 +123,7 @@ export interface DashboardSnapshot {
     queue_wait_ms_avg?: number | null;
     job_wall_ms_avg?: number | null;
     realtime_x_avg?: number | null;
+    realtime_x_live?: number | null;
     jobs_total: number;
     audio_seconds_total: number;
     gpu_name: string;

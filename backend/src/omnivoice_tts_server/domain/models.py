@@ -633,6 +633,8 @@ class DashboardOverview(BaseModel):
     worker_state: str
     ttfa_ms_avg: float | None = None
     queue_wait_ms_avg: float | None = None
+    # Audio seconds delivered per wall second over the last 30 s (0 when idle); sampled like the GPU line.
+    realtime_x_live: float = 0.0
     job_wall_ms_avg: float | None = None
     realtime_x_avg: float | None = None
     jobs_total: int

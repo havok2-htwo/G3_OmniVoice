@@ -1071,6 +1071,7 @@ class QueueService:
         if job.api_key_id:
             self.store.record_api_key_usage(job.api_key_id, duration_ms / 1000.0)
         self.store.completed_job_metrics.append(job.metrics.copy())
+        self.store.audio_output_events.append((time.monotonic(), duration_ms / 1000.0))
 
         self.store.request_states.pop(job.job_id, None)
         if job.job_id in self.store.active_request_ids:

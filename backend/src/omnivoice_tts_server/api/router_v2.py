@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -58,7 +59,7 @@ from ..domain.models import (
     WerBenchmarkCreateRequest,
     WerBenchmarkRunResponse,
 )
-from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, new_id, utcnow
+from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, live_throughput_x, new_id, utcnow
 from ..runtime_v2 import (
     DEFAULT_VOICE_DESIGN_INSTRUCT,
     OMNIVOICE_MODEL_ID,
@@ -684,6 +685,7 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
         queue_wait_ms_avg=stats.rolling.queue_wait_ms_avg,
         job_wall_ms_avg=stats.rolling.job_wall_ms_avg,
         realtime_x_avg=stats.rolling.realtime_x_avg,
+        realtime_x_live=live_throughput_x(store.audio_output_events, time.monotonic()),
         jobs_total=stats.global_.jobs_total,
         audio_seconds_total=stats.global_.audio_seconds_total,
         gpu_name=gpu.name,

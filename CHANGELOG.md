@@ -4,6 +4,12 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - the dashboard's realtime line is a live throughput
+
+- The line under "Realtime" was the average over the last completed jobs, so it stayed flat between jobs. It now
+  shows the audio delivered per wall second over the last 30 s ("Durchsatz 30 s"), sampled on every dashboard update
+  like the GPU line, and falls to 0 when idle. The status pill keeps the job average.
+
 ### Added - WER benchmark per voice, best seed per voice, cancel
 
 - The WER benchmark has a voice selector (default: the voice from the settings). An unknown voice is rejected with 400

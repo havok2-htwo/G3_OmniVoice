@@ -205,6 +205,16 @@ class JobRecord:
         return len(self.final_audio or b'') + sum(len(part) for part in self.pcm_parts)
 
 
+LIVE_THROUGHPUT_WINDOW_S = 30.0
+
+
+def live_throughput_x(events: deque[tuple[float, float]], now: float, window_s: float = LIVE_THROUGHPUT_WINDOW_S) -> float:
+    """Audio seconds delivered per wall second over the last window_s: 0 when idle, like the GPU utilisation line."""
+    cutoff = now - window_s
+    audio = sum(seconds for when, seconds in events if when >= cutoff)
+    return round(audio / window_s, 2) if audio > 0 else 0.0
+
+
 class InMemoryStore:
     def __init__(self, max_queue_size: int) -> None:
         self.max_queue_size = max_queue_size
@@ -228,6 +238,8 @@ class InMemoryStore:
         self.voice_profiles: dict[str, VoiceProfileRecord] = {}
         self.event_subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
         self.completed_job_metrics: deque[dict[str, float]] = deque(maxlen=128)
+        # (monotonic time, audio seconds) per completed job: the live output rate on the dashboard.
+        self.audio_output_events: deque[tuple[float, float]] = deque(maxlen=4096)
         self.total_jobs_completed = 0
         self.total_audio_seconds = 0.0
         self.exclusive_lock = asyncio.Lock()

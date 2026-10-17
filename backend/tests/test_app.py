@@ -682,12 +682,15 @@ def test_model_ops_and_benchmark_smoke() -> None:
     assert wer_run['status'] == 'completed'
     assert wer_run['summary']['success_count'] == 3
     assert wer_run['summary']['wer_avg'] == 0
-    assert len(wer_run['results']) == 3
+    assert wer_run['results'] == []  # the run list leaves out per-sample results
+    assert wer_run['results_count'] == 3
     assert wer_run['transcription_concurrency'] == 1
-    assert wer_run['results'][0]['synthesis_ms'] is not None
-    assert wer_run['results'][0]['transcription_ms'] is not None
+    first = client.app.state.store.wer_benchmark_runs[wer_run['run_id']]['results'][0]
+    assert first.synthesis_ms is not None
+    assert first.transcription_ms is not None
     assert wer_run['sentence_cache_hit'] is False
 
+    first_sources = [item.source_text for item in client.app.state.store.wer_benchmark_runs[wer_run['run_id']]['results']]
     wer_again = client.post(
         '/api/admin/wer-benchmarks/runs',
         headers=auth_headers(),
@@ -714,7 +717,7 @@ def test_model_ops_and_benchmark_smoke() -> None:
     assert cached_run is not None
     assert cached_run['status'] == 'completed'
     assert cached_run['sentence_cache_hit'] is True
-    assert [item['source_text'] for item in cached_run['results']] == [item['source_text'] for item in wer_run['results']]
+    assert [item.source_text for item in client.app.state.store.wer_benchmark_runs[cached_run['run_id']]['results']] == first_sources
 
     wer_range = client.post(
         '/api/admin/wer-benchmarks/runs',
@@ -747,4 +750,4 @@ def test_model_ops_and_benchmark_smoke() -> None:
     assert range_run['summary']['total'] == 6
     assert range_run['summary']['success_count'] == 6
     assert [item['seed'] for item in range_run['seed_leaderboard']] == [5, 6, 7]
-    assert len(range_run['results']) == 6
+    assert range_run['results_count'] == 6

@@ -36,6 +36,7 @@ import {
   type TextOptimizeResponse,
   type VllmModelsResponse,
   type VoiceItem,
+  type WerBenchmarkDeviationsResponse,
   type WerBenchmarkRunResponse,
 } from "../shared/api";
 import {
@@ -477,6 +478,14 @@ export function AdminApp() {
   const [werVoice, setWerVoice] = useState("");
   const [werCancelling, setWerCancelling] = useState("");
   const [voiceSeedEdits, setVoiceSeedEdits] = useState<Record<string, string>>({});
+  const [werDeviations, setWerDeviations] = useState<{ runId: string; total: number; items: WerBenchmarkRunResponse["results"] } | null>(null);
+  const latestWerRun = werBenchmarks[0];
+  useEffect(() => {
+    // Only the first page of deviations is fetched; the run list itself carries no per-sample results.
+    if (!latestWerRun || !(latestWerRun.results_count ?? 0)) return;
+    void loadWerDeviations(latestWerRun.run_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [latestWerRun?.run_id, latestWerRun?.results_count]);
   const [modelOpsBusy, setModelOpsBusy] = useState(false);
   const [modelDownloadAction, setModelDownloadAction] = useState<{ kind: "refresh" | "download" | "delete"; modelId: string } | null>(null);
   const [memoryCleanupBusy, setMemoryCleanupBusy] = useState(false);
@@ -573,6 +582,25 @@ export function AdminApp() {
       setBenchmarks(await apiFetch<BenchmarkRunResponse[]>("/api/admin/benchmarks/runs", { adminKey: key }));
     } catch {
       // Benchmarks are auxiliary; keep the dashboard usable if this endpoint is mid-run or unavailable.
+    }
+  }
+
+  function deviationsFor(runId: string): { total: number; items: WerBenchmarkRunResponse["results"] } {
+    return werDeviations && werDeviations.runId === runId ? werDeviations : { total: 0, items: [] };
+  }
+
+  async function loadWerDeviations(runId: string, more = false) {
+    if (!adminKey) return;
+    const current = deviationsFor(runId).items;
+    const offset = more ? current.length : 0;
+    try {
+      const page = await apiFetch<WerBenchmarkDeviationsResponse>(
+        `/api/admin/wer-benchmarks/runs/${encodeURIComponent(runId)}/deviations?offset=${offset}&limit=100`,
+        { adminKey },
+      );
+      setWerDeviations({ runId, total: page.total, items: more ? [...current, ...page.items] : page.items });
+    } catch {
+      // Deviations are auxiliary; the run card keeps working without them.
     }
   }
 
@@ -1950,10 +1978,17 @@ export function AdminApp() {
                   {run.summary.failure_count > 0 ? <div className="metric-row"><span>OK / Fail</span><strong>{run.summary.success_count} / {run.summary.failure_count}</strong></div> : null}
                 </div>
                 <div className="wer-sample-list">
-                  {run.results.filter((item) => item.success && (item.wer ?? 0) > 0).length === 0 ? (
+                  {deviationsFor(run.run_id).items.length < deviationsFor(run.run_id).total ? (
+                    <div className="button-row">
+                      <button className="secondary-button" type="button" onClick={() => void loadWerDeviations(run.run_id, true)}>
+                        Weitere laden ({deviationsFor(run.run_id).items.length}/{deviationsFor(run.run_id).total} Abweichungen, schlechteste zuerst)
+                      </button>
+                    </div>
+                  ) : null}
+                  {werDeviations?.runId === run.run_id && werDeviations.items.length === 0 ? (
                     <p className="widget-copy">Keine WER-Abweichungen im aktuellen Run.</p>
                   ) : null}
-                  {run.results.filter((item) => item.success && (item.wer ?? 0) > 0).map((item) => (
+                  {deviationsFor(run.run_id).items.map((item) => (
                     <div key={`${item.seed ?? "random"}-${item.index}-${item.job_id ?? ""}`} className="wer-sample">
                       <div className="metric-row">
                         <span>{item.seed !== null && item.seed !== undefined ? `Seed ${item.seed} #${item.index}` : `#${item.index}`} WER</span>

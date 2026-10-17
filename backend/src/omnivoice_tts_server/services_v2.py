@@ -1945,9 +1945,18 @@ class WerBenchmarkService:
 
     async def list_runs(self) -> list[WerBenchmarkRunResponse]:
         return [
-            self._to_response(run)
+            self._to_response(run, include_results=False)
             for run in sorted(self.store.wer_benchmark_runs.values(), key=lambda item: item['created_at'], reverse=True)[:1]
         ]
+
+    def deviations(self, run_id: str, *, offset: int = 0, limit: int = 100) -> tuple[int, list[WerBenchmarkItemResult]]:
+        """Samples that deviated (WER > 0), worst first, one page. Raises KeyError for an unknown run."""
+        run = self.store.wer_benchmark_runs.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        items = [item for item in run.get('results', []) if item.success and (item.wer or 0) > 0]
+        items.sort(key=lambda item: (-(item.wer or 0), item.seed if item.seed is not None else -1, item.index))
+        return len(items), items[offset : offset + limit]
 
     async def _execute_run(self, run: dict[str, Any], payload: WerBenchmarkCreateRequest) -> None:
         try:
@@ -2577,7 +2586,7 @@ class WerBenchmarkService:
                 error_message=str(exc),
             )
 
-    def _to_response(self, run: dict[str, Any]) -> WerBenchmarkRunResponse:
+    def _to_response(self, run: dict[str, Any], *, include_results: bool = True) -> WerBenchmarkRunResponse:
         results = sorted(
             list(run.get('results', [])),
             key=lambda item: (item.seed if item.seed is not None else -1, item.index),
@@ -2610,7 +2619,8 @@ class WerBenchmarkService:
             voice=run.get('voice'),
             summary=self._summary(results, total_per_seed * seed_count),
             seed_leaderboard=self._seed_leaderboard(results, total_per_seed),
-            results=results,
+            results=results if include_results else [],
+            results_count=len(results),
             error_message=run.get('error_message'),
         )
 

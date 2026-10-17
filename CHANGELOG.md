@@ -4,6 +4,13 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - large WER runs froze the admin dashboard
+
+- The run list carried every per-sample result, so each dashboard poll during a run serialised a 16 x 1000 run
+  (16 000 items with transcripts) and the UI rendered a node per deviating sample. The list now omits the per-sample
+  results (`results_count` gives the number) and the deviations come from
+  `GET /api/admin/wer-benchmarks/runs/{id}/deviations`, worst first, 100 per page, with a "Weitere laden" button.
+
 ### Changed - the dashboard's TTFA line is live too
 
 - The TTFA line showed the average over all completed jobs and stayed flat. It now shows the mean time to first audio

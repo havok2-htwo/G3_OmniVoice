@@ -596,6 +596,11 @@ class WerBenchmarkSeedSummary(WerBenchmarkSummary):
     seed: int | None = None
 
 
+class WerBenchmarkDeviationsResponse(BaseModel):
+    total: int
+    items: list[WerBenchmarkItemResult] = Field(default_factory=list)
+
+
 class WerBenchmarkRunResponse(BaseModel):
     run_id: str
     name: str
@@ -622,7 +627,9 @@ class WerBenchmarkRunResponse(BaseModel):
     voice: str | None = None
     summary: WerBenchmarkSummary
     seed_leaderboard: list[WerBenchmarkSeedSummary] = Field(default_factory=list)
+    # The run list leaves the per-sample results out (a 16 x 1000 run is 16 000 items); fetch deviations separately.
     results: list[WerBenchmarkItemResult] = Field(default_factory=list)
+    results_count: int = 0
     error_message: str | None = None
 
 

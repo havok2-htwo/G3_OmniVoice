@@ -344,6 +344,11 @@ export interface BenchmarkRunResponse {
   error_message?: string | null;
 }
 
+export interface WerBenchmarkDeviationsResponse {
+  total: number;
+  items: WerBenchmarkRunResponse["results"];
+}
+
 export interface WerBenchmarkRunResponse {
   run_id: string;
   name: string;
@@ -393,6 +398,7 @@ export interface WerBenchmarkRunResponse {
     exact_count: number;
     exact_rate?: number | null;
   }>;
+  results_count?: number;
   results: Array<{
     index: number;
     seed?: number | null;

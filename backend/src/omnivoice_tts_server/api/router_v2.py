@@ -57,6 +57,7 @@ from ..domain.models import (
     VoiceProfileListItem,
     VllmModelsResponse,
     WerBenchmarkCreateRequest,
+    WerBenchmarkDeviationsResponse,
     WerBenchmarkRunResponse,
 )
 from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, live_mean, live_throughput_x, new_id, utcnow
@@ -1163,6 +1164,16 @@ async def admin_create_wer_benchmark(request: Request, payload: WerBenchmarkCrea
         if voice.casefold() not in known:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f'Voice {voice!r} not found.')
     return await service.create_run(payload)
+
+
+@admin.get('/wer-benchmarks/runs/{run_id}/deviations', response_model=WerBenchmarkDeviationsResponse)
+async def admin_wer_benchmark_deviations(request: Request, run_id: str, offset: int = 0, limit: int = 100) -> WerBenchmarkDeviationsResponse:
+    service: WerBenchmarkService = request.app.state.wer_benchmark_service
+    try:
+        total, items = service.deviations(run_id, offset=max(0, offset), limit=min(max(1, limit), 500))
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='WER run not found') from exc
+    return WerBenchmarkDeviationsResponse(total=total, items=items)
 
 
 @admin.post('/wer-benchmarks/runs/{run_id}/cancel', response_model=WerBenchmarkRunResponse)

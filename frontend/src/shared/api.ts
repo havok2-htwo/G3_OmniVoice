@@ -124,6 +124,7 @@ export interface DashboardSnapshot {
     job_wall_ms_avg?: number | null;
     realtime_x_avg?: number | null;
     realtime_x_live?: number | null;
+    ttfa_ms_live?: number | null;
     jobs_total: number;
     audio_seconds_total: number;
     gpu_name: string;

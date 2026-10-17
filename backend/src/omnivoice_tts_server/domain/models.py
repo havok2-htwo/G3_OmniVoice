@@ -635,6 +635,8 @@ class DashboardOverview(BaseModel):
     queue_wait_ms_avg: float | None = None
     # Audio seconds delivered per wall second over the last 30 s (0 when idle); sampled like the GPU line.
     realtime_x_live: float = 0.0
+    # Mean time to first audio over the jobs that finished in the last 30 s (0 when none did).
+    ttfa_ms_live: float = 0.0
     job_wall_ms_avg: float | None = None
     realtime_x_avg: float | None = None
     jobs_total: int

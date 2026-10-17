@@ -4,6 +4,12 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - the dashboard's TTFA line is live too
+
+- The TTFA line showed the average over all completed jobs and stayed flat. It now shows the mean time to first audio
+  of the jobs that finished in the last 30 s ("TTFA 30 s"), sampled on every dashboard update, and 0 when none
+  finished. The status line keeps the overall average.
+
 ### Changed - the dashboard's realtime line is a live throughput
 
 - The line under "Realtime" was the average over the last completed jobs, so it stayed flat between jobs. It now

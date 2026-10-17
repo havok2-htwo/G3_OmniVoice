@@ -208,6 +208,13 @@ class JobRecord:
 LIVE_THROUGHPUT_WINDOW_S = 30.0
 
 
+def live_mean(events: deque[tuple[float, float]], now: float, window_s: float = LIVE_THROUGHPUT_WINDOW_S) -> float:
+    """Mean of the values recorded in the last window_s; 0 when nothing finished in that window."""
+    cutoff = now - window_s
+    values = [value for when, value in events if when >= cutoff]
+    return round(sum(values) / len(values), 1) if values else 0.0
+
+
 def live_throughput_x(events: deque[tuple[float, float]], now: float, window_s: float = LIVE_THROUGHPUT_WINDOW_S) -> float:
     """Audio seconds delivered per wall second over the last window_s: 0 when idle, like the GPU utilisation line."""
     cutoff = now - window_s
@@ -240,6 +247,8 @@ class InMemoryStore:
         self.completed_job_metrics: deque[dict[str, float]] = deque(maxlen=128)
         # (monotonic time, audio seconds) per completed job: the live output rate on the dashboard.
         self.audio_output_events: deque[tuple[float, float]] = deque(maxlen=4096)
+        # (monotonic time, ttfa ms) per completed job that produced audio: the live time-to-first-audio line.
+        self.ttfa_events: deque[tuple[float, float]] = deque(maxlen=4096)
         self.total_jobs_completed = 0
         self.total_audio_seconds = 0.0
         self.exclusive_lock = asyncio.Lock()

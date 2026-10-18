@@ -4,6 +4,17 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - WER benchmark per voice, best seed per voice, cancel
+
+- The WER benchmark has a voice selector (default: the voice from the settings). An unknown voice is rejected with 400
+  instead of failing every sentence.
+- Each custom voice has a "bester Seed" field (,  may be null). A request without
+  a seed uses the voice's seed (already the case before); a WER run without a seed now uses it too, and its results
+  carry the seed that actually ran.
+-  stops a running benchmark: its task ends, its queued and
+  running synthesis jobs are cancelled, and the run finishes with status  and the results so far.
+- The run card shows the voice and an "abbrechen" button while the run is active.
+
 ### Fixed - large WER runs froze the admin dashboard
 
 - The run list carried every per-sample result, so each dashboard poll during a run serialised a 16 x 1000 run

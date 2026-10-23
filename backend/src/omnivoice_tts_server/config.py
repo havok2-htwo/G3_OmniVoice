@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     frontend_dist_dir: Path = Field(default=DEFAULT_FRONTEND_DIST)
     data_dir: Path = Field(default=DEFAULT_DATA_DIR)
     runtime_backend: str = 'omnivoice'
+    # runtime_backend='phonon' serves Gradium Phonon (ptts package) from this checkpoint folder instead of OmniVoice.
+    # Gated repos need the checkpoint downloaded beforehand; the server never reads HF_TOKEN itself.
+    phonon_model_id: str = 'gradium/phonon-40m-multilingual'
+    phonon_model_dir: Path = Field(default=DEFAULT_MODELS_ROOT / 'phonon-40m-multilingual')
+    phonon_lang: str = 'de'
+    phonon_quant: str = 'q8'
+    # Engine instances, one sentence per engine at a time. Each holds its own weights and thread pool.
+    phonon_workers: int = Field(default=2, ge=1, le=16)
+    # Rust thread-pool size per engine (RAYON_NUM_THREADS). 0 = cpu_count // (2 * phonon_workers). Left at the
+    # runtime default (one pool per core per engine), the engines oversubscribe the CPU and run ~3x slower.
+    phonon_threads: int = Field(default=0, ge=0, le=64)
     allow_model_downloads: bool = True
     enable_cpu_offload: bool = False
     compile_model: bool = True

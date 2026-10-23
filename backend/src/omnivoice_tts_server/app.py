@@ -136,11 +136,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.models_root_dir.mkdir(parents=True, exist_ok=True)
         store = InMemoryStore(max_queue_size=settings.max_queue_size)
         store.load_secrets(settings.data_dir)
-        store.load_voices(settings.data_dir)
-        try:
-            seed_voice_presets(store, settings.data_dir)
-        except (OSError, ValueError) as exc:
-            logger.warning('voice presets not seeded: %s', exc)
+        # Voice profiles are OmniVoice clone prompts; a Phonon server resolves voices from its own catalog instead.
+        if settings.runtime_backend.lower() != 'phonon':
+            store.load_voices(settings.data_dir)
+            try:
+                seed_voice_presets(store, settings.data_dir)
+            except (OSError, ValueError) as exc:
+                logger.warning('voice presets not seeded: %s', exc)
         store.active_model = settings.active_model
         events = EventHub(store)
         synthesizer = build_synthesizer(settings, store)

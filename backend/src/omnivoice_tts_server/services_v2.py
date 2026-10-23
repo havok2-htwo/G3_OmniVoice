@@ -608,6 +608,9 @@ class QueueService:
     def _can_use_native_streaming(self, batch_items: list[BatchSynthesisItem]) -> bool:
         if not batch_items or not hasattr(self.synthesizer, 'stream_batch'):
             return False
+        if getattr(self.synthesizer, 'supports_native_streaming', False):
+            # Engines that stream any task type (Phonon) do not need OmniVoice's Base task.
+            return all(item.request.stream for item in batch_items)
         return all(item.request.stream and self._task_type_for_request(item.request) == TaskType.base for item in batch_items)
 
     async def _process_native_streaming_batch(
@@ -805,10 +808,13 @@ class QueueService:
         )
 
     def _flush_native_streaming_sentences_locked(self, job: JobRecord, state: RequestState, *, batch_id: str) -> None:
-        while state.next_emit_sentence_index in state.completed_streaming_sentence_indices:
+        # Drain the next sentence's buffered chunks even while it is still streaming. Otherwise its later chunks
+        # take the direct path and reach the client ahead of the buffered ones.
+        while True:
             sentence_index = state.next_emit_sentence_index
             pending_chunks = state.pending_preview_pcm.pop(sentence_index, [])
             state.pending_preview_duration_ms.pop(sentence_index, None)
+            finished = sentence_index in state.completed_streaming_sentence_indices
             for chunk_index, chunk in enumerate(pending_chunks):
                 self._emit_native_chunk_locked(
                     job,
@@ -817,8 +823,10 @@ class QueueService:
                     pcm=chunk,
                     sample_rate=state.sample_rate,
                     batch_id=batch_id,
-                    final_chunk_of_sentence=chunk_index == len(pending_chunks) - 1,
+                    final_chunk_of_sentence=finished and chunk_index == len(pending_chunks) - 1,
                 )
+            if not finished:
+                break
             state.completed_streaming_sentence_indices.discard(sentence_index)
             state.next_emit_sentence_index += 1
             job.metrics['sentences_rendered'] = state.next_emit_sentence_index

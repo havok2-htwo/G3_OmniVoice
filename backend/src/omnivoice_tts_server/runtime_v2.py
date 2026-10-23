@@ -1413,6 +1413,18 @@ class MockSynthesizer:
 def build_synthesizer(settings: Settings, store: InMemoryStore) -> Any:
     if settings.runtime_backend.lower() == 'mock':
         return MockSynthesizer(sample_rate=settings.sample_rate)
+    if settings.runtime_backend.lower() == 'phonon':
+        from .phonon_runtime import PhononSynthesizer
+
+        synthesizer = PhononSynthesizer(settings=settings, store=store)
+        # Voices are known only after the engines load, and request voice resolution needs them at once.
+        synthesizer.load_now()
+        # One checkpoint serves here: expose only it, with its catalog voices as built-in voices.
+        settings.supported_models = [settings.phonon_model_id]
+        settings.active_model = settings.phonon_model_id
+        settings.built_in_voices = [*settings.built_in_voices, *synthesizer.voice_names()]
+        store.active_model = settings.phonon_model_id
+        return synthesizer
     if settings.runtime_backend.lower() != 'omnivoice':
         raise RuntimeError(f'Unsupported runtime backend: {settings.runtime_backend}')
     return OmniVoiceSynthesizer(settings=settings, store=store)

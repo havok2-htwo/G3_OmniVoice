@@ -17,7 +17,7 @@ All notable changes to G3_OmniVoice are recorded here.
   `start_server.bat` and the Dockerfile no longer force `omnivoice`.
 - Ming settings `ming_max_slots`, `ming_cuda_graphs`, `ming_output_sample_rate`, `ming_first_chunk_latents`,
   `ming_max_chunk_latents`, `ming_model_dir`, `ming_model_id`, and presets `Ming 32GB VRAM`, `Ming 24GB VRAM`,
-  `Ming 24+8 VRAM`, `Ming best performance` (slot counts provisional until benchmarked). The OmniVoice tiers are
+  `Ming 24+8 VRAM`, `Ming best performance` (32 / 16 / 16 / 64 slots, measured: docs/benchmarks/ming-3.0-tts-2026-10.md). The OmniVoice tiers are
   unchanged and do not change the engine.
 - `install.ps1` installs the backend extra `[ming]` and downloads the Ming weights with `-DownloadMing`.
 - Requests naming a model id the active engine does not serve (e.g. an OmniVoice id while Ming runs) are served by

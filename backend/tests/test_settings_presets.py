@@ -307,10 +307,18 @@ def test_ming_tiers_select_the_engine_and_are_valid_settings(name) -> None:
 
 
 @pytest.mark.parametrize(
-    ('name', 'slots'), [('Ming 32GB VRAM', 32), ('Ming 24GB VRAM', 16), ('Ming 24+8 VRAM', 16), ('Ming best performance', 48)]
+    ('name', 'slots'), [('Ming 32GB VRAM', 32), ('Ming 24GB VRAM', 16), ('Ming 24+8 VRAM', 16), ('Ming best performance', 64)]
 )
-def test_ming_tiers_carry_the_provisional_slots(name, slots) -> None:
+def test_ming_tiers_carry_the_measured_slots(name, slots) -> None:
     assert presets.BUILTIN_PRESETS[name]['values']['ming_max_slots'] == slots
+
+
+@pytest.mark.parametrize('name', MING_TIER_NAMES)
+def test_ming_tiers_keep_the_measured_chunk_schedule(name) -> None:
+    # Benchmark 2026-10-28: later chunks of 16 latents were slower than 8 even at 64 slots.
+    values = presets.BUILTIN_PRESETS[name]['values']
+    assert (values['ming_first_chunk_latents'], values['ming_max_chunk_latents']) == (2, 8)
+    assert values['batch_wait_ms'] == 0
 
 
 def test_omnivoice_tiers_do_not_pick_an_engine() -> None:

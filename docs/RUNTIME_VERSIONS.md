@@ -56,8 +56,8 @@ Weights (~3 GB, `config.json`: 44.1 kHz, one 64-dim latent per 80 ms) go to
 
 With Ming active, the admin "Model Control" panel can download them as well. Presets:
 "Ming 32GB VRAM", "Ming 24GB VRAM" (also the RTX 3090), "Ming 24+8 VRAM" and
-"Ming best performance" set `runtime_backend=ming` and the `ming_*` keys (slot counts
-are provisional until benchmarked).
+"Ming best performance" set `runtime_backend=ming` and the `ming_*` keys (32 / 16 / 16 / 64 slots, measured
+in docs/benchmarks/ming-3.0-tts-2026-10.md).
 
 ## omnivoice pin
 

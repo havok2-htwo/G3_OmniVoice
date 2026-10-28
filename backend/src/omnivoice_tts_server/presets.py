@@ -159,7 +159,28 @@ BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
 # continuous batch and the stream chunks. Output stays 24 kHz (the client contract).
 # max_parallel_requests matches the engine's slots so enough requests reach it at once;
 # batch_wait_ms 0 because rows join the running decode loop at the next step anyway.
-# ming_max_slots values are PROVISIONAL, set by benchmark (replace with measured numbers).
+#
+# Measured on the RTX 5090 (2026-10-28, SonjaV2, German sentences of ~3-6 s, CUDA graphs,
+# client-side over HTTP; docs/benchmarks/ming-3.0-tts-2026-10.md has the full tables).
+# Ming allocates everything at load (slot KV cache, graphs), so idle == peak:
+#   slots   card VRAM (nvidia-smi, incl. CUDA context)   saturation   TTFA 1 / 16 / 32 burst (p50 ms)
+#      8    4.15 GB                                         56x RT      26 / 293 / 908  (bursts > slots queue)
+#     16    4.25 GB                                         94x RT      28 / 110 / 372
+#     32    4.39 GB                                        155x RT      30 / 115 / 197
+#     48    4.46 GB                                        199x RT      32 / 118 / 201
+#     64    4.67 GB                                        221x RT      36 / 125 / 201
+# Every step computes all slots (batch-invariant mode: a row's audio does not depend on its
+# neighbours), so more slots cost per-row speed at low load (single-stream RTF 0.11 at 16,
+# 0.13 at 32, 0.17 at 64) but buy capacity; VRAM barely moves. ming_max_chunk_latents 16 was
+# measured slower than 8 at 64 slots (200x vs 221x, higher TTFA), so every tier keeps 8.
+# Under a hard 4 GiB torch allocator cap (3090 / shared-card simulation) 16, 32 and 64 slots
+# loaded and rendered all slots at once without OOM (torch peak 3.0 / 3.2 / 3.4 GB allocated);
+# 3.5 GiB is too little for the load-time weight fusion at any slot count.
+# VRAM tier budgets (sum of every G3 service at peak, see the OmniVoice comment above):
+#   32GB tier: OmniVoice peaks 5.0 GB -> Ming 32 slots 4.4 GB, sum 27.1 -> ~26.5 GB (<= 30).
+#   24GB tier: OmniVoice peaks 3.8 GB -> Ming 16 slots 4.25 GB, sum 21.8 -> ~22.3 GB (<= 23).
+#   24+8 box, 3090: 20.7 -> ~21.2 GB with Ming 16 slots. 3090 speed is not measured; 16 slots
+#   keep the per-row step short on the slower card.
 # ---------------------------------------------------------------------------
 _MING_COMMON: dict[str, Any] = {
     'runtime_backend': 'ming',
@@ -171,33 +192,33 @@ _MING_COMMON: dict[str, Any] = {
 }
 MING_PRESETS: dict[str, dict[str, Any]] = {
     'Ming 32GB VRAM': {
-        'description': 'Ming-3.0-tts auf der RTX 5090, alle G3-Dienste auf einer Karte. 32 Slots '
-        '(vorlaeufig, wird per Benchmark gesetzt).',
+        'description': 'Ming-3.0-tts auf der RTX 5090, alle G3-Dienste auf einer Karte. 32 Slots: 4,4 GB fuer diesen '
+        'Prozess (Leerlauf = Spitze), etwa 155x Echtzeit unter Volllast, erstes Audio nach etwa 30 ms (32 '
+        'gleichzeitige Streams: 200 ms). Gemessen auf der RTX 5090.',
         'target_vram_gb': None,
-        # provisional, set by benchmark
         'values': {**_MING_COMMON, 'ming_max_slots': 32, 'max_parallel_requests': 32},
     },
     'Ming 24GB VRAM': {
         'description': 'Ming-3.0-tts auf einer 24-GB-Karte (RTX 4090 oder RTX 3090), alle G3-Dienste auf einer '
-        'Karte. 16 Slots (vorlaeufig, wird per Benchmark gesetzt).',
+        'Karte. 16 Slots: 4,25 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 94x Echtzeit unter Volllast, erstes '
+        'Audio nach etwa 30 ms (16 gleichzeitige Streams: 110 ms). Gemessen auf der RTX 5090; laeuft unter einer '
+        '4-GiB-Grenze ohne OOM.',
         'target_vram_gb': None,
-        # provisional, set by benchmark
         'values': {**_MING_COMMON, 'ming_max_slots': 16, 'max_parallel_requests': 16},
     },
     'Ming 24+8 VRAM': {
-        'description': 'Ming-3.0-tts auf der 24-GB-Karte (3090) der 24+8-Maschine. 16 Slots (vorlaeufig, wird per '
-        'Benchmark gesetzt).',
+        'description': 'Ming-3.0-tts auf der 24-GB-Karte (3090) der 24+8-Maschine. 16 Slots: 4,25 GB fuer diesen '
+        'Prozess (gemessen auf der RTX 5090; Geschwindigkeit auf der 3090 nicht gemessen).',
         'target_vram_gb': 24,
-        # provisional, set by benchmark
         'values': {**_MING_COMMON, 'ming_max_slots': 16, 'max_parallel_requests': 16},
     },
     'Ming best performance': {
-        'description': 'Ming-3.0-tts mit maximalem Durchsatz, wenn die Karte Ming allein gehoert: 48 Slots, '
-        'groessere Folge-Chunks; der erste Chunk bleibt kurz. Das Queue-Limit (nicht Teil des Presets) muss '
-        'mindestens 48 sein, sonst begrenzt es die gleichzeitigen Anfragen (vorlaeufig, wird per Benchmark gesetzt).',
+        'description': 'Ming-3.0-tts mit maximalem Durchsatz, wenn die Karte Ming allein gehoert: 64 Slots, 4,7 GB, '
+        'etwa 220x Echtzeit unter Volllast, erstes Audio nach etwa 36 ms (64 gleichzeitige Streams: 380 ms). Das '
+        'Queue-Limit (nicht Teil des Presets) muss mindestens 64 sein, sonst begrenzt es die gleichzeitigen Anfragen. '
+        'Gemessen auf der RTX 5090.',
         'target_vram_gb': None,
-        # provisional, set by benchmark
-        'values': {**_MING_COMMON, 'ming_max_slots': 48, 'max_parallel_requests': 48, 'ming_max_chunk_latents': 16},
+        'values': {**_MING_COMMON, 'ming_max_slots': 64, 'max_parallel_requests': 64},
     },
 }
 BUILTIN_PRESETS.update(MING_PRESETS)

@@ -23,14 +23,15 @@ tuned first (section 3) and then measured with the same method.
 Throughput and per-request speed are given as "N× realtime" (seconds of audio per wall second); RTF = wall time /
 audio time, lower is better. TTFA is p50 / p95 in ms on the NDJSON stream; a burst of N = N requests sent at the
 same instant. Where the re-run differed from the reference run by more than 10 %, both are shown as
-"reference (re-run)". CPU and RAM come only from the re-run.
+"reference (re-run)". CPU and RAM come only from the re-run. Memory "GB" here is 1000 MiB as `nvidia-smi` and
+psutil report it (about 1.05 GB SI, 0.98 GiB), the same convention as the Ming page.
 
 | | OmniVoice `32GB VRAM` | Ming 32 slots | Ming 64 slots | Phonon q4k, 8 workers, batch 16 |
 | --- | --- | --- | --- | --- |
 | **Aggregate throughput at saturation** (45 s closed loop) | 54.5× (32 clients) | 154.8× (32) | 220.7× (64) | 33.2× (32) |
-| Per-request speed, 1 stream | 21.7× (RTF 0.046) | 7.8× (0.129) | 6.0× (0.166) | 8.3× (0.121) |
+| Per-request speed, 1 stream | 21.8× (RTF 0.046) | 7.7× (0.129) | 6.0× (0.166) | 8.3× (0.121) |
 | Per-request speed, burst of 32 (p50) | 2.5× (0.402) | 4.9× (0.206) | 4.2× (0.239) | 1.3× (0.762) |
-| Per-request speed at saturation (p50) | 1.7× (0.582) | 5.0× (0.202) | 3.6× (0.281) | 1.03× (0.971) |
+| Per-request speed at saturation (p50) | 1.7× (0.582) | 4.9× (0.202) | 3.6× (0.281) | 1.03× (0.971) |
 | TTFA, 1 stream | 213 / 333 (224 / 243) | 30 / 38 | 36 / 48 | 77 / 85 |
 | TTFA, burst of 4 | 409 / 426 | 58 / 59 | 69 / 70 | 102 / 118 |
 | TTFA, burst of 16 | 1074 / 1442 | 115 / 131 (126 / 143) | 125 / 143 | 1089 / 1277 ¹ |
@@ -74,7 +75,7 @@ TTFA differences above 10 % appear only in the tails under load:
   376 / 568 ms.
 - OmniVoice: single-stream p95 −27 %. The reference p95 contained one slow request.
 
-The p50 values at 1–16 streams are within 10 %.
+Apart from the Ming 32 burst-16 p50 (+10.0 %), the p50 values at 1–16 streams are within 10 %.
 
 ## 2. Features
 
@@ -116,17 +117,18 @@ process's mean over the saturation window, in logical cores.
 | q4k | 8 | 0 (1) | 8 | 31.5× | 3345 / 3404 | 1.02 | 10.5 | 3.0 | 2.09 | 80 / 0.123 |
 | **q4k** | **8** | **0 (1)** | **16** | **32.8× / 32.8×** (45 s run: 33.2×) | 2539 / 3378 | 0.97 | **10.7** | 3.1 | 2.06 | 80 / 0.121 |
 
-⁶ First sweep (2026-10-28 late evening). In that sweep the same configs ran 5–18 % faster than in the second sweep
-(q8 / 4 workers / threads 0: 29.8× vs 25.3× and 25.2×; single-stream RTF 0.081 vs 0.107). The machine was idle in
+⁶ First sweep (2026-10-28 late evening). In that sweep the same configs ran faster than in the second sweep
+(4–18 %: q8 / 4 workers / threads 0 gave 29.8× vs 25.3× and 25.2×, single-stream RTF 0.081 vs 0.107;
+q8 / 8 workers gave 31.9× vs 30.7×). The machine was idle in
 both, and the cause is unknown. Compare configs only within one sweep: the rows without ⁶ ran back to back
 on 2026-10-29.
 
 What the sweep shows:
 
 - **More threads per engine never helped throughput.** Extra threads only shorten a single request (RTF 0.058 with
-  8 threads vs 0.12 with 1), at the cost of 2–6 more cores and lower throughput. Workers scale; threads don't.
+  8 threads vs 0.11 with 1, at 8 workers), at the cost of 2–7 more cores and the same or lower throughput. Workers scale; threads don't.
 - **q4k vs q8:** about the same throughput (31.5× vs 30.7–31.9× at batch 8), but about 2 cores less CPU
-  (10.5 vs 12.5 at 8 workers; 5.7 vs 6.6 at 4). That is 15–20 % more audio per core. WER was not worse (section 4).
+  (10.5 vs 12.4 at 8 workers; 5.7 vs 6.6 at 4), about 15 % less. That is about 20 % more audio per core. WER was not worse (section 4).
 - **Batch 16 vs 8:** the serial batch path finishes a whole batch before the next one starts.
   - With batch 8 and 8 workers, each batch ends on its slowest sentence and the other workers sit idle.
   - With batch 16 the free workers pick up the second half, so throughput rose about 4 % (q4k: 31.5× → 32.8×,
@@ -136,12 +138,12 @@ What the sweep shows:
   admitted.
 
 **Best overall (dedicated machine):** q4k, 8 workers, threads 0, batch / parallel 16: 32.8× realtime, 10.7 logical
-cores (76 % of the machine), 2.1–2.2 GB RAM. 77 ms TTFA alone, about 100 ms for 4 concurrent streams, 8.3× realtime
+cores (67 % of the machine; 76 % whole-machine load with the bench client), 2.1–2.2 GB RAM. 77 ms TTFA alone, about 100 ms for 4 concurrent streams, 8.3× realtime
 per stream.
 
 **Shared machine (about 4 workers):** q4k, 4 workers, threads 0, batch / parallel 16: 26.5× realtime on 5.7
-logical cores (about 36 % of the machine), 1.5 GB RAM, 80 ms TTFA alone. Per core it is the most efficient config
-measured (4.7× per core), and it leaves the GPU services and the desktop about 10 threads.
+logical cores (about 35 % of the machine), 1.5 GB RAM, 80 ms TTFA alone. Per core it is the most efficient config
+of the second sweep (4.7× per core; only q8 / 2 workers in the faster first sweep was higher, 4.9×), and it leaves the GPU services and the desktop about 10 threads.
 
 ## 4. German WER (G3_Whisper round trip)
 
@@ -156,15 +158,15 @@ Same 20 sentences and scorer as in [ming-3.0-tts-2026-10.md](ming-3.0-tts-2026-1
 | Phonon q8 | off | 5.03 % | 6.11 % | 2.94 % | 14 / 20 |
 | Phonon q8 | deterministic | 4.02 % | 4.58 % | 2.94 % | 15 / 20 |
 | Ming 32 (reference, 3 voices) | off / deterministic | 4.36 % / 3.52 % | 6.62 % / 5.34 % | 0 / 0 % | 45 / 47 of 60 |
-| OmniVoice (reference, 3 voices) | off / deterministic | 4.69 % / 3.18 % | 6.87 % / 4.84 % | 0.49 / 0 % | 41 / 48 of 60 |
+| OmniVoice (reference, 3 voices) | off / deterministic | 4.69 % / 3.18 % | 6.87 % / 4.83 % | 0.49 / 0 % | 41 / 48 of 60 |
 
 For one voice only (SonjaV2), Ming scored 3.5 % / 4.0 % and OmniVoice 5.0 % / 3.5 % (off / deterministic).
 
 Inspecting every Phonon clip with errors:
 
-- **Formatting, not misreadings, in both modes and both quants** (6 of the about 200 words per mode):
+- **Formatting, not misreadings, in both quants** (6 of the 199 words in mode deterministic, 4 in mode off):
   - `1.250` vs `1250`;
-  - `z. B.` vs `zum Beispiel`;
+  - `z. B.` vs `zum Beispiel` (mode deterministic only);
   - Whisper wrote `achtundzwanzig` and `dreihundertfünfzig` as words for the Phonon audio. The scorer does not fold
     these compounds back to digits.
 - **Real misreadings, mode off:**
@@ -176,18 +178,18 @@ Inspecting every Phonon clip with errors:
 
 Phonon's German intelligibility is on par with Ming and OmniVoice on these sentences. `ptts` normalizes numbers
 itself (`lang=de`), so mode off is not raw text for Phonon. The server's `deterministic` pass still removed the
-remaining misreadings.
+date and `z. B.` misreadings; the q8-only misreading stays in both modes.
 
 ## 5. Which engine for which use
 
 - **Ming: the default for live and streaming use on a GPU.**
-  - 30–60 ms TTFA up to 4 streams and about 200 ms for 32 at once.
+  - 30–70 ms TTFA up to 4 streams and about 200 ms for 32 at once.
   - 155× (32 slots) to 221× (64 slots) realtime, on about 1 CPU core and 4.4–4.7 GB VRAM.
   - Clones the voice profiles. Pick the slot count by the concurrency you expect.
 - **OmniVoice: fastest single job, widest language coverage.**
-  - Turns one request around fastest (21.7× realtime, RTF 0.046), so it suits offline rendering of one long text,
+  - Turns one request around fastest (21.8× realtime, RTF 0.046), so it suits offline rendering of one long text,
     and it covers 646 languages, plus the Auto-Voice and Voice-Design models.
-  - Its TTFA (≥ 200 ms, about 1–2 s under load) and its 54× throughput in the 32GB tier make it the weakest choice
+  - Its TTFA (≥ 200 ms, about 1–3 s under load) and its 54× throughput in the 32GB tier make it the weakest choice
     for many concurrent live streams.
 - **Phonon: when no GPU is free, or on a CPU-only host.**
   - About 33× realtime on this 8-core CPU with 0 VRAM: 16 parallel streams still play 2× faster than realtime,
@@ -196,13 +198,13 @@ remaining misreadings.
     - one voice (`default`), no cloning;
     - five languages;
     - a non-commercial license (CC-BY-NC-4.0);
-    - at saturation it takes 3/4 of the CPU.
+    - at saturation it takes about 2/3 of the CPU (10.7 of 16 logical cores).
   - On a machine that also runs the GPU services, use the 4-worker config (26× on about 6 cores).
 
 ## 6. Proposals (not applied; defaults, presets and runtime code are unchanged)
 
 - **Phonon defaults:**
-  - `phonon_quant` q8 → q4k: same throughput, 15–20 % less CPU, WER not worse.
+  - `phonon_quant` q8 → q4k: same throughput, about 15 % less CPU (about 20 % more audio per core), WER not worse.
   - `phonon_workers` 2 → 4 ("shared machine"). Offer 8 as a "Phonon dedicated CPU" choice.
   - Keep `phonon_threads` 0.
 - **Batch settings in phonon mode:** `max_batch_size` / `max_parallel_requests` of about 2 × workers (16 at
@@ -239,7 +241,7 @@ Scripts: `tools/benchmarks/bench_engine_streaming.py` and `tools/benchmarks/benc
   and port 8191 had no listener. Every spawned server was stopped by the script.
 - **WER:** server spawned with the same Phonon settings, warmed, then `bench_wer_roundtrip.py --voices default
   --modes off,deterministic` against the remote Whisper.
-- **Start to warm:** spawn until two warm requests and one burst of 8 have succeeded (`ready_s`). For OmniVoice
+- **Start to warm:** spawn until four warm requests and one burst of 8 have succeeded (`ready_s`). For OmniVoice
   this includes `torch.compile`.
 
 ## Caveats
@@ -249,7 +251,8 @@ Scripts: `tools/benchmarks/bench_engine_streaming.py` and `tools/benchmarks/benc
     differ slightly.
   - Phonon WER rests on 20 clips per mode, against 60 for the other engines; one clip is worth about 0.5–1 %.
 - **Phonon run-to-run variation between sessions is larger than on the GPU engines.** The two sweeps differed by
-  5–18 % for the same config, for an unknown reason (footnote ⁶). Within one sweep, repeats agreed within 1–4 %.
+  4–18 % for the same config, for an unknown reason (footnote ⁶). Within one session, repeats agreed within about
+  1 % (0.04–0.5 % for the 30 s repeats, 1.3 % for the 45 s run).
 - **Sentences:** all speed numbers use short single sentences. For long texts, TTFA depends on the first sentence,
   and the per-second cost stays the same.
 - **CPU numbers are means over 0.5 s samples.**
@@ -258,7 +261,8 @@ Scripts: `tools/benchmarks/bench_engine_streaming.py` and `tools/benchmarks/benc
     full GPU batches.
 - **RAM:** private bytes of the GPU engines (5.8–8.2 GB) are commit charge that includes CUDA host mappings. The
   working set (2.4–2.8 GB) is the physical RAM.
-- **Phonon at saturation was CPU-bound** (76 % of the machine). Anything else on the CPU lowers its numbers; nothing
+- **Phonon at saturation was CPU-bound** (server 10.7 of 16 logical cores, 76 % whole-machine load with the bench
+  client). Anything else on the CPU lowers its numbers; nothing
   else ran during these tests.
 - **Not measured:**
   - Phonon on other CPUs;

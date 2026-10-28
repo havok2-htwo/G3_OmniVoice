@@ -1,6 +1,6 @@
 """Pure streaming helpers for the Ming engine (no torch, CPU-testable).
 
-- ``ChunkSchedule``: how many latents to feed the streaming VAE decoder per call (small first, then growing).
+- ``ChunkSchedule``: how many latents to decode per streaming VAE call (small first, then growing).
 - ``SilenceTrimmer``: a streaming, sample-exact version of upstream ``ming_tts.trim_trailing_silence``.
 - ``StreamResampler``: stateful soxr resampling per row (bit-identical to one-shot ``soxr.resample``).
 """
@@ -17,21 +17,33 @@ _EMPTY = np.zeros(0, dtype=np.float32)
 
 
 class ChunkSchedule:
-    """Latents per decode call: ``first``, then doubling up to ``maximum``."""
+    """Latents per streaming VAE decode call for one row.
+
+    The decoder's upsampler needs one latent of lookahead, so with ``g`` latents generated (fragment not finished) at
+    most ``g - 1`` can be decoded. The first call happens once ``first`` latents exist and decodes ``first - 1``
+    (at least 1); later calls double up to ``maximum``. The final call of a fragment decodes everything that is
+    left, which is at most ``maximum + 1`` latents because the schedule is checked after every LM step. The schedule
+    is not reset between fragments of a row: audio is already flowing by then, so later fragments use big chunks.
+    """
 
     def __init__(self, first: int = 2, maximum: int = 8) -> None:
         self.first = max(1, int(first))
-        self.maximum = max(self.first, int(maximum))
-        self.target = self.first
+        self.initial = max(1, self.first - 1)
+        self.maximum = max(self.initial, int(maximum))
+        self.target = self.initial
 
-    def ready(self, pending: int) -> bool:
-        return pending >= self.target
-
-    def advance(self) -> None:
-        self.target = min(self.maximum, self.target * 2)
+    def take(self, generated: int, decoded: int, final: bool) -> int:
+        """Number of latents to decode now (0 = not yet)."""
+        if final:
+            return max(0, generated - decoded)
+        if generated - 1 - decoded >= self.target:
+            n = self.target
+            self.target = min(self.maximum, self.target * 2)
+            return n
+        return 0
 
     def reset(self) -> None:
-        self.target = self.first
+        self.target = self.initial
 
 
 class SilenceTrimmer:

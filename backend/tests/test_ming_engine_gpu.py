@@ -27,11 +27,15 @@ pytestmark = pytest.mark.skipif(
     reason='needs CUDA, models/Ming-3.0-tts-0.5b and data/voices/voice_preset_sonjav2.wav')
 
 
+# vae_tile_rows=2 < rows in flight, so VAE jobs with several tiles are exercised too.
+ENGINE_KW = dict(max_slots=4, vae_tile_rows=2)
+
+
 @pytest.fixture(scope='module')
 def engine():
     from omnivoice_tts_server.ming.engine import MingEngine
 
-    eng = MingEngine(MODEL_DIR, 'cuda:0', max_slots=4, cuda_graphs=False)
+    eng = MingEngine(MODEL_DIR, 'cuda:0', cuda_graphs=False, **ENGINE_KW)
     eng.load()
     yield eng
     eng.close()
@@ -131,3 +135,145 @@ def test_streamed_decode_equals_full_decode_in_fp32(engine):
     assert streamed.shape == full.shape == (37 * 4 * 882,)
     rel = ((streamed - full).pow(2).mean().sqrt() / full.pow(2).mean().sqrt()).item()
     assert rel < 1e-4
+
+
+def test_cuda_graphs_match_eager_bit_exactly(engine, voice):
+    """Graph replay runs the very same kernels: graphs on == graphs off, alone and batched (multi-tile VAE jobs)."""
+    import soundfile as sf
+
+    from omnivoice_tts_server.ming.engine import MingEngine
+
+    texts = ['Guten Morgen zusammen.', 'Heute ist ein schöner Tag, findest du nicht?', 'Bis später!', 'Na klar.']
+    eager = [engine.render(t, prompt=voice, language='de', seed=20 + i) for i, t in enumerate(texts)]
+    graphed = MingEngine(MODEL_DIR, 'cuda:0', cuda_graphs=True, **ENGINE_KW)
+    graphed.load()
+    try:
+        assert graphed.stats()['cuda_graphs'] and graphed.stats()['graphs'] > 0
+        audio, sr = sf.read(str(VOICE), dtype='float32')
+        vp = graphed.voice_prompt('sonjav2', audio, sr, REF_TEXT, seed=0)
+        assert torch.equal(vp.latent, voice.latent)
+        streams = [graphed.submit(t, prompt=vp, language='de', seed=20 + i) for i, t in enumerate(texts)]
+        together = [np.concatenate(list(s)) for s in streams]
+        alone = graphed.render(texts[1], prompt=vp, language='de', seed=21)
+        ttfa = streams[0].metrics['ttfa_ms']
+    finally:
+        graphed.close()
+    for a, b in zip(eager, together):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(alone, eager[1])
+    assert ttfa < 1000
+
+
+def _slot_stream(sd, latents, schedule, dtype):
+    """Drive a SlotDecoder like the engine does (lookahead, growing chunks, final remainder) for one row."""
+    total = latents.shape[1]
+    parts, decoded, generated = [], 0, 0
+    from omnivoice_tts_server.ming.streaming import ChunkSchedule
+
+    sched = ChunkSchedule(*schedule)
+    while decoded < total:
+        generated = min(total, generated + 1)
+        final = generated == total
+        n = sched.take(generated, decoded, final)
+        if not n:
+            continue
+        chunk = n
+        window = [min(max(t, 0), generated - 1) for t in range(decoded - 1, decoded + chunk + 1)]
+        lat = latents[:, window].to(dtype)
+        meta = torch.tensor([[0, sd.scale * decoded, sd.scale * n, int(decoded == 0)]], device=lat.device)
+        out = torch.zeros(1, sd.out_len(chunk), device=lat.device)
+        sd.run(lat, meta, out)
+        audio = out[0, :sd.scale * n * sd.hop]
+        parts.append(audio[sd.pad:] if decoded == 0 else audio)
+        if final:
+            parts.append(out[0, sd.scale * chunk * sd.hop:])
+        decoded += n
+    return torch.cat(parts)
+
+
+def test_slot_decoder_is_exact_in_fp32(engine):
+    """The batched slot decoder (ring KV, closed-form upsampling, OLA carry) equals the one-pass decode."""
+    from omnivoice_tts_server.ming.vae_stream import SlotDecoder
+
+    dec = copy.deepcopy(engine.model.audio.decoder).float()
+    gen = torch.Generator(device='cpu').manual_seed(1)
+    with torch.inference_mode():
+        sd = SlotDecoder(dec, slots=1, max_chunk_latents=8, max_fragment_latents=512, device=torch.device('cuda'),
+                         dtype=torch.float32)
+        for length in (1, 5, 23, 70):
+            latents = torch.randn(1, length, 64, generator=gen).cuda()
+            full = dec.decode_full(latents)[0, 0]
+            got = _slot_stream(sd, latents, (2, 8), torch.float32)
+            assert got.shape == full.shape == (length * 4 * 882,)
+            rel = ((got - full).pow(2).mean().sqrt() / full.pow(2).mean().sqrt()).item()
+            assert rel < 1e-4, (length, rel)
+    del dec, sd
+    torch.cuda.empty_cache()
+
+
+def test_fast_flow_matches_reference_sampler(engine):
+    """FastFlow (fused/hoisted) vs the vendored sampler: same distance to the fp32 result, i.e. bf16 noise only."""
+    from omnivoice_tts_server.ming.engine import CFG_SCALE, FLOW_STEPS, SIGMA, TEMPERATURE
+    from omnivoice_tts_server.ming.flow import sample_flow
+
+    m = engine.model
+    gen = torch.Generator(device='cpu').manual_seed(2)
+    B = 8
+    z = (torch.randn(B, 1, 896, generator=gen) * 2).cuda().bfloat16()
+    hist = torch.randn(B, 1, 64, generator=gen).cuda().bfloat16()
+    noise = torch.randn(B, 1, 64, generator=gen).cuda().bfloat16()
+    kw = dict(cfg_scale=CFG_SCALE, steps=FLOW_STEPS, patch_size=1, sigma=SIGMA, temperature=TEMPERATURE)
+    with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16):
+        ref = sample_flow(m.dit, noise, z, hist, timesteps=engine.timesteps, **kw).float()
+        engine.ff.prepare(B)
+        fast = engine.ff.sample(noise, z, hist).float()
+        ref_agg = m.linear_proj_audio(ref.bfloat16()).float()
+        fast_agg = engine.ff.aggregate(ref.bfloat16()).float()
+        dit32 = copy.deepcopy(m.dit).float()
+        with torch.autocast('cuda', enabled=False):
+            exact = sample_flow(dit32, noise.float(), z.float(), hist.float(), timesteps=engine.timesteps.float(), **kw)
+    del dit32
+    torch.cuda.empty_cache()
+    ref_err = (ref - exact).abs().mean().item()
+    fast_err = (fast - exact).abs().mean().item()
+    assert fast_err < 1.5 * ref_err + 1e-3, (fast_err, ref_err)
+    assert (fast - ref).abs().mean().item() < 0.05
+    assert (fast_agg - ref_agg).abs().mean().item() < 0.02 * ref_agg.abs().mean().item() + 1e-3
+
+
+def test_fast_llm_matches_reference_forward(engine):
+    """Our prefill + slot-cache decode (fused projections) vs transformers' Qwen2Model forward: both are equally far
+    from the fp32 result (bf16 noise), whatever kernels they use."""
+    llm = engine.model.llm
+    gen = torch.Generator(device='cpu').manual_seed(3)
+    L = 40
+    ids = torch.randint(0, 150000, (1, L + 1), generator=gen).cuda()
+    llm32 = copy.deepcopy(llm).float()
+
+    def work():
+        x = llm.embed_tokens(ids)
+        with torch.autocast('cuda', enabled=False):
+            exact = llm32(inputs_embeds=x.float(), use_cache=False).last_hidden_state.float()
+        ref = llm(inputs_embeds=x, use_cache=False).last_hidden_state.float()
+        # Slot 3 of the engine buffers (no rows are active between tests; this runs on the engine's GPU thread).
+        engine.prefill_h[0, :L] = x[0, :L]
+        engine.prefill_slot.fill_(3)
+        engine.prefill_last.fill_(L - 1)
+        engine._prefill_core(64)
+        z_prefill = engine.z_buf[3, 0].float().clone()
+        engine.next_embed[3] = x[0, L:L + 1]
+        engine.pos_gpu.zero_()
+        engine.pos_gpu[3] = L
+        engine._decode_core(4)
+        return exact, ref, z_prefill, engine.z_buf[3, 0].float().clone()
+
+    exact, ref, z_prefill, z_decode = engine._run_on_gpu_thread(work)
+    del llm32
+    torch.cuda.empty_cache()
+
+    def err(a, b):
+        return (a - b).abs().mean().item()
+
+    for ours, pos in ((z_prefill, L - 1), (z_decode, L)):
+        assert err(ours, exact[0, pos]) < 1.3 * err(ref[0, pos], exact[0, pos]), pos
+        assert err(ours, ref[0, pos]) < 0.05 * exact.abs().mean().item(), pos

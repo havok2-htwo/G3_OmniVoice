@@ -87,15 +87,30 @@ def test_input_layout_positions():
 
 def test_chunk_schedule_grows_to_max():
     s = ChunkSchedule(2, 8)
-    seen = []
-    for _ in range(5):
-        seen.append(s.target)
-        s.advance()
-    assert seen == [2, 4, 8, 8, 8]
-    assert s.ready(8) and not s.ready(7)
+    sizes, decoded = [], 0
+    for generated in range(1, 40):
+        n = s.take(generated, decoded, final=False)
+        assert decoded + n <= generated - 1  # one latent of lookahead stays undecoded
+        if n:
+            sizes.append(n)
+            decoded += n
+    assert sizes[:5] == [1, 2, 4, 8, 8]
+    assert s.take(40, decoded, final=True) == 40 - decoded <= 9
     s.reset()
-    assert s.target == 2
-    assert ChunkSchedule(4, 2).maximum == 4
+    assert s.target == 1
+    assert ChunkSchedule(4, 2).maximum == 3 and ChunkSchedule(4, 2).initial == 3
+    assert ChunkSchedule(1, 8).initial == 1  # first audio after 2 latents either way
+
+
+def test_chunk_schedule_final_chunk_is_bounded():
+    for first in range(1, 9):
+        for maximum in range(1, 33):
+            for length in range(1, 120):
+                s = ChunkSchedule(first, maximum)
+                decoded = 0
+                for generated in range(1, length):
+                    decoded += s.take(generated, decoded, final=False)
+                assert 1 <= s.take(length, decoded, final=True) <= s.maximum + 1
 
 
 def _signal(rng, sr, pattern):

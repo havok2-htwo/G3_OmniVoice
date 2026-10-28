@@ -35,7 +35,7 @@ Terms used in the tables:
   - Bursts are the worst case for TTFA. Requests that arrive spread out, joining a busy engine, get first audio after about 40 ms (measured in the I-agent e2e test).
 - **Per-request RTF**: wall time of the request divided by the seconds of audio it returned (lower is better).
 - **Saturation**: C clients in a closed loop (each sends its next request when the previous one ends) for 45 s. Throughput = audio seconds of all completed requests / wall seconds.
-- **VRAM**: whole card `memory.used` from `nvidia-smi`, minus the baseline taken before the server started. WDDM cannot report per-process memory, so nothing else ran during these runs (Whisper was started only for the WER phase). The figures include the CUDA context.
+- **VRAM**: whole card `memory.used` from `nvidia-smi`, minus the baseline taken before the server started. WDDM cannot report per-process memory, so nothing else ran during these runs (the WER phase used the remote G3_Whisper). The figures include the CUDA context.
 
 ## 1. Headline: Ming vs OmniVoice (RTX 5090, same texts and voice)
 
@@ -146,10 +146,10 @@ The other services' peaks come from the 2026-10-16 per-service measurements (Whi
 
 Setup:
 
-- **Sentences:** 20 sentences. 13 contain numbers, dates, times, units or abbreviations (1990, 1.250 Euro, 14:30 Uhr, Dr., z. B., ICE 578, B 27, 2,5 Kilogramm, 7,99 Euro, GmbH, EU, …); 7 are plain.
+- **Sentences:** 20 sentences. 13 contain numbers, dates, times, units or abbreviations (1990, 1.250 Euro, 14:30 Uhr, Dr., z. B., ICE 578, B 27, 2,5 Kilogramm, 7,99 Euro, GmbH, EU, ...); 7 are plain.
 - **Voices:** SonjaV2, SonjaV3, Tom (male). 60 clips per engine and mode.
 - **Text modes:** `text_optimization` off (raw text to the engine) and `deterministic` (the server's rule-based numbers-to-words pass first).
-- **ASR and scoring:** G3_Whisper with Cohere Transcribe, scored with the admin WER scorer (German folding, number words to digits, 2-letter tolerance).
+- **ASR and scoring:** the G3_Whisper server at 192.168.20.146:7861 (Cohere Transcribe), scored with the admin WER scorer (German folding, number words to digits, 2-letter tolerance).
 - **Server settings:** Ming with 32 slots; OmniVoice with its `32GB VRAM` preset.
 
 Corpus WER (sum of word errors / sum of reference words):
@@ -158,8 +158,13 @@ Corpus WER (sum of word errors / sum of reference words):
 | --- | --- | --- | --- | --- | --- | --- |
 | Ming | off | 4.36 % | 6.62 % | 0.00 % | 45 / 60 | 3.5 / 4.0 / 5.5 % |
 | Ming | deterministic | 3.52 % | 5.34 % | 0.00 % | 47 / 60 | 4.0 / 4.0 / 2.5 % |
-| OmniVoice | off | 4.36 % | 6.36 % | 0.49 % | 43 / 60 | 3.5 / 5.0 / 4.5 % |
-| OmniVoice | deterministic | 3.69 % | 5.34 % | 0.49 % | 46 / 60 | 3.0 / 4.0 / 4.0 % |
+| OmniVoice | off | 4.69 % | 6.87 % | 0.49 % | 41 / 60 | 5.0 / 4.5 / 4.5 % |
+| OmniVoice | deterministic | 3.18 % | 4.84 % | 0.00 % | 48 / 60 | 3.5 / 3.5 / 2.5 % |
+
+**Run-to-run variation:**
+
+- **Ming** is deterministic per seed. A first pass with a local G3_Whisper (same Cohere model) gave identical transcripts and numbers.
+- **OmniVoice** renders differ from run to run. In the local-Whisper pass it scored 4.36 % (off) and 3.69 % (deterministic), so its ±0.5 % spread is larger than the gap between the engines.
 
 Most of the remaining "errors" are formatting differences between the reference and Whisper's output, the same for both engines:
 
@@ -175,17 +180,18 @@ Real misreadings found by inspecting every clip with errors:
   - `ICE 578` was read wrong for all three voices (e.g. "7588", an inserted nonsense word, "7 und 5 an 8").
   - `7,99` came out as "7,9" once (Tom).
   - With `deterministic` there were no real misreadings.
-  - All 21 plain clips were perfect.
+  - All 21 plain clips were perfect in both modes.
 - **OmniVoice, mode off (about 6 of 60):**
-  - an inserted "nicht";
-  - `15.` read as "5." or dropped (twice);
-  - `ICE 85`;
-  - "Euro" dropped before "Porto";
-  - a plain sentence with an inserted word ("Kinderspielen seien", SonjaV3, in both modes).
+  - garbled phone numbers ("03-Sucht", "03912345567");
+  - `ICE 78` and `ICE 85`;
+  - `15.` dropped;
+  - "Euro Porto" became "Port";
+  - a plain sentence with an inserted word ("Kinderspielen seien", SonjaV3).
+- **OmniVoice, mode deterministic (2 of 60):** "Poteau" for "Porto", and "IECE".
 
-Ming's German intelligibility is on par with OmniVoice; on plain text it was slightly better here.
+Ming's German intelligibility is on par with OmniVoice: equal or better with raw text, and within run-to-run noise with `deterministic`.
 
-- **Digit strings:** Ming is weaker on raw digit strings such as train numbers.
+- **Digit strings:** both engines are weak on raw digit strings such as train and phone numbers.
 - **Clients that send digits:** they should keep the server's `deterministic` text optimization on; `text_optimization_default` is an admin setting.
 - **What the WER does not measure:** voice similarity and prosody. Nobody listened to the samples systematically.
 
@@ -214,4 +220,4 @@ The engine uses only bf16 GEMMs, torch SDPA (default backend choice), CUDA graph
 - **The OmniVoice comparison uses its 32GB tier (batch 8) as shipped.** Larger OmniVoice batches give more throughput for more VRAM and latency (earlier tuning saw about 95x RT at batch 16–32); that is not a tier configuration and was not re-measured here.
 - **Run-to-run noise:** about ±5 % on throughput. The chunk-16 vs chunk-8 difference (−9 %) is above that, but is a single run.
 
-Raw JSON results (not committed) were in the session scratchpad under `bench_b/`: `ming_s{8,16,32,48,64}.json`, `ming_s64_c16.json`, `omni32.json`, `wer_ming.json`, `wer_omni.json`, `cap24card.json`, `cap4.0.json`, `cap35.json`.
+Raw JSON results (not committed) were in the session scratchpad under `bench_b/`: `ming_s{8,16,32,48,64}.json`, `ming_s64_c16.json`, `omni32.json`, `wer_ming_remote.json`, `wer_omni_remote.json` (local-Whisper pass: `wer_ming.json`, `wer_omni.json`), `cap24card.json`, `cap4.0.json`, `cap35.json`.

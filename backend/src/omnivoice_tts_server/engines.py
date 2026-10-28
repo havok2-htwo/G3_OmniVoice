@@ -435,6 +435,7 @@ class EngineSwitcher:
             self.status.message = 'Alte Engine wird entladen.'
             await self._publish('engine.switch.unloading')
             await queue.stop_worker()
+            await self._await_running_batches(drain_timeout_s)
             try:
                 await old_synth.unload()
             except Exception as exc:  # noqa: BLE001
@@ -448,6 +449,10 @@ class EngineSwitcher:
             if old_spec is None or old_spec.native_model_ids:
                 self.baseline = snapshot_engine_fields(settings)
             else:
+                if old_spec.uses_voice_profiles:
+                    # The default voice is shared with OmniVoice (restored_fields_for keeps it): one chosen under
+                    # this engine must survive a later switch through an engine that restores the baseline.
+                    self.baseline['default_voice'] = settings.default_voice
                 restore_engine_fields(settings, self.baseline, restored_fields_for(old_backend))
             store.prompt_cache.clear()
             store.models_loaded.clear()
@@ -540,6 +545,29 @@ class EngineSwitcher:
         self.status.state = 'ready'
         self.status.error = None
         self.status.message = f'{spec.label if spec else target} aktiv.'
+
+    async def _await_running_batches(self, timeout_s: float) -> None:
+        """Wait for stream batches that run as their own tasks (concurrent engines): stop_worker only awaits the
+        worker, and a batch dispatched right before it stopped would otherwise lose its engine in unload()."""
+        queue = self.app_state.queue_service
+        running = getattr(queue, 'running_batch_count', None)
+        if not callable(running):
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_s)
+        while running() and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+        if not running():
+            return
+        store = self.app_state.store
+        for job_id in list(store.active_request_ids):
+            try:
+                await queue.cancel(job_id)
+            except Exception:  # noqa: BLE001
+                pass
+        grace = loop.time() + CANCEL_GRACE_S
+        while running() and loop.time() < grace:
+            await asyncio.sleep(0.05)
 
     async def _drain(self, timeout_s: float, held: list[str]) -> tuple[int, int]:
         """Hold queued jobs back and let running ones finish (cancel them after timeout_s)."""

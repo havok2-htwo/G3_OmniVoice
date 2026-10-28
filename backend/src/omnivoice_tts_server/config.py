@@ -246,7 +246,8 @@ def load_runtime_settings(settings: Settings, environ: Mapping[str, str] | None 
     environment variable overrides (env > saved file > 'omnivoice'), so a container or a
     start script can pin the engine; every other saved field wins over the environment."""
     env = os.environ if environ is None else environ
-    env_backend = any(name.upper() == RUNTIME_BACKEND_ENV for name in env)
+    # Only a non-empty value pins the engine (as env_backend_override reports it): `-e VAR=` leaves it unpinned.
+    env_backend = any(name.upper() == RUNTIME_BACKEND_ENV and str(value).strip() for name, value in env.items())
     path = settings.data_dir / RUNTIME_SETTINGS_FILE
     if not path.exists():
         return

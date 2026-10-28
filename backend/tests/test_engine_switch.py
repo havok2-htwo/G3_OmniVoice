@@ -430,3 +430,83 @@ def test_phonon_mode_never_wipes_the_saved_voice_profiles(tmp_path, monkeypatch)
         assert client.delete('/api/admin/voices/v1').status_code == 409, 'profiles are not editable in Phonon mode'
     saved = json.loads((tmp_path / 'voice_profiles.json').read_text(encoding='utf-8'))
     assert 'v1' in saved
+
+
+def test_empty_backend_env_does_not_pin_the_engine(tmp_path) -> None:
+    """`docker run -e OMNIVOICE_TTS_RUNTIME_BACKEND=`: empty means unpinned, as env_backend_override reports it."""
+    (tmp_path / 'runtime_settings.json').write_text(json.dumps({'runtime_backend': 'ming'}), encoding='utf-8')
+    settings = Settings(data_dir=tmp_path, runtime_backend='')
+    environ = {'OMNIVOICE_TTS_RUNTIME_BACKEND': '  '}
+    load_runtime_settings(settings, environ=environ)
+    assert settings.runtime_backend == 'ming'
+    assert engines.env_backend_override(environ) is None
+
+
+def test_default_voice_chosen_under_ming_survives_ming_phonon_back(fake_ming, monkeypatch) -> None:
+    class FakePhonon(MockSynthesizer):
+        def __init__(self, settings, store) -> None:
+            super().__init__(sample_rate=24_000)
+
+        def load_now(self) -> None:
+            pass
+
+        def voice_names(self) -> list[str]:
+            return ['Catalog']
+
+    module = types.ModuleType('omnivoice_tts_server.phonon_runtime')
+    module.PhononSynthesizer = FakePhonon
+    monkeypatch.setitem(sys.modules, 'omnivoice_tts_server.phonon_runtime', module)
+    phonon_dir = fake_ming.parent / 'phonon'
+    phonon_dir.mkdir()
+    (phonon_dir / 'config.json').write_text('{}', encoding='utf-8')
+    client = make_client(ming_model_dir=fake_ming, phonon_model_dir=phonon_dir)
+    try:
+        _switch(client, 'ming')
+        before = client.get('/api/admin/settings').json()['default_voice']
+        chosen = 'Ming Favourite'
+        assert before != chosen
+        response = client.put('/api/admin/settings', json={'default_voice': chosen})
+        assert response.status_code == 200, response.text
+        _switch(client, 'phonon')
+        assert _saved(client)['default_voice'] == chosen, 'Phonon mode persists the OmniVoice-side default voice'
+        _switch(client, 'mock')
+        assert client.get('/api/admin/settings').json()['default_voice'] == chosen
+    finally:
+        _close(client)
+
+
+def test_switch_waits_for_a_stream_batch_dispatched_at_the_last_moment(fake_ming) -> None:
+    """A concurrent engine's stream batches run as their own tasks: unload must wait for them."""
+    import asyncio
+
+    from omnivoice_tts_server.engines import EngineSwitcher
+
+    order: list[str] = []
+
+    class Queue:
+        def __init__(self) -> None:
+            self.batches = 1
+
+        def running_batch_count(self) -> int:
+            return self.batches
+
+        async def cancel(self, job_id):  # pragma: no cover - not reached
+            order.append('cancel')
+
+    async def run():
+        queue = Queue()
+        switcher = EngineSwitcher.__new__(EngineSwitcher)
+        switcher.app_state = types.SimpleNamespace(queue_service=queue, store=InMemoryStore(max_queue_size=4))
+
+        async def finish_batch():
+            await asyncio.sleep(0.2)
+            order.append('batch done')
+            queue.batches = 0
+
+        task = asyncio.create_task(finish_batch())
+        await switcher._await_running_batches(5.0)
+        order.append('unload')
+        await task
+
+    asyncio.run(run())
+    assert order == ['batch done', 'unload']

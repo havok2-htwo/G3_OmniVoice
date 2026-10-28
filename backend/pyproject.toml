@@ -32,6 +32,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Ming-3.0-tts 0.5B engine (omnivoice_tts_server.ming): CAM++ speaker embedding on the CPU, local safetensors weights,
+# streaming 44.1 -> 24 kHz resampling. torch/torchaudio/transformers come with omnivoice.
+ming = ["onnxruntime>=1.20", "safetensors>=0.4", "soxr>=0.5"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

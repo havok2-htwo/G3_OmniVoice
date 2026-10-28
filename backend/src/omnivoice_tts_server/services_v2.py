@@ -43,7 +43,7 @@ from .domain.models import (
 )
 from .domain.state import InMemoryStore, JobRecord, RequestState, utcnow
 from .prompt_batch import chunk_pcm16le, split_sentences
-from .runtime_v2 import BatchSynthesisItem, query_nvidia_smi
+from .runtime_v2 import BatchSynthesisItem, BatchSynthesisResult, query_nvidia_smi
 from .capacity import (
     DEFAULT_PROMPT_SECONDS,
     batch_audio_budget_seconds,
@@ -122,6 +122,10 @@ class QueueService:
         self.events = events
         self.settings = settings
         self._background_tasks: set[asyncio.Task] = set()
+        # Concurrent native streaming (supports_concurrent_batches): sentences rendering in a running stream batch
+        # (until their sentence_finished marker) and the running batches by id.
+        self._native_inflight: set[tuple[str, int]] = set()
+        self._running_batches: dict[str, dict[str, Any]] = {}
 
     async def start_worker(self) -> None:
         if self.store.worker_task and not self.store.worker_task.done():
@@ -170,7 +174,7 @@ class QueueService:
             enabled=self.settings.sentence_chunking,
             short_sentence_merge_max_chars=self.settings.short_sentence_merge_max_chars,
             following_sentence_merge_min_chars=self.settings.following_sentence_merge_min_chars,
-            max_chars=max_chars_per_chunk(getattr(self.settings, 'vram_budget_mb', 0)),
+            max_chars=self._max_chars_per_sentence(),
         )
         if not sentences:
             raise RuntimeError('Missing input text')
@@ -299,10 +303,20 @@ class QueueService:
             else:
                 job.status = JobStatus.cancelling
                 job.error_message = 'Cancellation requested.'
+                if self._uses_concurrent_batches():
+                    self._concurrent_cancel_locked(job)
                 self.store.job_condition.notify_all()
 
         await self._publish_state()
         return job
+
+    def _max_chars_per_sentence(self) -> int:
+        """Sentence split length: the synthesizer's own capacity profile when it has one (Ming), else the limit the
+        OmniVoice VRAM budget implies."""
+        profile = self._capacity_profile()
+        if profile is not None and 'max_chars_per_chunk' in profile:
+            return max(0, int(profile.get('max_chars_per_chunk') or 0))
+        return max_chars_per_chunk(getattr(self.settings, 'vram_budget_mb', 0))
 
     async def delete(self, job_id: str) -> None:
         async with self.store.job_condition:
@@ -313,6 +327,8 @@ class QueueService:
                 job.cancel_requested = True
                 job.status = JobStatus.cancelling
                 job.error_message = 'Cancellation requested.'
+                if self._uses_concurrent_batches() and job_id not in self.store.waiting_requests:
+                    self._concurrent_cancel_locked(job)
             else:
                 self.store.jobs.pop(job_id, None)
                 self.store.request_states.pop(job_id, None)
@@ -364,6 +380,9 @@ class QueueService:
         return set()
 
     async def _worker_loop(self) -> None:
+        if self._uses_concurrent_batches():
+            await self._concurrent_worker_loop()
+            return
         self.store.worker_state = 'idle'
         await self._publish_state()
 
@@ -640,57 +659,9 @@ class QueueService:
                     if job.cancel_requested:
                         self._mark_cancelled_locked(job, 'Cancelled during native streaming.')
                         continue
-
-                    job.model_used = model_used
-                    job.sample_rate = result.sample_rate
-                    state.sample_rate = result.sample_rate
-                    job.status = JobStatus.streaming
-                    job.updated_at = utcnow()
-                    if job.metrics.get('model_warm_ms') is None:
-                        job.metrics['model_warm_ms'] = warm_ms
-                    job.metrics['batch_count'] = state.batch_count
-
-                    if result.pcm:
-                        key = (result.job_id, result.sentence_index)
-                        durations_by_key[key] = durations_by_key.get(key, 0) + result.duration_ms
-
-                    if result.pcm and result.sentence_index == state.next_emit_sentence_index:
-                        prebuffer_ms = max(0, int(getattr(self.settings, 'stream_prebuffer_ms', 0)))
-                        already_started = state.chunk_index_by_sentence.get(result.sentence_index, 0) > 0
-                        if prebuffer_ms > 0 and not already_started:
-                            state.pending_preview_pcm.setdefault(result.sentence_index, []).append(result.pcm)
-                            state.pending_preview_duration_ms.setdefault(result.sentence_index, []).append(result.duration_ms)
-                            buffered_ms = sum(state.pending_preview_duration_ms.get(result.sentence_index, []))
-                            if buffered_ms >= prebuffer_ms:
-                                pending_chunks = state.pending_preview_pcm.pop(result.sentence_index, [])
-                                state.pending_preview_duration_ms.pop(result.sentence_index, None)
-                                for pending_index, chunk in enumerate(pending_chunks):
-                                    self._emit_native_chunk_locked(
-                                        job,
-                                        state,
-                                        sentence_index=result.sentence_index,
-                                        pcm=chunk,
-                                        sample_rate=result.sample_rate,
-                                        batch_id=batch_id,
-                                        final_chunk_of_sentence=result.sentence_finished
-                                        and pending_index == len(pending_chunks) - 1,
-                                    )
-                        else:
-                            self._emit_native_chunk_locked(
-                                job,
-                                state,
-                                sentence_index=result.sentence_index,
-                                pcm=result.pcm,
-                                sample_rate=result.sample_rate,
-                                batch_id=batch_id,
-                                final_chunk_of_sentence=result.sentence_finished,
-                            )
-                    elif result.pcm:
-                        state.pending_preview_pcm.setdefault(result.sentence_index, []).append(result.pcm)
-                        state.pending_preview_duration_ms.setdefault(result.sentence_index, []).append(result.duration_ms)
-                    if result.sentence_finished:
-                        state.completed_streaming_sentence_indices.add(result.sentence_index)
-                        self._flush_native_streaming_sentences_locked(job, state, batch_id=batch_id)
+                    self._apply_native_result_locked(
+                        job, state, result, durations_by_key, batch_id=batch_id, model_used=model_used, warm_ms=warm_ms
+                    )
                 self.store.job_condition.notify_all()
 
         async with self.store.job_condition:
@@ -707,27 +678,391 @@ class QueueService:
                 if job.cancel_requested:
                     self._mark_cancelled_locked(job, 'Cancelled during native streaming.')
                     continue
-
-                key = (item.job_id, item.sentence_index)
-                duration_ms = durations_by_key.get(key, 0)
-                state.sentence_duration_ms.pop(item.sentence_index, None)
-                state.ready_sentence_pcm.pop(item.sentence_index, None)
-                state.inflight_sentence_indices.discard(item.sentence_index)
-                if duration_ms <= 0:
-                    self._fail_job_locked(job, 'Native stream produced no audio for a sentence.')
-                    continue
-                state.completed_streaming_sentence_indices.add(item.sentence_index)
-                self._flush_native_streaming_sentences_locked(job, state, batch_id=batch_id)
-
-                job.updated_at = utcnow()
-                job.metrics['batch_count'] = state.batch_count
-                if state.is_complete():
-                    self._complete_job_locked(job, state)
-                elif job.status not in {JobStatus.failed, JobStatus.cancelled, JobStatus.cancelling}:
-                    job.status = JobStatus.running
+                self._finish_native_item_locked(job, state, item, durations_by_key, batch_id=batch_id)
 
             self._recompute_positions_locked()
             self.store.job_condition.notify_all()
+
+    def _apply_native_result_locked(
+        self,
+        job: JobRecord,
+        state: RequestState,
+        result: BatchSynthesisResult,
+        durations_by_key: dict[tuple[str, int], int],
+        *,
+        batch_id: str,
+        model_used: str,
+        warm_ms: int,
+    ) -> None:
+        """One natively streamed chunk (or sentence-finished marker): emit it in sentence order or buffer it."""
+        job.model_used = model_used
+        job.sample_rate = result.sample_rate
+        state.sample_rate = result.sample_rate
+        # The serial native path streams stream requests only; concurrent engines also collect non-stream requests
+        # this way, and those stay 'running' like a rendered batch.
+        job.status = JobStatus.streaming if job.request.stream else JobStatus.running
+        job.updated_at = utcnow()
+        if job.metrics.get('model_warm_ms') is None:
+            job.metrics['model_warm_ms'] = warm_ms
+        job.metrics['batch_count'] = state.batch_count
+
+        if result.pcm:
+            key = (result.job_id, result.sentence_index)
+            durations_by_key[key] = durations_by_key.get(key, 0) + result.duration_ms
+
+        if result.pcm and result.sentence_index == state.next_emit_sentence_index:
+            prebuffer_ms = max(0, int(getattr(self.settings, 'stream_prebuffer_ms', 0)))
+            already_started = state.chunk_index_by_sentence.get(result.sentence_index, 0) > 0
+            if prebuffer_ms > 0 and not already_started:
+                state.pending_preview_pcm.setdefault(result.sentence_index, []).append(result.pcm)
+                state.pending_preview_duration_ms.setdefault(result.sentence_index, []).append(result.duration_ms)
+                buffered_ms = sum(state.pending_preview_duration_ms.get(result.sentence_index, []))
+                if buffered_ms >= prebuffer_ms:
+                    pending_chunks = state.pending_preview_pcm.pop(result.sentence_index, [])
+                    state.pending_preview_duration_ms.pop(result.sentence_index, None)
+                    for pending_index, chunk in enumerate(pending_chunks):
+                        self._emit_native_chunk_locked(
+                            job,
+                            state,
+                            sentence_index=result.sentence_index,
+                            pcm=chunk,
+                            sample_rate=result.sample_rate,
+                            batch_id=batch_id,
+                            final_chunk_of_sentence=result.sentence_finished
+                            and pending_index == len(pending_chunks) - 1,
+                        )
+            else:
+                self._emit_native_chunk_locked(
+                    job,
+                    state,
+                    sentence_index=result.sentence_index,
+                    pcm=result.pcm,
+                    sample_rate=result.sample_rate,
+                    batch_id=batch_id,
+                    final_chunk_of_sentence=result.sentence_finished,
+                )
+        elif result.pcm:
+            state.pending_preview_pcm.setdefault(result.sentence_index, []).append(result.pcm)
+            state.pending_preview_duration_ms.setdefault(result.sentence_index, []).append(result.duration_ms)
+        if result.sentence_finished:
+            state.completed_streaming_sentence_indices.add(result.sentence_index)
+            self._flush_native_streaming_sentences_locked(job, state, batch_id=batch_id)
+
+    def _finish_native_item_locked(
+        self,
+        job: JobRecord,
+        state: RequestState,
+        item: BatchSynthesisItem,
+        durations_by_key: dict[tuple[str, int], int],
+        *,
+        batch_id: str,
+        concurrent: bool = False,
+    ) -> None:
+        """A natively streamed sentence is done: flush what is in order, complete the job when nothing is left."""
+        key = (item.job_id, item.sentence_index)
+        duration_ms = durations_by_key.get(key, 0)
+        state.sentence_duration_ms.pop(item.sentence_index, None)
+        state.ready_sentence_pcm.pop(item.sentence_index, None)
+        state.inflight_sentence_indices.discard(item.sentence_index)
+        if duration_ms <= 0:
+            self._fail_job_locked(job, 'Native stream produced no audio for a sentence.')
+            if concurrent:
+                self._cancel_engine_rows(job.job_id)
+            return
+        state.completed_streaming_sentence_indices.add(item.sentence_index)
+        self._flush_native_streaming_sentences_locked(job, state, batch_id=batch_id)
+
+        job.updated_at = utcnow()
+        job.metrics['batch_count'] = state.batch_count
+        if state.is_complete():
+            self._complete_job_locked(job, state)
+        elif concurrent:
+            # Other sentences of the job may still render in another batch: keep its status.
+            return
+        elif job.status not in {JobStatus.failed, JobStatus.cancelled, JobStatus.cancelling}:
+            job.status = JobStatus.running
+
+    # -- concurrent native streaming (engines with supports_concurrent_batches, e.g. Ming) -------------------------
+    #
+    # The engine runs one continuous batch: a stream batch dispatched while others are still streaming simply joins
+    # it at the next step. So the worker does not await a stream batch here; each runs as its own task and the worker
+    # keeps planning, bounded by the synthesizer's capacity_profile (sentences in flight <= engine slots). All job
+    # state is still only touched under store.job_condition.
+
+    def _uses_concurrent_batches(self) -> bool:
+        synthesizer = self.synthesizer
+        return (
+            bool(getattr(synthesizer, 'supports_concurrent_batches', False))
+            and bool(getattr(synthesizer, 'supports_native_streaming', False))
+            and hasattr(synthesizer, 'stream_batch')
+        )
+
+    def _capacity_profile(self) -> dict[str, Any] | None:
+        profile = getattr(self.synthesizer, 'capacity_profile', None)
+        if callable(profile):
+            try:
+                profile = profile()
+            except Exception:
+                return None
+        return profile if isinstance(profile, dict) else None
+
+    def _concurrent_limits(self) -> tuple[int, int, int, int]:
+        """(sentences in flight, per job without headroom, slots kept free for new jobs, items per batch)."""
+        profile = self._capacity_profile() or {}
+        total = max(1, int(profile.get('max_inflight_items') or self.settings.max_batch_size))
+        per_job = max(1, int(profile.get('max_inflight_per_job') or 1))
+        headroom = max(0, int(profile.get('newcomer_headroom') or 0))
+        batch_items = max(1, int(profile.get('max_batch_items') or total))
+        return total, per_job, headroom, batch_items
+
+    def _build_concurrent_plan_locked(self) -> list[tuple[str, int]]:
+        """Sentences to dispatch now: first the first sentence of every job that has none rendering yet (lowest
+        time to first audio), then round-robin. A job runs up to max_inflight_per_job sentences at once, more only
+        while newcomer_headroom slots stay free. Groups do not matter: every engine row carries its own voice,
+        language and seed."""
+        total, per_job, headroom, max_items = self._concurrent_limits()
+        inflight = len(self._native_inflight)
+        room = min(total - inflight, max_items)
+        if room <= 0:
+            return []
+        eligible = [
+            job_id
+            for job_id in self.store.active_request_ids
+            if job_id in self.store.request_states
+            and job_id in self.store.jobs
+            and self.store.request_states[job_id].has_pending_sentences()
+            and not self.store.jobs[job_id].cancel_requested
+        ]
+        if not eligible:
+            return []
+        running: dict[str, int] = {}
+        for job_id, _ in self._native_inflight:
+            running[job_id] = running.get(job_id, 0) + 1
+        plan: list[tuple[str, int]] = []
+        planned: dict[str, int] = {}
+
+        def take(job_id: str) -> None:
+            state = self.store.request_states[job_id]
+            offset = planned.get(job_id, 0)
+            plan.append((job_id, state.pending_sentence_indices[offset]))
+            planned[job_id] = offset + 1
+
+        for job_id in eligible:
+            if len(plan) >= room:
+                return plan
+            if running.get(job_id, 0) == 0:
+                take(job_id)
+        made_progress = True
+        while len(plan) < room and made_progress:
+            made_progress = False
+            for job_id in eligible:
+                if len(plan) >= room:
+                    break
+                state = self.store.request_states[job_id]
+                offset = planned.get(job_id, 0)
+                if offset >= len(state.pending_sentence_indices):
+                    continue
+                if running.get(job_id, 0) + offset >= per_job and inflight + len(plan) + 1 > total - headroom:
+                    continue
+                take(job_id)
+                made_progress = True
+        return plan
+
+    def _concurrent_dispatch_ready_locked(self) -> bool:
+        if self.store.waiting_requests and len(self.store.active_request_ids) < self.settings.max_parallel_requests:
+            return True
+        return bool(self._build_concurrent_plan_locked())
+
+    def _cancel_engine_rows(self, job_id: str) -> None:
+        cancel_job = getattr(self.synthesizer, 'cancel_job', None)
+        if callable(cancel_job):
+            try:
+                cancel_job(job_id)
+            except Exception as exc:
+                logger.warning('cancelling engine rows of %s failed: %s', job_id, exc)
+
+    def _concurrent_cancel_locked(self, job: JobRecord) -> None:
+        """A cancel in concurrent mode: stop the job's engine rows; with none rendering, the job ends now (no batch
+        end would ever look at it again)."""
+        state = self.store.request_states.get(job.job_id)
+        if state is None or not state.inflight_sentence_indices:
+            self._mark_cancelled_locked(job, 'Cancelled during synthesis.')
+        self._cancel_engine_rows(job.job_id)
+
+    def _refresh_running_batches_locked(self) -> None:
+        running = list(self._running_batches.values())
+        self.store.current_batch = running[-1] if running else None
+        self.store.worker_state = 'running' if running else 'idle'
+
+    async def _concurrent_worker_loop(self) -> None:
+        self.store.worker_state = 'idle'
+        await self._publish_state()
+
+        while not self.store.worker_stop.is_set():
+            async with self.store.job_condition:
+                await self.store.job_condition.wait_for(
+                    lambda: self.store.worker_stop.is_set() or self._concurrent_dispatch_ready_locked()
+                )
+                if self.store.worker_stop.is_set():
+                    break
+                self._promote_waiting_locked()
+                remaining_s = self._batch_wait_remaining_s_locked()
+                while remaining_s > 0:
+                    try:
+                        await asyncio.wait_for(self.store.job_condition.wait(), timeout=remaining_s)
+                    except asyncio.TimeoutError:
+                        pass
+                    if self.store.worker_stop.is_set():
+                        break
+                    self._promote_waiting_locked()
+                    remaining_s = self._batch_wait_remaining_s_locked()
+                if self.store.worker_stop.is_set():
+                    break
+
+                batch_plan = self._build_concurrent_plan_locked()
+                if not batch_plan:
+                    continue
+                batch_items, current_batch, involved_job_ids = self._reserve_batch_locked(batch_plan)
+                if not batch_items or current_batch is None:
+                    continue
+                for item in batch_items:
+                    self._native_inflight.add((item.job_id, item.sentence_index))
+                self._running_batches[current_batch['batch_id']] = current_batch
+                self.store.current_batch = current_batch
+                resident = self._resident_models()
+                for job_id in involved_job_ids:
+                    job = self.store.jobs[job_id]
+                    if job.started_at is None:
+                        job.started_at = utcnow()
+                        job.metrics['queue_wait_ms'] = int((job.started_at - job.created_at).total_seconds() * 1000)
+                    if job.status not in {JobStatus.cancelling, JobStatus.cancelled, JobStatus.streaming}:
+                        target_model = job.request.model or self.store.active_model
+                        needs_warm = bool(target_model) and target_model not in resident
+                        job.status = JobStatus.warming if needs_warm else JobStatus.running
+                    job.updated_at = utcnow()
+                self.store.worker_state = 'running' if resident else 'warming'
+                anchor_model = batch_items[0].request.model
+
+            await self._publish_state()
+            try:
+                model_used, warm_ms = await self.synthesizer.ensure_model(anchor_model)
+            except Exception as exc:
+                await self._end_concurrent_batch(batch_items, involved_job_ids, current_batch, '', {}, set(), exc)
+                continue
+            spawn_tracked_task(
+                self.store,
+                self._run_concurrent_batch(
+                    batch_items=batch_items,
+                    involved_job_ids=involved_job_ids,
+                    current_batch=current_batch,
+                    model_used=model_used,
+                    warm_ms=warm_ms,
+                ),
+                label=f'stream batch {current_batch["batch_id"]}',
+            )
+
+        self.store.worker_state = 'stopped'
+        await self._publish_state()
+
+    async def _run_concurrent_batch(
+        self,
+        *,
+        batch_items: list[BatchSynthesisItem],
+        involved_job_ids: list[str],
+        current_batch: dict[str, Any],
+        model_used: str,
+        warm_ms: int,
+    ) -> None:
+        durations_by_key: dict[tuple[str, int], int] = {}
+        finished: set[tuple[str, int]] = set()
+        batch_id = str(current_batch.get('batch_id') or '')
+        error: BaseException | None = None
+        try:
+            async for results in self.synthesizer.stream_batch(
+                batch_items,
+                chunk_size=max(2, int(self.settings.stream_chunk_ms / 10)),
+                overlap=4,
+            ):
+                async with self.store.job_condition:
+                    self._mark_loaded_model_locked(model_used)
+                    for result in results:
+                        key = (result.job_id, result.sentence_index)
+                        if result.sentence_finished:
+                            # The engine slot is free again: the worker may dispatch the next sentence.
+                            finished.add(key)
+                            self._native_inflight.discard(key)
+                        job = self.store.jobs.get(result.job_id)
+                        state = self.store.request_states.get(result.job_id)
+                        if job is None or state is None:
+                            continue
+                        if job.cancel_requested:
+                            self._mark_cancelled_locked(job, 'Cancelled during native streaming.')
+                            self._cancel_engine_rows(job.job_id)
+                            continue
+                        self._apply_native_result_locked(
+                            job, state, result, durations_by_key, batch_id=batch_id, model_used=model_used,
+                            warm_ms=warm_ms,
+                        )
+                    self.store.job_condition.notify_all()
+        except asyncio.CancelledError:
+            error = RuntimeError('Synthesis was interrupted (server shutdown).')
+            raise
+        except Exception as exc:
+            logger.warning('native stream batch %s failed: %s', batch_id, exc)
+            error = exc
+        finally:
+            await self._end_concurrent_batch(
+                batch_items, involved_job_ids, current_batch, model_used, durations_by_key, finished, error
+            )
+
+    async def _end_concurrent_batch(
+        self,
+        batch_items: list[BatchSynthesisItem],
+        involved_job_ids: list[str],
+        current_batch: dict[str, Any],
+        model_used: str,
+        durations_by_key: dict[tuple[str, int], int],
+        finished: set[tuple[str, int]],
+        error: BaseException | None,
+    ) -> None:
+        """Release the batch's slots and settle its sentences: finished ones complete their jobs when nothing else
+        is left; with an error, every job with an unfinished sentence in this batch fails (cancelled ones cancel)."""
+        batch_id = str(current_batch.get('batch_id') or '')
+        async with self.store.job_condition:
+            for item in batch_items:
+                self._native_inflight.discard((item.job_id, item.sentence_index))
+            self._running_batches.pop(batch_id, None)
+            self._refresh_running_batches_locked()
+            if model_used:
+                self._mark_loaded_model_locked(model_used)
+            self.store.recent_batches.append(current_batch)
+
+            for item in batch_items:
+                job = self.store.jobs.get(item.job_id)
+                state = self.store.request_states.get(item.job_id)
+                if job is None or state is None:
+                    continue
+                if job.cancel_requested:
+                    self._mark_cancelled_locked(job, 'Cancelled during native streaming.')
+                    self._cancel_engine_rows(job.job_id)
+                    continue
+                if error is not None and (item.job_id, item.sentence_index) not in finished:
+                    self._fail_job_locked(job, str(error) or type(error).__name__)
+                    self._cancel_engine_rows(job.job_id)
+                    continue
+                self._finish_native_item_locked(job, state, item, durations_by_key, batch_id=batch_id, concurrent=True)
+
+            self._recompute_positions_locked()
+            self.store.prune_terminal_jobs(
+                retention_days=self.settings.retention_days,
+                max_retained_jobs=self.settings.max_retained_jobs,
+                max_retained_audio_bytes=int(getattr(self.settings, 'max_retained_audio_mb', 0) or 0) * 1024 * 1024,
+            )
+            self.store.job_condition.notify_all()
+        try:
+            await self._publish_state()
+        except Exception:
+            pass
 
     def _batch_wait_remaining_s_locked(self) -> float:
         """Seconds the worker should still wait for more requests before planning a batch (0 = plan now).
@@ -773,7 +1108,7 @@ class QueueService:
             return
         job.sample_rate = sample_rate
         state.sample_rate = sample_rate
-        job.status = JobStatus.streaming
+        job.status = JobStatus.streaming if job.request.stream else JobStatus.running
         job.updated_at = utcnow()
         if job.first_audio_at is None:
             job.first_audio_at = utcnow()

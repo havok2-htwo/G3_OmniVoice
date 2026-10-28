@@ -126,3 +126,43 @@ def capacity_summary(vram_budget_mb: int | float | None) -> dict:
         'model_resident_mb': MODEL_RESIDENT_MB,
         'mb_per_audio_second': MB_PER_AUDIO_SECOND,
     }
+
+
+# --- Ming-3.0-tts 0.5B (runtime_backend='ming') --------------------------------------------------------------------
+# Measured 2026-10 on the RTX 5090 (ming/engine.py, CUDA graphs, bf16, batch_invariant): the engine allocates its KV
+# cache for every slot at load, so VRAM does not grow with the audio a batch carries. Peak per process (nvidia-smi,
+# CUDA context included): 4.25 GB at 16 slots, 4.38 GB at 32, 4.64 GB at 64 -> ~4.1 GB + ~8.5 MB per slot. Every slot
+# count up to 64 fits the 24 GB 3090 tier.
+MING_RESIDENT_BASE_MB = 4114
+MING_MB_PER_SLOT = 8.5
+# Queue-level sentence cap: the engine splits long text into ~24-word fragments itself and streams them seamlessly in
+# one row, so this only bounds a row's length (and lets one long paragraph spread over several slots).
+MING_MAX_CHARS_PER_SENTENCE = 400
+# Sentences of one job that may run at the same time even when other jobs wait; more only while at least
+# `newcomer_headroom` slots stay free, so a request arriving during a busy period still starts within about one step.
+MING_INFLIGHT_PER_JOB = 2
+
+
+def ming_resident_vram_mb(max_slots: int) -> int:
+    return int(MING_RESIDENT_BASE_MB + MING_MB_PER_SLOT * max(1, int(max_slots)))
+
+
+def ming_capacity_profile(max_slots: int) -> dict[str, Any]:
+    """Queue limits for the Ming engine (see QueueService._build_concurrent_plan_locked).
+
+    max_chars_per_chunk   queue sentence split length (replaces the OmniVoice VRAM-derived limit)
+    max_batch_items       sentences per dispatched stream batch
+    max_inflight_items    sentences rendering at once over all running batches (= engine slots)
+    max_inflight_per_job  sentences of one job that always may run together
+    newcomer_headroom     slots kept free for new jobs before a job gets more than max_inflight_per_job
+    """
+    slots = max(1, int(max_slots))
+    return {
+        'engine': 'ming',
+        'max_chars_per_chunk': MING_MAX_CHARS_PER_SENTENCE,
+        'max_batch_items': slots,
+        'max_inflight_items': slots,
+        'max_inflight_per_job': min(slots, MING_INFLIGHT_PER_JOB),
+        'newcomer_headroom': max(1, slots // 4) if slots > MING_INFLIGHT_PER_JOB else 0,
+        'estimated_peak_vram_mb': ming_resident_vram_mb(slots),
+    }

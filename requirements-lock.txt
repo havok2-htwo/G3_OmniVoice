@@ -30,6 +30,14 @@
 # FlashInfer (Linux only, NOT part of this Windows snapshot): the Dockerfile installs
 #   flashinfer-python==0.6.15.post1 flashinfer-jit-cache==0.6.15.post1+cu130
 #   --extra-index-url https://flashinfer.ai/whl/cu130/
+#
+# Ming-3.0-tts engine (backend extra [ming], install.ps1 installs ".[dev,ming]"): einops,
+# onnxruntime (CPU, CAM++ speaker encoder) and soxr (44.1 -> 24 kHz stream resampler) are
+# pinned below. Ming's model code is vendored in omnivoice_tts_server/ming (MIT, upstream
+# github.com/inclusionAI/Ming-3.0-tts commit 9332fb9); its weights live in models/Ming-3.0-tts-0.5b.
+#
+# Known drift (2026-10-28): the machine's .conda-env still runs omnivoice 0.1.5 and
+# transformers 5.9.0 (the pins below are the 0.2.1 / 5.10.2 stack the Dockerfile uses).
 
 accelerate==1.13.0
 annotated-doc==0.0.4
@@ -45,6 +53,7 @@ click==8.4.1
 colorama==0.4.6
 decorator==5.3.1
 docopt==0.6.2
+einops==0.8.2
 fastapi==0.136.3
 filelock==3.29.0
 fsspec==2026.4.0
@@ -79,6 +88,7 @@ numba==0.65.1
 num2words==0.5.14
 numpy==2.4.4
 omnivoice==0.2.1
+onnxruntime==1.31.1
 orjson==3.11.9
 packaging==26.0
 pandas==3.0.3

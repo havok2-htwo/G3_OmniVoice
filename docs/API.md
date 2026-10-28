@@ -454,6 +454,21 @@ are the code defaults. The VRAM figures were measured on the RTX 5090 with the 1
 Cloning throughput is ~35x realtime from batch 4 on and flat above it, so the tiers
 stop at 8 and 4.
 
+The engine tiers follow (they also set `runtime_backend=ming`, so saving one switches
+the engine live; the OmniVoice tiers above never change the engine):
+
+| Name | Machine | `ming_max_slots` / parallel | Chunks (first / later latents) |
+| --- | --- | --- | --- |
+| `Ming 32GB VRAM` | RTX 5090, all G3 services on one card | 32 / 32 | 2 / 8 |
+| `Ming 24GB VRAM` | RTX 4090 or RTX 3090, all G3 services on one card | 16 / 16 | 2 / 8 |
+| `Ming 24+8 VRAM` | 3090 + 2070S, Ming on the 24 GB card (card matching) | 16 / 16 | 2 / 8 |
+| `Ming best performance` | the card belongs to Ming alone | 48 / 48 | 2 / 16 |
+
+All Ming tiers: `ming_cuda_graphs` on, `ming_output_sample_rate` 24000, `batch_wait_ms` 0
+(rows join the running decode loop at the next step). The slot counts are provisional
+until the Ming benchmark sets them. For 48 parallel requests the queue limit must be at
+least 48 (`queue_limit` is not a preset key).
+
 First start: when `data/runtime_settings.json` does not exist yet, the server applies
 `24GB VRAM` (`presets.FIRST_START_PRESET`) on top of the code defaults, validated like
 `PUT /api/admin/settings`, and writes only those tier keys to that file, so

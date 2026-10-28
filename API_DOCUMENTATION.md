@@ -104,10 +104,36 @@ explicit `task_type` selects request behavior:
 | `k2-fsa/OmniVoice-VoiceDesign` | `VoiceDesign` | voice design from structured `instructions` |
 | `k2-fsa/OmniVoice-Base` | `Base` | voice cloning with a saved voice profile or reference audio/text |
 
-Runtime backends:
+Runtime backends (engines):
 
-- `mock`: fast test backend for UI and API tests
-- `omnivoice`: real `k2-fsa/OmniVoice` backend
+| Backend | Engine | Model ids | Voices | Streaming |
+| --- | --- | --- | --- | --- |
+| `omnivoice` (default) | `k2-fsa/OmniVoice` | the three aliases above | voice profiles, `Auto Voice`, VoiceDesign | per sentence (whole sentence rendered, then sliced) |
+| `ming` | `inclusionAI/Ming-3.0-tts-0.5B` (MIT) | `inclusionAI/Ming-3.0-tts-0.5B-Base` | voice profiles (clone), `Auto Voice` | native chunk streaming inside each sentence |
+| `phonon` | `gradium/phonon-40m-multilingual` (CPU) | `gradium/phonon-40m-multilingual` | its own catalog voices (no profiles) | native chunk streaming |
+| `mock` | sine tone | the OmniVoice aliases | as OmniVoice | per sentence |
+
+- The engine is switched live (`POST /api/admin/runtime/backend`, the settings PUT or the
+  admin UI "Engine" panel) without a restart. Clients keep using the same endpoints;
+  `/api/v1/models`, `/v1/models` and `/v1/audio/models` list the active engine's model ids.
+- A request that names a model id the active engine does not serve (for example
+  `k2-fsa/OmniVoice-Base` while Ming runs, or an OpenAI alias like `tts-1`) is served by the
+  active engine's default model, so existing clients need no change. OmniVoice keeps every
+  model id as given.
+- **Ming** clones the saved voice profiles (the same `data/voice_profiles.json` as OmniVoice;
+  `ref_text` is required, as for OmniVoice) through its `...-Base` alias, so the default voice,
+  `voice` names and the OpenAI voice routing work unchanged. Inline `ref_audio` + `ref_text`
+  works as well. Output is resampled 44.1 kHz -> 24 kHz with a stateful streaming resampler,
+  so every endpoint keeps the **24 kHz mono PCM16** contract (`ming_output_sample_rate=44100`
+  gives the native rate; raw `audio/pcm` clients must then know the rate). Ming's quality
+  settings are fixed (10 flow steps, CFG 2.0, no reference trimming); `num_step`,
+  `guidance_scale` and the other OmniVoice generation settings do not apply to it.
+- **Phonon** runs on the CPU with its own voice catalog; saved voice profiles are not used
+  (and cannot be edited) while it is active.
+- Finetuning (data generation, training, promotion) trains OmniVoice checkpoints and returns
+  `409` while another engine is active.
+- Startup order for the engine: `OMNIVOICE_TTS_RUNTIME_BACKEND` if set, else the saved
+  `runtime_backend` in `data/runtime_settings.json`, else `omnivoice`.
 
 ## Speech Request Shape
 
@@ -484,7 +510,12 @@ Purpose:
 
 - submits a streaming synthesis job
 - returns newline-delimited JSON events
-- emits chunks after sentence/batch generation because OmniVoice does not expose native partial audio streaming
+- OmniVoice: emits chunks after sentence/batch generation because OmniVoice does not expose native partial audio streaming
+- Ming and Phonon: native streaming; every audio chunk is sent the moment the engine produced it
+  (`"native_stream": true`), the first one after a few 80 ms latents of the first sentence
+  (`ming_first_chunk_latents`)
+- chunks always arrive in sentence order, and `sample_rate` is 24000 for every engine (unless
+  `ming_output_sample_rate` is set to 44100)
 
 Content type:
 
@@ -531,13 +562,14 @@ Behavior:
 - `stream=false` with `response_format="wav"`: returns `audio/wav`
 - `stream=false` with `response_format="mp3"`: returns `audio/mpeg`
 - `stream=true`: returns raw `audio/pcm` chunks
-- streaming PCM is 24 kHz, mono, signed 16-bit little-endian
+- streaming PCM is 24 kHz, mono, signed 16-bit little-endian (for every engine; Ming resamples its
+  44.1 kHz output per stream)
 
 OpenAI-client tolerance:
 
 - `model`: exact supported model ids (case-insensitive) are used as-is; OpenAI aliases (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, ...) and unknown ids fall back to the active model
 - `voice`: resolved case-insensitively against built-in voices and saved voice profiles (by id or name); standard OpenAI voice names (`alloy`, `echo`, `fable`, ...) fall back to the default voice; anything else returns `404`
-- a resolved custom voice profile automatically routes the request to the `k2-fsa/OmniVoice-Base` (voice clone) alias
+- a resolved custom voice profile automatically routes the request to the active engine's `...-Base` (voice clone) alias (`k2-fsa/OmniVoice-Base`, or `inclusionAI/Ming-3.0-tts-0.5B-Base` while Ming runs)
 - the `Authorization: Bearer ...` header sent by OpenAI clients is accepted and ignored (the endpoint stays public, like all synthesis endpoints)
 - `text_optimization` (top level via `extra_body`, or `metadata.text_optimization`) is honoured; when it ran, the response has an `X-Text-Optimization` header
 
@@ -730,6 +762,12 @@ Response fields include:
   differs from the settings (for example FlashInfer requested on Windows)
 - generation defaults such as `num_step`, `guidance_scale`, temperatures, and chunking controls
 - `text_optimization_default` (`off` | `deterministic`)
+- `runtime_backend` (active engine), `runtime_backend_env` (set when `OMNIVOICE_TTS_RUNTIME_BACKEND`
+  pins the engine at startup) and `runtime_backend_pending` (target of a running live switch)
+- Ming engine settings: `ming_model_id`, `ming_model_dir`, `ming_max_slots` (1-64, rows decoded at
+  once), `ming_cuda_graphs`, `ming_output_sample_rate` (24000 | 44100), `ming_first_chunk_latents`
+  (1-8, 80 ms each, first chunk of a sentence), `ming_max_chunk_latents` (1-32, later chunks). They
+  apply when Ming loads (engine switch, model reload or restart).
 
 ### `PUT /api/admin/settings`
 
@@ -789,6 +827,77 @@ Common request fields:
 `text_optimization_default` applies to public synthesis requests that do not send
 `text_optimization` themselves (env: `OMNIVOICE_TTS_TEXT_OPTIMIZATION_DEFAULT`).
 Benchmark, WER and finetune jobs ignore it.
+
+`runtime_backend` (`omnivoice` | `ming` | `phonon` | `mock`) different from the active engine
+starts a live engine switch after the other fields are saved (same as
+`POST /api/admin/runtime/backend` with `wait=false`); an unavailable engine is rejected with `400`
+before anything is applied. While a switch runs, the PUT returns `409`. The engine alias of a
+non-OmniVoice engine is never written to `runtime_settings.json` as `active_model`, so the next
+OmniVoice start keeps its own default model.
+
+### `GET /api/admin/runtime/engines`
+
+Purpose:
+
+- lists every engine with its install state and the progress of the running (or last) live switch
+
+Response:
+
+```json
+{
+  "active": "omnivoice",
+  "env_override": null,
+  "engines": [
+    {
+      "id": "ming",
+      "label": "Ming-3.0-tts 0.5B",
+      "active": false,
+      "installed": true,
+      "model_present": true,
+      "available": true,
+      "status": "ready",
+      "detail": null,
+      "model_id": "inclusionAI/Ming-3.0-tts-0.5B",
+      "model_dir": "X:\\dev\\G3_OmniVoice\\models\\Ming-3.0-tts-0.5b",
+      "uses_voice_profiles": true,
+      "native_streaming": true,
+      "test_only": false
+    }
+  ],
+  "switch": { "state": "idle", "drained_jobs": 0, "cancelled_jobs": 0, "requeued_jobs": 0 }
+}
+```
+
+`status` is `active`, `ready`, `downloadable` (OmniVoice with downloads allowed),
+`missing_package` (install `backend[ming]` / `ptts`) or `missing_model` (`detail` names the
+download command). `switch.state` is `idle`, `draining`, `unloading`, `loading`, `ready` or
+`failed` (`error` says why; the old engine stays active).
+
+### `POST /api/admin/runtime/backend`
+
+Purpose:
+
+- switches the TTS engine without a process restart and saves the choice
+
+Request:
+
+```json
+{ "backend": "ming", "wait": false, "drain_timeout_s": 120 }
+```
+
+Sequence:
+
+1. new public synthesis requests wait; queued jobs are held back from the old engine
+2. running jobs finish on the old engine; after `drain_timeout_s` they are cancelled
+3. the queue worker stops, the old engine unloads and CUDA memory is released
+4. the settings the old engine rewrote (model list, default model, built-in voices) get their
+   OmniVoice values back, the new engine is built and bound to the queue
+5. the held jobs go back to the front of the queue, the worker restarts and the new engine
+   loads its model (`switch.message` "Modell wird geladen.")
+
+Response: the engine list above. `wait=true` answers when the switch (including the model load)
+is done. `400`: unknown or unavailable engine; `409`: a switch or a finetune run is active.
+The new engine uses `preferred_device` (GPU select) like OmniVoice.
 
 ### `POST /api/admin/text/optimize`
 
@@ -1275,7 +1384,10 @@ Purpose:
 - Saved clone voices require explicit consent and `ref_text`.
 - Non-streaming output can be returned as WAV or MP3.
 - MP3 export uses FFmpeg. The app first checks `ffmpeg` on `PATH`, then falls back to the bundled `imageio-ffmpeg` package.
-- Streaming is simulated by emitting PCM chunks after sentence/batch completion.
+- OmniVoice streaming is simulated by emitting PCM chunks after sentence/batch completion; Ming and
+  Phonon stream natively (each chunk is sent the moment it is generated).
+- Ming (`runtime_backend=ming`) batches continuously: requests join the running decode loop at the
+  next 80 ms step, so a new stream does not wait for a running batch to finish.
 - A first-audio fast path schedules the first sentence of streaming requests before larger follow-up batches.
 - `fp8` uses `transformers.FineGrainedFP8Config` when the compatible `kernels` package is installed.
 - On Windows, the unsupported DeepGEMM Hub lookup is disabled so fp8 uses the finegrained-fp8 Triton fallback without repeated Hub retries.
@@ -1290,6 +1402,6 @@ Common responses:
 | `400` | invalid request, unsupported model, missing consent/ref text |
 | `401` | missing or invalid admin session, or missing/invalid client API key |
 | `404` | job, voice, audio, model cache, preset, or route not found |
-| `409` | synthesis job was cancelled |
+| `409` | synthesis job was cancelled; engine switch already running; finetuning or voice-profile edits while an engine that does not support them is active |
 | `429` | queue saturated |
 | `500` | synthesis/runtime failure |

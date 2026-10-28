@@ -34,7 +34,8 @@ ENV PYTHONUNBUFFERED=1 \
     # PROJECT_ROOT (=/app), so the frontend/dist default resolves correctly too.
     OMNIVOICE_TTS_HOST=0.0.0.0 \
     OMNIVOICE_TTS_PORT=8091 \
-    OMNIVOICE_TTS_RUNTIME_BACKEND=omnivoice \
+    # The TTS engine (omnivoice / ming / phonon) is saved in /app/data/runtime_settings.json and
+    # switched live in the admin UI; set OMNIVOICE_TTS_RUNTIME_BACKEND at run time only to pin one.
     OMNIVOICE_TTS_MODELS_ROOT_DIR=/app/models \
     OMNIVOICE_TTS_DATA_DIR=/app/data \
     OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=true \
@@ -90,10 +91,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # transformers==5.10.2, huggingface_hub==1.18.0, accelerate==1.13.0, tokenizers==0.22.2,
 # kernels==0.14.1, numpy==2.4.4, ... — while the Windows-only lines stay inert and the
 # already-installed +cu130 torch trio (above) satisfies its pins untouched.
+#
+# [ming] adds the Ming-3.0-tts engine's dependencies (einops, onnxruntime CPU for the CAM++
+# speaker encoder, soxr). Its weights are not in the image: put them into the models volume
+# (models/Ming-3.0-tts-0.5b) or download them from the admin UI after switching to Ming.
 COPY backend/ ./backend/
 COPY requirements-lock.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e ./backend \
+    pip install -e "./backend[ming]" \
         -c requirements-lock.txt \
         --extra-index-url https://download.pytorch.org/whl/cu130
 

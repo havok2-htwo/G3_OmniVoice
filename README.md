@@ -6,7 +6,9 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 - React/Vite landing page, public demo, and private admin panel
 - Username/password admin login with httpOnly session cookies
 - Admin-managed client API keys for public synthesis endpoints
-- OmniVoice runtime adapter for `k2-fsa/OmniVoice`
+- OmniVoice runtime adapter for `k2-fsa/OmniVoice` (default engine), plus two more engines behind the
+  same API: inclusionAI Ming-3.0-tts 0.5B (voice cloning from the same profiles, native chunk streaming,
+  continuous batching) and Gradium Phonon (CPU); switched live in the admin panel
 - Traffic benchmark mode for random user-like arrivals, sentence-count variation, TTFA percentiles, best/worst, and queue timing
 - Streaming requests use a first-audio fast path: the first sentence of each active stream is scheduled before larger follow-up batches
 
@@ -190,8 +192,20 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
 
 ## Operator Features
 
+- **TTS engines** - `omnivoice` (default), `ming` (inclusionAI Ming-3.0-tts 0.5B, MIT) and
+  `phonon` (Gradium Phonon, CPU). The admin panel's "Engine" box shows each engine's install and
+  model state and switches it live: running jobs finish on the old engine, queued and new requests
+  go to the new one, clients keep the same endpoints (`POST /api/admin/runtime/backend`, see
+  `API_DOCUMENTATION.md` "Runtime backends"). The choice is saved in `data/runtime_settings.json`;
+  `OMNIVOICE_TTS_RUNTIME_BACKEND` pins an engine at startup. Ming clones the saved voice profiles
+  through `inclusionAI/Ming-3.0-tts-0.5B-Base`, streams every chunk as soon as it is generated and
+  keeps the 24 kHz output contract. Install its dependencies with `pip install -e backend[ming]`
+  (done by `install.bat`) and its weights with `install.bat -DownloadMing` (into
+  `models/Ming-3.0-tts-0.5b`). Ming presets: `Ming 32GB VRAM`, `Ming 24GB VRAM` (RTX 4090/3090),
+  `Ming 24+8 VRAM`, `Ming best performance`.
 - **Settings presets** - read-only built-in GPU tiers (`32GB VRAM`, `24GB VRAM`,
-  `24+8 VRAM`) plus named runtime/VRAM parameter sets you save, load into the
+  `24+8 VRAM`; the OmniVoice tiers do not change the engine, the `Ming ...` tiers
+  switch to Ming) plus named runtime/VRAM parameter sets you save, load into the
   settings draft, and delete from the admin panel
   (`GET/PUT/DELETE /api/admin/settings/presets`, saved ones in
   `data/settings_presets.json`). `24+8 VRAM` picks the 24 GB card as

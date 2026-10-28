@@ -4,6 +4,34 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - Ming-3.0-tts engine, live engine switch
+
+- `runtime_backend=ming` serves inclusionAI Ming-3.0-tts 0.5B next to OmniVoice and Phonon, through the same
+  queue and endpoints. It clones the saved voice profiles via the alias `inclusionAI/Ming-3.0-tts-0.5B-Base`,
+  streams every chunk the moment it is generated and outputs 24 kHz like the other engines.
+- The engine switches without a restart: `POST /api/admin/runtime/backend`, `runtime_backend` in the settings PUT,
+  or the new "Engine" box in the admin panel (status of every engine, switch progress). Running jobs finish on the
+  old engine (cancelled after `drain_timeout_s`), queued and new requests go to the new one.
+- `GET /api/admin/runtime/engines` lists the engines with install/model status.
+- `runtime_backend` is saved in `runtime_settings.json`; `OMNIVOICE_TTS_RUNTIME_BACKEND` still wins when set.
+  `start_server.bat` and the Dockerfile no longer force `omnivoice`.
+- Ming settings `ming_max_slots`, `ming_cuda_graphs`, `ming_output_sample_rate`, `ming_first_chunk_latents`,
+  `ming_max_chunk_latents`, `ming_model_dir`, `ming_model_id`, and presets `Ming 32GB VRAM`, `Ming 24GB VRAM`,
+  `Ming 24+8 VRAM`, `Ming best performance` (slot counts provisional until benchmarked). The OmniVoice tiers are
+  unchanged and do not change the engine.
+- `install.ps1` installs the backend extra `[ming]` and downloads the Ming weights with `-DownloadMing`.
+- Requests naming a model id the active engine does not serve (e.g. an OmniVoice id while Ming runs) are served by
+  the active engine's default model instead of failing.
+
+### Fixed - engine side effects
+
+- A Phonon server wrote an empty `voice_profiles.json` at shutdown (the profiles are not loaded in Phonon mode).
+- Saving the settings while Phonon ran stored its model id as `active_model`, so the next OmniVoice start ran the
+  wrong task type. Engine aliases are never saved now, and an unknown saved `active_model` falls back to
+  `k2-fsa/OmniVoice-Base` at startup.
+- Finetuning (data generation, training, promotion) returns 409 while another engine than OmniVoice is active, and
+  promoted finetune ids no longer leak into another engine's model list.
+
 ### Added - WER benchmark per voice, best seed per voice, cancel
 
 - The WER benchmark has a voice selector (default: the voice from the settings). An unknown voice is rejected with 400

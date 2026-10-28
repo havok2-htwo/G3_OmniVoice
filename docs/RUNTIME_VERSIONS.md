@@ -23,6 +23,43 @@ These versions were verified together on Windows with CUDA PyTorch:
 
 `requirements-lock.txt` is the full snapshot of the live `.conda-env`.
 
+Known drift (2026-10-28): the `.conda-env` on the RTX 5090 box still runs
+omnivoice 0.1.5 and transformers 5.9.0; the table and the lock file describe the
+0.2.1 / 5.10.2 stack (bit-identical output, see below) that the Dockerfile installs.
+
+## Ming-3.0-tts engine
+
+`runtime_backend=ming` serves inclusionAI Ming-3.0-tts 0.5B (code and weights MIT).
+The model code is vendored and trimmed in `backend/src/omnivoice_tts_server/ming/`
+(upstream `github.com/inclusionAI/Ming-3.0-tts` commit `9332fb9`, licence in
+`ming/LICENSE`); only its runtime dependencies come from PyPI through the backend
+extra `[ming]` (`install.ps1` installs `backend[dev,ming]`, the Dockerfile
+`backend[ming]`):
+
+| Package | Version | Used for |
+| --- | --- | --- |
+| einops | 0.8.2 | tensor reshapes in the vendored model code |
+| onnxruntime | 1.31.1 (CPU) | CAM++ speaker embedding (`campplus.onnx`) of the voice profiles |
+| soxr | 1.1.0 | stateful 44.1 kHz -> 24 kHz resampler per stream |
+| soundfile | 0.14.0 | profile WAV decoding (already a core dependency) |
+
+It runs on torch 2.10 / transformers 5.x in bf16 with SDPA, so it needs no
+Blackwell-only kernels and runs on Ampere (RTX 3090) as well.
+
+Weights (~3 GB, `config.json`: 44.1 kHz, one 64-dim latent per 80 ms) go to
+`models/Ming-3.0-tts-0.5b`:
+
+```powershell
+.\install.bat -DownloadMing
+# or
+& .\.conda-env\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download('inclusionAI/Ming-3.0-tts-0.5B', local_dir='models/Ming-3.0-tts-0.5b')"
+```
+
+With Ming active, the admin "Model Control" panel can download them as well. Presets:
+"Ming 32GB VRAM", "Ming 24GB VRAM" (also the RTX 3090), "Ming 24+8 VRAM" and
+"Ming best performance" set `runtime_backend=ming` and the `ming_*` keys (slot counts
+are provisional until benchmarked).
+
 ## omnivoice pin
 
 `backend/pyproject.toml` installs upstream `k2-fsa/OmniVoice` master at commit

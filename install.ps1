@@ -1,6 +1,8 @@
 param(
     [switch]$SkipTorch,
-    [switch]$SkipFrontendBuild
+    [switch]$SkipFrontendBuild,
+    # Also download the Ming-3.0-tts 0.5B weights (~3 GB, MIT) into models\Ming-3.0-tts-0.5b.
+    [switch]$DownloadMing
 )
 
 $ErrorActionPreference = 'Stop'
@@ -148,7 +150,22 @@ Invoke-External -Label 'Installing optional Triton for torch.compile' -FilePath 
     '-m', 'pip', 'install', 'triton-windows<3.7'
 )
 
-Invoke-External -Label 'Installing OmniVoice backend package' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev]")
+# [ming] adds the Ming-3.0-tts engine's runtime dependencies (einops, onnxruntime for the CAM++ speaker
+# encoder, soxr for the 44.1 -> 24 kHz stream resampler).
+Invoke-External -Label 'Installing OmniVoice backend package (+ Ming engine extra)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming]")
+
+$MingDir = Join-Path $ModelsDir 'Ming-3.0-tts-0.5b'
+if ($DownloadMing) {
+    if (Test-Path (Join-Path $MingDir 'config.json')) {
+        Write-Host "Ming weights already present: $MingDir"
+    }
+    else {
+        Invoke-External -Label 'Downloading inclusionAI/Ming-3.0-tts-0.5B' -FilePath $PythonExe -Arguments @(
+            '-c', 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], local_dir=sys.argv[2])',
+            'inclusionAI/Ming-3.0-tts-0.5B', $MingDir
+        )
+    }
+}
 
 if (-not (Test-CommandAvailable 'npm')) {
     throw 'npm was not found. Install Node.js LTS and re-run install.bat.'
@@ -176,3 +193,7 @@ Write-Host 'Start the app with: .\start_server.bat'
 Write-Host 'Open: http://127.0.0.1:8091'
 Write-Host ''
 Write-Host 'Note: the first OmniVoice startup downloads k2-fsa/OmniVoice (~3 GB) into models\; set OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=false to stay offline.'
+if (-not (Test-Path (Join-Path $MingDir 'config.json'))) {
+    Write-Host 'Ming engine: weights not downloaded. Run .\install.bat -DownloadMing, or the admin UI (Engine -> Ming, Model Control -> Download).'
+}
+Write-Host 'Switch the TTS engine (OmniVoice / Ming / Phonon) live in the admin UI; the choice is saved in data\runtime_settings.json.'

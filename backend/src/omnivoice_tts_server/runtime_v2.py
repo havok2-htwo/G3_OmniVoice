@@ -427,6 +427,9 @@ class BatchSynthesisResult:
     pcm: bytes
     duration_ms: int
     sentence_finished: bool = False
+    # Set on the sentence_finished result of a sentence that failed on its own (engines that stream unrelated
+    # requests in one batch, e.g. Ming): only that sentence's job fails. OmniVoice never sets it.
+    error: str | None = None
 
 
 class OmniVoiceSynthesizer:

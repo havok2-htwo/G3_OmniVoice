@@ -133,6 +133,10 @@ class QueueService:
         self.store.worker_stop.clear()
         self.store.worker_task = asyncio.create_task(self._worker_loop())
 
+    def running_batch_count(self) -> int:
+        """Stream batches still running as their own tasks (concurrent engines only; 0 otherwise)."""
+        return len(self._running_batches)
+
     async def stop_worker(self) -> None:
         self.store.worker_stop.set()
         async with self.store.job_condition:
@@ -976,6 +980,8 @@ class QueueService:
     ) -> None:
         durations_by_key: dict[tuple[str, int], int] = {}
         finished: set[tuple[str, int]] = set()
+        settled: set[tuple[str, int]] = set()
+        items_by_key = {(item.job_id, item.sentence_index): item for item in batch_items}
         batch_id = str(current_batch.get('batch_id') or '')
         error: BaseException | None = None
         try:
@@ -986,6 +992,7 @@ class QueueService:
             ):
                 async with self.store.job_condition:
                     self._mark_loaded_model_locked(model_used)
+                    settled_now = False
                     for result in results:
                         key = (result.job_id, result.sentence_index)
                         if result.sentence_finished:
@@ -1000,10 +1007,29 @@ class QueueService:
                             self._mark_cancelled_locked(job, 'Cancelled during native streaming.')
                             self._cancel_engine_rows(job.job_id)
                             continue
+                        item = items_by_key.get(key)
+                        item_error = getattr(result, 'error', None)
+                        if item_error:
+                            # This sentence failed on its own (e.g. an undecodable voice): only its job fails.
+                            settled.add(key)
+                            self._fail_job_locked(job, str(item_error))
+                            self._cancel_engine_rows(job.job_id)
+                            settled_now = True
+                            continue
                         self._apply_native_result_locked(
                             job, state, result, durations_by_key, batch_id=batch_id, model_used=model_used,
                             warm_ms=warm_ms,
                         )
+                        if result.sentence_finished and item is not None and key not in settled:
+                            # Settle the sentence now (complete its job when nothing else is left) instead of when
+                            # the slowest row of this batch -- possibly another job's -- has finished.
+                            settled.add(key)
+                            self._finish_native_item_locked(
+                                job, state, item, durations_by_key, batch_id=batch_id, concurrent=True
+                            )
+                            settled_now = True
+                    if settled_now:
+                        self._recompute_positions_locked()
                     self.store.job_condition.notify_all()
         except asyncio.CancelledError:
             error = RuntimeError('Synthesis was interrupted (server shutdown).')
@@ -1013,7 +1039,8 @@ class QueueService:
             error = exc
         finally:
             await self._end_concurrent_batch(
-                batch_items, involved_job_ids, current_batch, model_used, durations_by_key, finished, error
+                batch_items, involved_job_ids, current_batch, model_used, durations_by_key, finished, error,
+                settled=settled,
             )
 
     async def _end_concurrent_batch(
@@ -1025,9 +1052,12 @@ class QueueService:
         durations_by_key: dict[tuple[str, int], int],
         finished: set[tuple[str, int]],
         error: BaseException | None,
+        *,
+        settled: set[tuple[str, int]] | None = None,
     ) -> None:
-        """Release the batch's slots and settle its sentences: finished ones complete their jobs when nothing else
-        is left; with an error, every job with an unfinished sentence in this batch fails (cancelled ones cancel)."""
+        """Release the batch's slots and settle its remaining sentences (``settled`` ones were already handled when
+        they finished): finished ones complete their jobs when nothing else is left; with an error, every job with an
+        unfinished sentence in this batch fails (cancelled ones cancel)."""
         batch_id = str(current_batch.get('batch_id') or '')
         async with self.store.job_condition:
             for item in batch_items:
@@ -1039,6 +1069,8 @@ class QueueService:
             self.store.recent_batches.append(current_batch)
 
             for item in batch_items:
+                if settled and (item.job_id, item.sentence_index) in settled:
+                    continue
                 job = self.store.jobs.get(item.job_id)
                 state = self.store.request_states.get(item.job_id)
                 if job is None or state is None:
@@ -1074,6 +1106,9 @@ class QueueService:
         """
         wait_ms = self.settings.batch_wait_ms
         if wait_ms <= 0:
+            return 0.0
+        if self._uses_concurrent_batches():
+            # Rows join the engine's running continuous batch at the next step: waiting only adds latency.
             return 0.0
         if len(self.store.active_request_ids) >= self.settings.max_parallel_requests and not self.store.waiting_requests:
             return 0.0

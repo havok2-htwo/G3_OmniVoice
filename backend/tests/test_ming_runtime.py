@@ -267,8 +267,28 @@ def test_inline_reference_audio_and_no_voice(synth_env, tmp_path) -> None:
     inline, plain = engine.submitted
     assert inline['prompt'].key.split('|')[2] == 'inline' and inline['prompt'].sample_rate == 16_000
     assert plain['prompt'] is None
+    results = asyncio.run(_collect(synth, [_item(0, 'x', voice=None, ref_audio=str(ref))]))
+    assert len(results) == 1 and results[0].sentence_finished and 'ref_text' in results[0].error
     with pytest.raises(RuntimeError, match='ref_text'):
-        asyncio.run(_collect(synth, [_item(0, 'x', voice=None, ref_audio=str(ref))]))
+        asyncio.run(synth.render_batch([_item(0, 'x', voice=None, ref_audio=str(ref))]))
+
+
+def test_a_bad_voice_fails_only_its_own_item(synth_env) -> None:
+    """A batch mixes unrelated requests: undecodable ref_audio of one item must not fail the others."""
+    synth = synth_env.make()
+    results = asyncio.run(_collect(synth, [
+        _item(0, 'Gut.', job_id='good'),
+        _item(0, 'Kaputt.', job_id='bad', voice=None, ref_audio='!!not base64!!', ref_text='Referenz.'),
+        _item(1, 'Auch gut.', job_id='good'),
+    ]))
+    engine = FakeEngine.instances[-1]
+    assert [s['text'] for s in engine.submitted] == ['Gut.', 'Auch gut.']
+    finished = {(r.job_id, r.sentence_index): r for r in results if r.sentence_finished}
+    assert set(finished) == {('good', 0), ('bad', 0), ('good', 1)}
+    assert finished[('good', 0)].error is None and finished[('good', 1)].error is None
+    assert 'ref_audio' in finished[('bad', 0)].error
+    assert sum(len(r.pcm) for r in results if r.job_id == 'good') > 0
+    assert not any(r.pcm for r in results if r.job_id == 'bad')
 
 
 def test_seed_and_language_mapping(synth_env) -> None:
@@ -293,28 +313,82 @@ def test_ming_language() -> None:
     assert ming_language('pl', 'Tekst.') == 'de', 'a language Ming has no name for falls back'
 
 
-def test_engine_error_propagates_and_cancels_the_other_rows(synth_env) -> None:
+def test_engine_error_ends_only_the_failed_row(synth_env) -> None:
+    """A row that fails reports its error on its sentence_finished result; the other rows keep streaming (the
+    queue fails and cancels the failed row's job only)."""
     synth = synth_env.make(auto=False)
     asyncio.run(synth.ensure_model(None))
     engine = FakeEngine.instances[-1]
 
     async def run():
-        gen = synth.stream_batch([_item(0, 'a'), _item(1, 'b')])
+        gen = synth.stream_batch([_item(0, 'a', job_id='j1'), _item(0, 'b', job_id='j2')])
         task = asyncio.ensure_future(_drain(gen))
         for _ in range(200):
             if len(engine.streams) == 2:
                 break
             await asyncio.sleep(0.005)
         engine.streams[0].finish(RuntimeError('CUDA step failed'))
-        await asyncio.wait_for(task, timeout=2)
+        await asyncio.sleep(0.05)
+        assert not engine.streams[1].cancelled
+        engine.streams[1].put(np.full(4, 0.5, dtype=np.float32))
+        engine.streams[1].finish()
+        return await asyncio.wait_for(task, timeout=2)
 
     async def _drain(gen):
-        async for _ in gen:
-            pass
+        out = []
+        async for batch in gen:
+            out.extend(batch)
+        return out
 
-    with pytest.raises(RuntimeError, match='CUDA step failed'):
-        asyncio.run(run())
-    assert engine.streams[1].cancelled
+    results = asyncio.run(run())
+    finished = {r.job_id: r for r in results if r.sentence_finished}
+    assert 'CUDA step failed' in finished['j1'].error and finished['j2'].error is None
+    assert any(r.pcm for r in results if r.job_id == 'j2')
+    assert not engine.streams[1].cancelled
+
+
+def test_reload_applies_changed_slots_and_rate(synth_env) -> None:
+    synth = synth_env.make()
+    asyncio.run(synth.ensure_model(None))
+    assert FakeEngine.instances[-1].kwargs['max_slots'] == 8
+    synth_env.settings.ming_max_slots = 32
+    synth_env.settings.ming_output_sample_rate = 44_100
+    # Loaded engine: the queue limits keep following the running engine until it reloads.
+    assert synth.capacity_profile == ming_runtime.ming_capacity_profile(8)
+    asyncio.run(synth.reload())
+    kwargs = FakeEngine.instances[-1].kwargs
+    assert kwargs['max_slots'] == 32 and kwargs['output_sample_rate'] == 44_100
+    assert synth.max_slots == 32 and synth.sample_rate == 44_100
+    assert synth.capacity_profile == ming_runtime.ming_capacity_profile(32)
+
+
+def test_free_memory_does_not_close_the_engine_under_a_submitting_batch(synth_env, monkeypatch) -> None:
+    monkeypatch.setattr(ming_runtime, 'query_nvidia_smi', lambda device=None: {})
+    synth = synth_env.make()
+    asyncio.run(synth.ensure_model(None))
+    engine = FakeEngine.instances[-1]
+    entered, release = threading.Event(), threading.Event()
+    original = engine.submit
+    messages = []
+
+    def slow_submit(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return original(*args, **kwargs)
+
+    engine.submit = slow_submit
+
+    async def run():
+        task = asyncio.ensure_future(_collect(synth, [_item(0, 'abc')]))
+        while not entered.is_set():
+            await asyncio.sleep(0.005)
+        messages.append((await synth.free_memory())['message'])
+        release.set()
+        return await asyncio.wait_for(task, timeout=2)
+
+    results = asyncio.run(run())
+    assert 'rendering' in messages[0] and not engine.closed
+    assert any(r.pcm for r in results) and all(r.error is None for r in results)
 
 
 def test_closing_the_generator_and_cancel_job_stop_the_rows(synth_env) -> None:

@@ -143,12 +143,17 @@ class MingSynthesizer:
         self._voice_lock = threading.Lock()
         self._streams_lock = threading.Lock()
         self._job_streams: dict[str, set[Any]] = {}
+        # Batches between taking the engine and submitting their rows (guarded by _streams_lock): free_memory must
+        # not close the engine under them.
+        self._submitting = 0
 
     # -- capabilities ----------------------------------------------------------------------------------------------
 
     @property
     def capacity_profile(self) -> dict[str, Any]:
-        return ming_capacity_profile(self.max_slots)
+        # The loaded engine's slots; unloaded, the configured ones (the next load uses them).
+        slots = self.max_slots if self._engine is not None else int(self.settings.ming_max_slots)
+        return ming_capacity_profile(slots)
 
     # -- model lifecycle -------------------------------------------------------------------------------------------
 
@@ -177,6 +182,10 @@ class MingSynthesizer:
             if not (model_dir / 'config.json').exists():
                 raise RuntimeError(f'Ming checkpoint not found at {model_dir}. Download {self.model_id} there first.')
             started = time.perf_counter()
+            # Settings an admin changed (a preset, the settings page) apply at every load, i.e. after Reload too.
+            self.model_id = self.settings.ming_model_id
+            self.max_slots = int(self.settings.ming_max_slots)
+            self.sample_rate = int(self.settings.ming_output_sample_rate)
             self._reset_process_kernel_choices()
             engine = self._engine_factory(**self._engine_kwargs())
             engine.load()
@@ -268,9 +277,14 @@ class MingSynthesizer:
             logger.warning('ming warmup failed (non-critical): %s', exc)
         return MING_BASE_ALIAS, load_ms + int((time.perf_counter() - started) * 1000)
 
-    def _close_sync(self) -> None:
+    def _close_sync(self, *, only_if_idle: bool = False) -> bool:
+        """Close the engine. only_if_idle: only when no row renders and no batch is submitting (checked atomically
+        with taking the engine away, so a batch that already holds it cannot lose it). Returns whether it closed."""
         with self._load_lock:
-            engine, self._engine = self._engine, None
+            with self._streams_lock:
+                if only_if_idle and (self._submitting or self._busy()):
+                    return False
+                engine, self._engine = self._engine, None
             self._loaded_model_id = None
             with self._voice_lock:
                 self._voice_keys.clear()
@@ -288,6 +302,7 @@ class MingSynthesizer:
                     torch.cuda.empty_cache()
             except Exception as exc:  # noqa: BLE001
                 logger.warning('ming: CUDA cache release failed: %s', exc)
+            return True
 
     async def unload(self) -> tuple[str, int]:
         await asyncio.to_thread(self._close_sync)
@@ -311,11 +326,10 @@ class MingSynthesizer:
         """Release the engine's CUDA memory (weights, KV slots, graphs) when it is idle; it reloads on demand."""
         device = getattr(self.settings, 'preferred_device', None)
         before = await asyncio.to_thread(query_nvidia_smi, device)
-        if self._busy():
-            message = 'Ming engine is rendering; CUDA memory stays allocated (retry when idle).'
-        else:
-            await asyncio.to_thread(self._close_sync)
+        if await asyncio.to_thread(self._close_sync, only_if_idle=True):
             message = 'Ming engine closed and its CUDA memory released; it reloads with the next request.'
+        else:
+            message = 'Ming engine is rendering; CUDA memory stays allocated (retry when idle).'
         after = await asyncio.to_thread(query_nvidia_smi, device)
         before_used = int(before.get('memory_used_mb') or 0)
         after_used = int(after.get('memory_used_mb') or 0)
@@ -445,18 +459,24 @@ class MingSynthesizer:
         return MING_DEFAULT_SEED if seed is None else int(seed)
 
     def _submit_items(self, engine: Any, items: list[BatchSynthesisItem]) -> list[Any]:
-        """Resolve every voice first (one bad voice fails the batch before any row starts), then submit all rows."""
-        prompts = [self._prompt_for(engine, item.request) for item in items]
+        """Resolve each voice and submit each row on its own: a batch mixes unrelated requests, so a bad voice (or an
+        over-long prompt) fails only its own item. Each entry is the engine stream, or that item's exception."""
         streams: list[Any] = []
         try:
-            for item, prompt in zip(items, prompts):
-                stream = engine.submit(
-                    item.text,
-                    prompt=prompt,
-                    language=ming_language(getattr(item.request, 'language', None), item.text),
-                    seed=self._seed(item.request),
-                    row_id=f'{item.job_id}:{item.sentence_index}',
-                )
+            for item in items:
+                try:
+                    prompt = self._prompt_for(engine, item.request)
+                    stream = engine.submit(
+                        item.text,
+                        prompt=prompt,
+                        language=ming_language(getattr(item.request, 'language', None), item.text),
+                        seed=self._seed(item.request),
+                        row_id=f'{item.job_id}:{item.sentence_index}',
+                    )
+                except Exception as exc:  # noqa: BLE001 - reported for this item only
+                    logger.warning('ming: sentence %s:%s rejected: %s', item.job_id, item.sentence_index, exc)
+                    streams.append(exc)
+                    continue
                 streams.append(stream)
                 with self._streams_lock:
                     self._job_streams.setdefault(item.job_id, set()).add(stream)
@@ -465,8 +485,27 @@ class MingSynthesizer:
             raise
         return streams
 
+    def _acquire_and_submit(self, items: list[BatchSynthesisItem]) -> tuple[Any, list[Any]]:
+        """Take the engine (loading it again when free_memory closed it meanwhile) and submit the rows, counted as
+        submitting so free_memory cannot close the engine in between."""
+        while True:
+            with self._streams_lock:
+                engine = self._engine
+                if engine is not None:
+                    self._submitting += 1
+            if engine is None:
+                self._load_sync()
+                continue
+            try:
+                return engine, self._submit_items(engine, items)
+            finally:
+                with self._streams_lock:
+                    self._submitting -= 1
+
     def _cancel_streams(self, items: list[BatchSynthesisItem], streams: list[Any]) -> None:
         for item, stream in zip(items, streams):
+            if isinstance(stream, BaseException):
+                continue
             try:
                 if not getattr(stream, 'done', False):
                     stream.cancel()
@@ -498,6 +537,8 @@ class MingSynthesizer:
         sample_rate = self.sample_rate
         async for results in self.stream_batch(items):
             for result in results:
+                if result.error:
+                    raise RuntimeError(result.error)
                 sample_rate = result.sample_rate
                 if result.pcm:
                     parts[(result.job_id, result.sentence_index)].append(result.pcm)
@@ -532,18 +573,15 @@ class MingSynthesizer:
             return
         if self._engine is None:
             await self.ensure_model(None)
-        engine = self._engine
-        if engine is None:
-            raise RuntimeError('Ming engine is not loaded')
         loop = asyncio.get_running_loop()
-        submit = loop.run_in_executor(None, self._submit_items, engine, items)
+        submit = loop.run_in_executor(None, self._acquire_and_submit, items)
         try:
-            streams = await asyncio.shield(submit)
+            engine, streams = await asyncio.shield(submit)
         except asyncio.CancelledError:
             # The rows may still get submitted after we stop waiting: cancel them once they exist.
-            def cleanup(future: 'asyncio.Future[list[Any]]') -> None:
+            def cleanup(future: 'asyncio.Future[tuple[Any, list[Any]]]') -> None:
                 if not future.cancelled() and future.exception() is None:
-                    self._cancel_streams(items, future.result())
+                    self._cancel_streams(items, future.result()[1])
 
             submit.add_done_callback(cleanup)
             raise
@@ -566,23 +604,29 @@ class MingSynthesizer:
                 post(index, _DONE)
 
         for index, stream in enumerate(streams):
+            if isinstance(stream, BaseException):
+                post(index, stream)
+                post(index, _DONE)
+                continue
             threading.Thread(target=pump, args=(index, stream), name=f'ming-pump-{index}', daemon=True).start()
 
         finished = 0
+        errors: dict[int, BaseException] = {}
         try:
             while finished < len(items):
                 batch = [await out.get()]
                 while not out.empty():
                     batch.append(out.get_nowait())
                 results: list[BatchSynthesisResult] = []
-                error: BaseException | None = None
                 for index, payload in batch:
                     item = items[index]
                     if isinstance(payload, BaseException):
-                        error = error or payload
+                        errors.setdefault(index, payload)
                         continue
                     if payload is _DONE:
                         finished += 1
+                        # A failed row ends like any other but carries its error: only its own job fails.
+                        exc = errors.get(index)
                         results.append(
                             BatchSynthesisResult(
                                 job_id=item.job_id,
@@ -591,8 +635,11 @@ class MingSynthesizer:
                                 pcm=b'',
                                 duration_ms=0,
                                 sentence_finished=True,
+                                error=(str(exc) or type(exc).__name__) if exc is not None else None,
                             )
                         )
+                        continue
+                    if index in errors:
                         continue
                     results.append(
                         BatchSynthesisResult(
@@ -603,8 +650,6 @@ class MingSynthesizer:
                             duration_ms=int(len(payload) / 2 / sample_rate * 1000),
                         )
                     )
-                if error is not None:
-                    raise error
                 yield results
         finally:
             self._cancel_streams(items, streams)

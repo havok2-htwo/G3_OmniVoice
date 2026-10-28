@@ -43,6 +43,7 @@ class FakeConcurrentSynth(MockSynthesizer):
         self.gates: dict[str, asyncio.Event] = {}      # sentence text -> hold after the first chunk
         self.delays: dict[str, float] = {}             # sentence text -> per-chunk delay
         self.fail_texts: set[str] = set()
+        self.error_texts: set[str] = set()             # sentence text -> per-item error result (bad voice)
         self.cancel_calls: list[str] = []
         self._cancelled: set[str] = set()
         self.active = 0
@@ -70,11 +71,16 @@ class FakeConcurrentSynth(MockSynthesizer):
     async def stream_batch(self, items, chunk_size=None, overlap=None):
         self.batches.append([(item.job_id, item.sentence_index) for item in items])
         out: asyncio.Queue = asyncio.Queue()
+        self._errored: set[tuple[str, int]] = set()
 
         async def row(item):
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             try:
+                if item.text in self.error_texts:
+                    await out.put(('error', item))
+                    self._errored.add((item.job_id, item.sentence_index))
+                    return
                 for chunk_index in range(self.chunks):
                     if item.job_id in self._cancelled:
                         break
@@ -100,8 +106,14 @@ class FakeConcurrentSynth(MockSynthesizer):
                 if isinstance(payload, Exception):
                     raise payload
                 if isinstance(payload, tuple):
+                    kind, item = payload
+                    if kind == 'error':
+                        yield [BatchSynthesisResult(item.job_id, item.sentence_index, 24_000, b'', 0,
+                                                    sentence_finished=True, error='bad reference audio')]
+                        continue
                     finished += 1
-                    item = payload[1]
+                    if (item.job_id, item.sentence_index) in self._errored:
+                        continue  # its sentence_finished (with the error) was already sent
                     yield [BatchSynthesisResult(item.job_id, item.sentence_index, 24_000, b'', 0, sentence_finished=True)]
                     continue
                 yield [payload]
@@ -409,3 +421,65 @@ def test_an_abandoned_stream_cancels_its_job_in_its_own_task() -> None:
         return queue.cancelled
 
     assert asyncio.run(run()) == ['live']
+
+
+def test_a_job_completes_when_its_own_sentence_ends_not_the_whole_batch(tmp_path) -> None:
+    """Two jobs' first sentences share one stream batch: the short one completes while the long one still renders."""
+    synth = FakeConcurrentSynth(slots=4)
+    queue = _queue(tmp_path, synth)
+
+    async def run():
+        synth.gates[S1] = asyncio.Event()
+        slow = await _submit(queue, S1, stream=False)
+        fast = await _submit(queue, S2, stream=False)
+        await queue.start_worker()  # both are waiting: one batch
+        await _wait(lambda: fast.status == JobStatus.completed)
+        assert synth.batches[0] == [(slow.job_id, 0), (fast.job_id, 0)]
+        assert slow.status == JobStatus.running and len(queue._running_batches) == 1
+        assert fast.job_id not in queue.store.active_request_ids
+        synth.gates[S1].set()
+        await _wait(lambda: slow.status == JobStatus.completed)
+        await _wait(lambda: not queue._running_batches)
+        assert not queue._native_inflight and queue.store.active_request_ids == []
+        queue.store.worker_stop.set()
+        return slow, fast
+
+    slow, fast = asyncio.run(run())
+    assert _wav_values(fast.final_audio) == [_chunk_value(0, c) for c in range(3)]
+    assert _wav_values(slow.final_audio) == [_chunk_value(0, c) for c in range(3)]
+
+
+def test_a_per_item_error_fails_only_that_job_of_the_batch(tmp_path) -> None:
+    synth = FakeConcurrentSynth(slots=4)
+    synth.error_texts.add(S1)
+    queue = _queue(tmp_path, synth)
+
+    async def run():
+        broken = await _submit(queue, S1)
+        healthy = await _submit(queue, S2)
+        await queue.start_worker()
+        await _wait(lambda: broken.status == JobStatus.failed and healthy.status == JobStatus.completed)
+        assert len(synth.batches[0]) == 2, 'both were in one batch'
+        await _wait(lambda: not queue._running_batches)
+        assert not queue._native_inflight
+        queue.store.worker_stop.set()
+        return broken, healthy
+
+    broken, healthy = asyncio.run(run())
+    assert broken.error_message == 'bad reference audio'
+    assert _events(broken)[-1] == {'type': 'error', 'message': 'bad reference audio'}
+    assert broken.job_id in synth.cancel_calls and healthy.job_id not in synth.cancel_calls
+    assert _wav_values(healthy.final_audio) == [_chunk_value(0, c) for c in range(3)]
+
+
+def test_concurrent_engines_skip_the_batch_wait_window(tmp_path) -> None:
+    synth = FakeConcurrentSynth(slots=4)
+    queue = _queue(tmp_path, synth, batch_wait_ms=5000)
+
+    async def run():
+        await queue.start_worker()
+        job = await _submit(queue, S1)
+        await _wait(lambda: job.status == JobStatus.completed, timeout=2.0)
+        queue.store.worker_stop.set()
+
+    asyncio.run(run())

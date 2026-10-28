@@ -145,6 +145,8 @@ def test_cuda_graphs_match_eager_bit_exactly(engine, voice):
 
     texts = ['Guten Morgen zusammen.', 'Heute ist ein schöner Tag, findest du nicht?', 'Bis später!', 'Na klar.']
     eager = [engine.render(t, prompt=voice, language='de', seed=20 + i) for i, t in enumerate(texts)]
+    torch.cuda.synchronize()
+    mem_before = torch.cuda.memory_allocated()
     graphed = MingEngine(MODEL_DIR, 'cuda:0', cuda_graphs=True, **ENGINE_KW)
     graphed.load()
     try:
@@ -158,6 +160,8 @@ def test_cuda_graphs_match_eager_bit_exactly(engine, voice):
         ttfa = streams[0].metrics['ttfa_ms']
     finally:
         graphed.close()
+    del vp
+    assert torch.cuda.memory_allocated() < mem_before + 64 * 2 ** 20  # close() frees weights, caches, graph pools
     for a, b in zip(eager, together):
         np.testing.assert_array_equal(a, b)
     np.testing.assert_array_equal(alone, eager[1])
@@ -277,3 +281,32 @@ def test_fast_llm_matches_reference_forward(engine):
     for ours, pos in ((z_prefill, L - 1), (z_decode, L)):
         assert err(ours, exact[0, pos]) < 1.3 * err(ref[0, pos], exact[0, pos]), pos
         assert err(ours, ref[0, pos]) < 0.05 * exact.abs().mean().item(), pos
+
+
+def test_bucketed_mode_renders_sanely(engine, voice):
+    """batch_invariant=False (smallest bucket per call, incl. one-row GEMMs) renders the same kind of audio."""
+    from omnivoice_tts_server.ming.engine import MingEngine
+
+    text = 'Heute ist ein schöner Tag, findest du nicht?'
+    reference = engine.render(text, prompt=voice, language='de', seed=5)
+    eng = MingEngine(MODEL_DIR, 'cuda:0', cuda_graphs=True, batch_invariant=False, max_slots=4)
+    eng.load()
+    try:
+        assert eng.stats()['graphs'] > 11  # one graph per bucket and shape
+        vp = eng.voice_prompt('sonjav2', voice_audio(), 24000, REF_TEXT, seed=0)
+        alone = eng.render(text, prompt=vp, language='de', seed=5)
+        streams = [eng.submit(text, prompt=vp, language='de', seed=5 + i) for i in range(3)]
+        outs = [np.concatenate(list(s)) for s in streams]
+    finally:
+        eng.close()
+    for audio in [alone] + outs:
+        assert 0.7 < audio.size / reference.size < 1.4
+        assert np.isfinite(audio).all() and 0.01 < np.abs(audio).max() <= 1.5
+
+
+def voice_audio():
+    import soundfile as sf
+
+    audio, sr = sf.read(str(VOICE), dtype='float32')
+    assert sr == 24000
+    return audio

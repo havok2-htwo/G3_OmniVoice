@@ -211,3 +211,27 @@ def test_stream_queue_semantics():
     failing._finish(RuntimeError('boom'))
     with pytest.raises(RuntimeError, match='boom'):
         list(failing)
+
+
+@pytest.mark.parametrize('rows', [1, 2, 7])
+def test_split_bias_linear_never_writes_into_the_bias(rows):
+    """Regression: for one row, b.expand(1, n) is already 'contiguous', so a contiguous() copy aliased the bias."""
+    import torch
+
+    from omnivoice_tts_server.ming import fast
+
+    torch.manual_seed(0)
+    x = torch.randn(rows, 8)
+    w = torch.randn(5, 8)
+    b = torch.randn(5)
+    before = b.clone()
+    out = fast._split(x, w, b)
+    torch.testing.assert_close(out, torch.nn.functional.linear(x, w, b))
+    assert torch.equal(b, before)
+    fast.set_linear_mode('split')
+    try:
+        fast.linear(x.unsqueeze(0), w, b)
+        fast.linear(x.unsqueeze(0), w, b)
+    finally:
+        fast.set_linear_mode('auto')
+    assert torch.equal(b, before)

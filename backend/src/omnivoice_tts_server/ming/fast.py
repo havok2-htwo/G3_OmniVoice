@@ -11,7 +11,9 @@ bit-identical or a reordering inside one bf16 rounding step:
 - RoPE: cos/sin tables are precomputed once with exact fp32 products (the reference computes ``inv_freq @ positions``
   with a K=1 matmul, which is the same exact product unless TF32 is enabled process-wide -- the server enables TF32,
   so the tables are now also independent of that switch). The rotation itself uses identical elementwise ops;
-  ``rotate_half(x) * sin`` is written as ``roll/flip(x) * signed_sin`` (exactly equal in IEEE arithmetic).
+  ``rotate_half(x) * sin`` is written as ``roll/flip(x) * signed_sin`` (exactly equal in IEEE arithmetic), fused
+  into one ``addcmul`` (one rounding instead of two).
+- Residual + bias + projection in the flow blocks is one GEMM accumulating into ``x + b`` (``residual_linear``).
 - Flow head: everything that is constant over the 10 Euler steps (condition and history embeddings, the timestep
   embeddings, the rotary tables, ``dt``) is computed once per LM step / once per bucket instead of every step.
 """
@@ -106,7 +108,8 @@ def linear_plans() -> dict[str, int]:
 
 
 def _split(x2: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = b.expand(x2.shape[0], b.shape[0]).contiguous()
+    # clone, not contiguous(): for one row, expand() is already "contiguous" and addmm_ would write into the bias.
+    out = b.expand(x2.shape[0], b.shape[0]).clone(memory_format=torch.contiguous_format)
     out.addmm_(x2, w.t())
     return out
 
@@ -168,6 +171,13 @@ def linear(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor | None = None) -> t
     return _split(x.reshape(m, k), w, b).view(*x.shape[:-1], w.shape[0])
 
 
+def residual_linear(x: torch.Tensor, a: torch.Tensor, w: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """``x + linear(a, w, b)`` as (x + b) accumulated by one GEMM (beta=1): 2 kernels instead of 3, no bias epilogue."""
+    out = x + b
+    out.view(-1, out.shape[-1]).addmm_(a.reshape(-1, a.shape[-1]), w.t())
+    return out
+
+
 def qwen_rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     """Qwen2RMSNorm: normalise in fp32, round to the input dtype, multiply by the weight in that dtype."""
     h = F.rms_norm(x.float(), (x.shape[-1],), eps=eps)
@@ -202,7 +212,7 @@ def rope_table(inv_freq: torch.Tensor, positions: int, dtype: torch.dtype, scali
 
 def apply_qwen_rope(x: torch.Tensor, cos: torch.Tensor, sin_signed: torch.Tensor) -> torch.Tensor:
     """x (..., D) * cos + rotate_half(x) * sin with rotate_half(x) = cat(-x2, x1) == roll(x, D/2) * sign."""
-    return x * cos + x.roll(x.shape[-1] // 2, dims=-1) * sin_signed
+    return torch.addcmul(x * cos, x.roll(x.shape[-1] // 2, dims=-1), sin_signed)
 
 
 @dataclass
@@ -394,16 +404,16 @@ class FastFlow:
         qk = qkv[:, :, :2 * heads]
         # apply_rotary_pos_emb: (t * cos) + (rotate_half(t) * sin) in the promoted dtype, then back to bf16.
         flipped = qk.view(B, T, 2 * heads, D // 2, 2).flip(-1).view(B, T, 2 * heads, D)
-        qk = ((qk * cos) + (flipped * sin)).to(x.dtype)
+        qk = torch.addcmul(qk * cos, flipped, sin).to(x.dtype)
         q = qk[:, :, :heads].transpose(1, 2)
         k = qk[:, :, heads:].transpose(1, 2)
         v = qkv[:, :, 2 * heads:].transpose(1, 2)
         a = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
         a = a.transpose(1, 2).reshape(B, T, H)
-        x = x + linear(a, lp.w_o, lp.b_o)
+        x = residual_linear(x, a, lp.w_o, lp.b_o)
         h = F.rms_norm(x, (H,), weight=lp.n2, eps=lp.eps2)
         h = F.gelu(linear(h, lp.w_up, lp.b_up), approximate='tanh')
-        return x + linear(h, lp.w_down, lp.b_down)
+        return residual_linear(x, h, lp.w_down, lp.b_down)
 
     def sample(self, noise: torch.Tensor, z: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
         """noise (B, 1, C), z (B, 1, hidden), history (B, 1, C) -> latent (B, 1, C). Same math as sample_flow."""

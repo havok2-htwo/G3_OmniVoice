@@ -219,7 +219,7 @@ class MingStream:
 class MingEngine:
     def __init__(self, model_dir: Path | str, device: str = 'cuda:0', *, max_slots: int = 16, cuda_graphs: bool = True,
                  output_sample_rate: int = 24000, first_chunk_latents: int = 2, max_chunk_latents: int = 8,
-                 dtype: torch.dtype = torch.bfloat16, batch_invariant: bool = True, vae_tile_rows: int = 4,
+                 dtype: torch.dtype = torch.bfloat16, batch_invariant: bool = True, vae_tile_rows: int | None = None,
                  plan_cache: Path | str | None = None) -> None:
         self.model_dir = Path(model_dir)
         self.device = torch.device(device)
@@ -236,7 +236,9 @@ class MingEngine:
         self.batch_invariant = bool(batch_invariant)
         # VAE decode in batch-invariant mode runs in fixed tiles of this many rows x the largest chunk (several tiles
         # per step when more rows are due): same shape for every call, cost proportional to the rows that are due.
-        self.vae_tile_rows = max(1, min(self.max_slots, int(vae_tile_rows)))
+        # Default max(8, slots/4): measured best on the 5090 for 16/32/64 slots (a tile of 8 costs ~1.1x a tile of 4).
+        tile = max(8, self.max_slots // 4) if vae_tile_rows is None else int(vae_tile_rows)
+        self.vae_tile_rows = max(1, min(self.max_slots, tile))
         # Persisted GEMM kernel plans (see fast.py): same machine + same software = same kernels = same audio.
         self.plan_cache = Path(plan_cache) if plan_cache is not None else self.model_dir / '.g3_linear_plans.json'
         self.native_sample_rate = 44100
@@ -602,6 +604,7 @@ class MingEngine:
             'cuda_graphs': bool(self._graphs), 'graphs': len(self._graphs), 'batch_invariant': self.batch_invariant,
             'capture_s': round(self.capture_s, 3), 'warmup_s': round(self.warmup_s, 3),
             'first_chunk_latents': self.first_chunk_latents, 'max_chunk_latents': self.max_chunk_latents,
+            'vae_tile_rows': self.vae_tile_rows,
             'linear_plans': linear_plans(),
         }
         if self._loaded and self.device.type == 'cuda':
@@ -846,17 +849,25 @@ class MingEngine:
         h = self.next_embed[:bk]
         pos = self.pos_gpu[:bk]
         cos, sin = q.rope(pos.unsqueeze(1))
-        mask = (self.kv_arange.unsqueeze(0) <= pos.unsqueeze(1)).view(bk, 1, 1, MAX_CACHE_LEN)
+        # Additive fp32 mask over all cache positions: 0 up to the row's position, -inf beyond.
+        mask = torch.zeros(bk, 1, 1, MAX_CACHE_LEN, device=h.device, dtype=torch.float32).masked_fill(
+            (self.kv_arange.unsqueeze(0) > pos.unsqueeze(1)).view(bk, 1, 1, MAX_CACHE_LEN), float('-inf'))
         bidx = self.slot_index[:bk]
         n_rep = self.n_heads // self.n_kv
+        g = bk * self.n_kv
         for i in range(self.n_layers):
             qh, kh, vh = q.layer_qkv(i, h, cos, sin)
             kc, vc = self.k_cache[i], self.v_cache[i]
             kc[bidx, :, pos] = kh[:, :, 0, :]
             vc[bidx, :, pos] = vh[:, :, 0, :]
-            # GQA without repeating K/V: the n_rep query heads of a KV group become the query axis.
-            qg = qh.reshape(bk, self.n_kv, n_rep, self.head_dim)
-            attn = F.scaled_dot_product_attention(qg, kc[:bk], vc[:bk], attn_mask=mask, scale=q.scaling)
+            # GQA without repeating K/V: the n_rep query heads of a KV group become the query axis. One query per
+            # row: explicit attention (fp32 scores and softmax, like the fused kernels) is ~2x faster than SDPA's
+            # memory-efficient kernel at this shape, which parallelises poorly over 512 keys.
+            qg = qh.reshape(g, n_rep, self.head_dim)
+            scores = torch.bmm(qg, kc[:bk].view(g, MAX_CACHE_LEN, self.head_dim).transpose(1, 2),
+                               out_dtype=torch.float32).view(bk, self.n_kv, n_rep, MAX_CACHE_LEN)
+            probs = torch.softmax(scores * q.scaling + mask, dim=-1).to(vc.dtype)
+            attn = torch.bmm(probs.view(g, n_rep, MAX_CACHE_LEN), vc[:bk].view(g, MAX_CACHE_LEN, self.head_dim))
             h = q.layer_out(i, h, attn.reshape(bk, 1, self.n_heads * self.head_dim))
         self.z_buf[:bk].copy_(q.final_norm(h))
 

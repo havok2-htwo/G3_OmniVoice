@@ -3,6 +3,9 @@
 All numbers were measured by a client over HTTP against the real server (`omnivoice_tts_server.main`),
 using the public API that clients use. Nothing was timed in-process, except the VRAM-cap test in section 5.
 
+All three engines (OmniVoice, Ming and the CPU-only Gradium Phonon) are compared side by side, with CPU and RAM,
+in [tts-engine-comparison-2026-10.md](tts-engine-comparison-2026-10.md).
+
 ## Hardware and software
 
 - One RTX 5090 32 GB (cuda:0), Windows 11 (WDDM), driver baseline about 1.06 GB in use with nothing running.

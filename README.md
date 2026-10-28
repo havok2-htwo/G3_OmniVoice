@@ -124,6 +124,11 @@ Diagnostic benchmark scripts live under `tools\benchmarks`:
 & .\.conda-env\python.exe .\tools\benchmarks\bench_batchsize.py
 ```
 
+Engine benchmarks (streaming TTFA, throughput, VRAM, CPU/RAM, German WER) are written up in
+`docs/benchmarks/`: [tts-engine-comparison-2026-10.md](docs/benchmarks/tts-engine-comparison-2026-10.md)
+compares OmniVoice, Ming-3.0-tts and Gradium Phonon, and
+[ming-3.0-tts-2026-10.md](docs/benchmarks/ming-3.0-tts-2026-10.md) has the Ming details.
+
 Pinned Windows/CUDA runtime versions are recorded in `docs/RUNTIME_VERSIONS.md`.
 In particular, fp8 currently needs `kernels>=0.14.1,<0.15`; `kernels 0.15.1`
 breaks `transformers 5.9.0` during `omnivoice` import.

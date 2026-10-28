@@ -235,3 +235,31 @@ def test_split_bias_linear_never_writes_into_the_bias(rows):
     finally:
         fast.set_linear_mode('auto')
     assert torch.equal(b, before)
+
+
+def test_a_failed_delivery_finishes_every_stream_of_the_vae_job():
+    """Regression: _deliver pops the VAE job before processing it, so _fail_all no longer sees it; a row whose last
+    fragment ended earlier has already left _rows and its stream would never end (a consumer blocking forever)."""
+    from omnivoice_tts_server.ming.engine import MingEngine, MingStream, _VaeItem, _VaeJob
+
+    owner = SimpleNamespace(output_sample_rate=24000, _cancel=lambda s: None)
+
+    class Boom:
+        def __getitem__(self, index):
+            raise MemoryError('host buffer gone')
+
+    engine = MingEngine.__new__(MingEngine)
+    engine.vae = SimpleNamespace(scale=4, hop=882, pad=10)
+    engine.vae_out_host = Boom()
+    engine._vae_ms_ema = 0.0
+    streams = [MingStream(f'r{i}', owner) for i in range(2)]
+    items = [_VaeItem(row=SimpleNamespace(stream=s), slot=i, start=0, n=1, generated=2, final=True, last=True)
+             for i, s in enumerate(streams)]
+    engine._vae_job = _VaeJob(items=items, event=None, launched_at=0.0)
+    with pytest.raises(MemoryError):
+        engine._deliver()
+    assert engine._vae_job is None
+    for stream in streams:
+        assert stream.done
+        with pytest.raises(MemoryError, match='host buffer gone'):
+            stream.next_chunk(timeout=1)

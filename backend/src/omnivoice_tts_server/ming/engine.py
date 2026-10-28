@@ -64,6 +64,22 @@ PREFILL_BUCKET = 64  # prefill lengths are padded up to a multiple of this (one 
 _END = object()
 
 
+_STREAMS: dict[tuple[int, str], 'torch.cuda.Stream'] = {}
+_STREAMS_LOCK = threading.Lock()
+
+
+def _engine_stream(device: torch.device, name: str, priority: int = 0) -> 'torch.cuda.Stream':
+    """One process-wide CUDA stream per (device, role), reused by every engine load. cuBLAS keeps a workspace per
+    (handle, stream) for the life of the process, so fresh streams per load would leave one more workspace behind
+    after every close()."""
+    key = (torch.device(device).index or 0, name)
+    with _STREAMS_LOCK:
+        stream = _STREAMS.get(key)
+        if stream is None:
+            stream = _STREAMS[key] = torch.cuda.Stream(device=device, priority=priority)
+        return stream
+
+
 def bucket_for(n: int, max_slots: int) -> int:
     """Smallest bucket holding ``n`` slots (capped at ``max_slots``)."""
     for b in BUCKETS:
@@ -359,7 +375,7 @@ class MingEngine:
         self.vae_meta_np = self.vae_meta_host.numpy()
         self._vae_shapes: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
         if dev.type == 'cuda':
-            self.vae_stream = torch.cuda.Stream(device=dev, priority=-1)
+            self.vae_stream = _engine_stream(dev, 'vae', priority=-1)
             self.stop_event = torch.cuda.Event()
         else:  # pragma: no cover - CPU runs are for tests of the host logic only
             self.vae_stream = None
@@ -395,7 +411,7 @@ class MingEngine:
         cuda = self.device.type == 'cuda'
         if cuda:
             load_plans(self.plan_cache, self.device)
-        side = torch.cuda.Stream(device=self.device) if cuda else None
+        side = _engine_stream(self.device, 'warmup') if cuda else None
         if cuda:
             side.wait_stream(torch.cuda.current_stream())
         ctx = torch.cuda.stream(side) if cuda else _nullcontext()
@@ -420,22 +436,28 @@ class MingEngine:
             t0 = time.perf_counter()
             lm_pool = torch.cuda.graph_pool_handle()
             vae_pool = torch.cuda.graph_pool_handle()
+            # One capture stream per graph family: cuBLAS keys its workspace by (handle, stream), so graphs captured
+            # on one shared stream would bake in the same workspace -- and the LM graphs (main stream) replay
+            # concurrently with the VAE graphs (vae_stream). Separate pools do not prevent that race.
+            lm_capture = _engine_stream(self.device, 'lm_capture')
+            vae_capture = _engine_stream(self.device, 'vae_capture')
             graphs = {}
 
-            def capture(key, fn, pool):
+            def capture(key, fn, pool, stream):
                 g = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(g, pool=pool, capture_error_mode='thread_local'):
+                with torch.cuda.graph(g, pool=pool, stream=stream, capture_error_mode='thread_local'):
                     fn()
                 graphs[key] = g
 
             for bk in sorted(self.lm_buckets(), reverse=True):
-                capture(('decode', bk), lambda bk=bk: self._decode_core(bk), lm_pool)
-                capture(('flow', bk), lambda bk=bk: self._flow_core(bk), lm_pool)
+                capture(('decode', bk), lambda bk=bk: self._decode_core(bk), lm_pool, lm_capture)
+                capture(('flow', bk), lambda bk=bk: self._flow_core(bk), lm_pool, lm_capture)
             for lb in sorted(self.prefill_buckets(), reverse=True):
-                capture(('prefill', lb), lambda lb=lb: self._prefill_core(lb), lm_pool)
+                capture(('prefill', lb), lambda lb=lb: self._prefill_core(lb), lm_pool, lm_capture)
             for rows, chunk in sorted(self.vae_shapes(), reverse=True):
                 buf = self._vae_shape(rows, chunk)
-                capture(('vae', rows, chunk), lambda b=buf: self.vae.run(b['lat'], b['meta'], b['out']), vae_pool)
+                capture(('vae', rows, chunk), lambda b=buf: self.vae.run(b['lat'], b['meta'], b['out']), vae_pool,
+                        vae_capture)
             torch.cuda.synchronize(self.device)
             self._graphs = graphs
             self._graph_pools = (lm_pool, vae_pool)
@@ -996,6 +1018,16 @@ class MingEngine:
         job, self._vae_job = self._vae_job, None
         if job is None:
             return
+        try:
+            self._deliver_job(job)
+        except BaseException as exc:
+            # The job is no longer reachable from _fail_all, and rows whose last fragment ended earlier have already
+            # left _rows: finish every stream of this job here so no consumer blocks forever.
+            for it in job.items:
+                it.row.stream._finish(exc)
+            raise
+
+    def _deliver_job(self, job: _VaeJob) -> None:
         if job.event is not None:
             job.event.synchronize()
         dt = (time.perf_counter() - job.launched_at) * 1000.0

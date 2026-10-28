@@ -18,12 +18,25 @@ from pydantic import BaseModel
 
 from ..audio_export import wav_to_mp3
 from ..config import save_runtime_settings
+from ..engines import (
+    MING_REPO_ID,
+    EngineSwitchError,
+    engine_spec,
+    env_backend_override,
+    finetune_supported,
+    list_engines,
+    map_speech_request,
+    switcher_for,
+)
 from ..domain.models import (
     BatchSnapshot,
     BenchmarkRunCreateRequest,
     BenchmarkRunResponse,
     DashboardOverview,
     DashboardSnapshot,
+    EngineListResponse,
+    EngineSwitchRequest,
+    EngineSwitchStatus,
     GpuStatsResponse,
     JobDetailResponse,
     JobListItem,
@@ -224,7 +237,7 @@ def _effective_task_type(model_id: str | None, request_task_type: TaskType | Non
     return TaskType.custom_voice
 
 
-def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettingsResponse:
+def _settings_response(settings: Any, synthesizer: Any = None, switcher: Any = None) -> ServerSettingsResponse:
     runtime_info = getattr(synthesizer, 'runtime_info', None)
     runtime = runtime_info() if callable(runtime_info) else {}
     return ServerSettingsResponse(
@@ -284,7 +297,44 @@ def _settings_response(settings: Any, synthesizer: Any = None) -> ServerSettings
         position_temperature=settings.position_temperature,
         class_temperature=settings.class_temperature,
         text_optimization_default=_text_optimization_default(settings),
+        runtime_backend_env=env_backend_override(),
+        runtime_backend_pending=switcher.pending_backend if switcher is not None else None,
+        ming_model_id=str(getattr(settings, 'ming_model_id', '') or ''),
+        ming_model_dir=str(getattr(settings, 'ming_model_dir', '') or ''),
+        ming_max_slots=int(getattr(settings, 'ming_max_slots', 16)),
+        ming_cuda_graphs=bool(getattr(settings, 'ming_cuda_graphs', True)),
+        ming_output_sample_rate=int(getattr(settings, 'ming_output_sample_rate', 24000)),
+        ming_first_chunk_latents=int(getattr(settings, 'ming_first_chunk_latents', 2)),
+        ming_max_chunk_latents=int(getattr(settings, 'ming_max_chunk_latents', 8)),
     )
+
+
+def _engine_switcher(request: Request) -> Any:
+    return getattr(request.app.state, 'engine_switcher', None)
+
+
+def _settings_response_for(request: Request) -> ServerSettingsResponse:
+    state = request.app.state
+    return _settings_response(state.settings, getattr(state, 'synthesizer', None), _engine_switcher(request))
+
+
+def _require_finetune_engine(request: Request) -> None:
+    settings = request.app.state.settings
+    if not finetune_supported(settings):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'Finetuning trains OmniVoice checkpoints; the active engine is {settings.runtime_backend}. '
+            'Switch to OmniVoice first.',
+        )
+
+
+def _require_voice_profiles(request: Request) -> None:
+    switcher = getattr(request.app.state, 'engine_switcher', None)
+    if switcher is not None and not switcher.voice_profiles_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'The active engine ({request.app.state.settings.runtime_backend}) does not use voice profiles.',
+        )
 
 
 def _text_optimization_default(settings: Any) -> str:
@@ -484,9 +534,97 @@ def _directory_size_gb(path: Path | None) -> float | None:
     return round(total / (1024 ** 3), 3)
 
 
+def _engine_model_statuses(request: Request) -> list[ModelDownloadStatus]:
+    """Model status for an engine that is not OmniVoice: its weights folder, as the engine registry sees it."""
+    from ..engines import engine_info
+
+    settings = request.app.state.settings
+    store = request.app.state.store
+    spec = engine_spec(settings.runtime_backend)
+    info = engine_info(spec, settings)
+    key = (f'engine:{spec.id}', os.path.normcase(str(info.model_dir or '')))
+    with store.model_download_lock:
+        job = dict(store.model_download_jobs.get(key) or {})
+    if job.get('status') == 'downloading':
+        state = 'downloading'
+    elif info.model_present:
+        state = 'ready'
+    elif job.get('status') == 'error':
+        state = 'error'
+    else:
+        state = 'missing'
+    model_dir = Path(info.model_dir) if info.model_dir else None
+    return [
+        ModelDownloadStatus(
+            id=model_id,
+            label=f'{info.label} ({info.model_id})',
+            kind='model',
+            status=state,
+            local_path=str(model_dir) if info.model_present and model_dir else None,
+            cache_path=str(model_dir) if model_dir and model_dir.exists() else None,
+            error=str(job.get('error')) if state == 'error' and job.get('error') else None,
+            updated_at=str(job.get('updated_at')) if job.get('updated_at') else None,
+            storage_root=str(model_dir.parent) if model_dir else '',
+            approx_size_gb=3.0 if spec.id == 'ming' else None,
+            size_on_disk_gb=_directory_size_gb(model_dir) if model_dir and model_dir.exists() else None,
+        )
+        for model_id in settings.supported_models
+    ]
+
+
+def _queue_engine_model_download(request: Request, model_id: str) -> dict[str, Any]:
+    """Ming: snapshot of the public repo into ming_model_dir. Phonon's checkpoint is gated (manual download)."""
+    settings = request.app.state.settings
+    store = request.app.state.store
+    if model_id not in settings.supported_models:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported model id')
+    if settings.runtime_backend != 'ming':
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'{settings.runtime_backend} checkpoints are downloaded by hand (gated repository).',
+        )
+    target = Path(settings.ming_model_dir)
+    key = ('engine:ming', os.path.normcase(str(target)))
+    with store.model_download_lock:
+        existing = store.model_download_jobs.get(key)
+        if existing and existing.get('status') == 'downloading':
+            return dict(existing)
+        job = {
+            'model_id': model_id,
+            'repo_id': MING_REPO_ID,
+            'storage_root': str(target),
+            'status': 'downloading',
+            'error': None,
+            'updated_at': utcnow().isoformat(),
+        }
+        store.model_download_jobs[key] = job
+
+    def worker() -> None:
+        try:
+            from huggingface_hub import snapshot_download
+
+            target.mkdir(parents=True, exist_ok=True)
+            snapshot_download(MING_REPO_ID, local_dir=str(target))
+            next_job = {**job, 'status': 'ready', 'error': None, 'updated_at': utcnow().isoformat()}
+        except Exception as exc:
+            next_job = {**job, 'status': 'error', 'error': str(exc), 'updated_at': utcnow().isoformat()}
+        with store.model_download_lock:
+            store.model_download_jobs[key] = next_job
+
+    threading.Thread(target=worker, daemon=True).start()
+    return job
+
+
+def _engine_serves_omnivoice_models(settings: Any) -> bool:
+    spec = engine_spec(settings.runtime_backend)
+    return spec is None or spec.native_model_ids
+
+
 def _model_download_statuses(request: Request, storage_path: str | None = None) -> list[ModelDownloadStatus]:
     settings = request.app.state.settings
     store = request.app.state.store
+    if not _engine_serves_omnivoice_models(settings):
+        return _engine_model_statuses(request)
     storage_root = _model_download_storage_root(settings, storage_path)
     storage_root.mkdir(parents=True, exist_ok=True)
     key = _model_download_key(storage_root)
@@ -535,6 +673,8 @@ def _model_download_statuses(request: Request, storage_path: str | None = None) 
 def _queue_model_download(request: Request, model_id: str, storage_path: str | None = None) -> dict[str, Any]:
     settings = request.app.state.settings
     store = request.app.state.store
+    if not _engine_serves_omnivoice_models(settings):
+        return _queue_engine_model_download(request, model_id)
     if model_id not in settings.supported_models:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported model id')
     storage_root = _model_download_storage_root(settings, storage_path)
@@ -578,6 +718,11 @@ def _queue_model_download(request: Request, model_id: str, storage_path: str | N
 def _delete_model_cache(request: Request, model_id: str, storage_path: str | None = None) -> dict[str, Any]:
     settings = request.app.state.settings
     store = request.app.state.store
+    if not _engine_serves_omnivoice_models(settings):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Delete the {settings.runtime_backend} model folder by hand; the server does not remove it.',
+        )
     if model_id not in settings.supported_models:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported model id')
     storage_root = _model_download_storage_root(settings, storage_path)
@@ -699,7 +844,7 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
     jobs = [_job_item(request, job_id) for job_id in sorted(store.jobs, key=lambda value: store.jobs[value].created_at, reverse=True)[:24]]
     return DashboardSnapshot(
         overview=overview,
-        settings=_settings_response(request.app.state.settings, getattr(request.app.state, 'synthesizer', None)),
+        settings=_settings_response_for(request),
         models=_model_items(request),
         voices=_voice_items(request, include_details=True),
         jobs=jobs,
@@ -716,6 +861,12 @@ async def _submit_or_429(
     api_key_id: str | None = None,
     stream_consumer: str | None = None,
 ):
+    switcher = switcher_for(queue.store)
+    if switcher is not None:
+        # During a live engine switch new requests wait and then go to the new engine.
+        await switcher.wait_ready()
+    # A model id the active engine does not serve (e.g. an OmniVoice id while Ming runs) uses its default.
+    payload = map_speech_request(queue.settings, payload)
     try:
         return await queue.submit(payload, owner_scope=owner_scope, api_key_id=api_key_id, stream_consumer=stream_consumer)
     except QueueSaturatedError as exc:
@@ -798,13 +949,22 @@ async def delete_admin_api_key(key_id: str, request: Request) -> dict[str, bool]
 
 @admin.get('/settings', response_model=ServerSettingsResponse)
 async def get_admin_settings(request: Request) -> ServerSettingsResponse:
-    return _settings_response(request.app.state.settings, getattr(request.app.state, 'synthesizer', None))
+    return _settings_response_for(request)
 
 
 @admin.put('/settings', response_model=ServerSettingsResponse)
 async def update_admin_settings(request: Request, payload: ServerSettingsUpdateRequest) -> ServerSettingsResponse:
     settings = request.app.state.settings
     store = request.app.state.store
+    switcher = _engine_switcher(request)
+    if switcher is not None and switcher.switching:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f'An engine switch to {switcher.status.to_backend} is running; save the settings when it is done.',
+        )
+    if payload.runtime_backend is not None and payload.runtime_backend != settings.runtime_backend:
+        # Fail before anything is applied when the engine cannot be switched to.
+        _check_engine_target(request, payload.runtime_backend)
 
     if payload.default_model is not None:
         if payload.default_model not in settings.supported_models:
@@ -915,9 +1075,26 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.class_temperature = payload.class_temperature
     if payload.text_optimization_default is not None:
         settings.text_optimization_default = payload.text_optimization_default
+    # Ming engine knobs: read when the Ming model loads (switch, reload or restart).
+    if payload.ming_model_id is not None and payload.ming_model_id.strip():
+        settings.ming_model_id = payload.ming_model_id.strip()
+    if payload.ming_model_dir is not None and payload.ming_model_dir.strip():
+        settings.ming_model_dir = Path(payload.ming_model_dir.strip()).expanduser()
+    if payload.ming_max_slots is not None:
+        settings.ming_max_slots = payload.ming_max_slots
+    if payload.ming_cuda_graphs is not None:
+        settings.ming_cuda_graphs = payload.ming_cuda_graphs
+    if payload.ming_output_sample_rate is not None:
+        settings.ming_output_sample_rate = payload.ming_output_sample_rate
+    if payload.ming_first_chunk_latents is not None:
+        settings.ming_first_chunk_latents = payload.ming_first_chunk_latents
+    if payload.ming_max_chunk_latents is not None:
+        settings.ming_max_chunk_latents = payload.ming_max_chunk_latents
 
     save_runtime_settings(settings)
-    return _settings_response(settings, getattr(request.app.state, 'synthesizer', None))
+    if payload.runtime_backend is not None and payload.runtime_backend != settings.runtime_backend:
+        await _start_engine_switch(request, payload.runtime_backend)
+    return _settings_response_for(request)
 
 
 @admin.get('/runtime/devices', response_model=RuntimeDeviceListResponse)
@@ -929,6 +1106,54 @@ async def list_runtime_devices(request: Request) -> RuntimeDeviceListResponse:
         preferred_device = 'cuda:0'
     devices = [RuntimeDeviceInfo(**device) for device in query_runtime_devices(preferred_device)]
     return RuntimeDeviceListResponse(preferred_device=preferred_device, devices=devices)
+
+
+def _check_engine_target(request: Request, backend: str) -> None:
+    switcher = _engine_switcher(request)
+    if switcher is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='The engine cannot be switched in this app.')
+    if switcher.switching:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f'An engine switch to {switcher.status.to_backend} is already running.')
+    try:
+        switcher.check_target(backend)
+    except EngineSwitchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+async def _start_engine_switch(request: Request, backend: str, *, wait: bool = False, drain_timeout_s: float = 120.0) -> EngineSwitchStatus:
+    switcher = _engine_switcher(request)
+    if switcher is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='The engine cannot be switched in this app.')
+    try:
+        result = await switcher.request_switch(backend, wait=wait, drain_timeout_s=drain_timeout_s)
+    except EngineSwitchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return result.model_copy()
+
+
+def _engine_list(request: Request) -> EngineListResponse:
+    settings = request.app.state.settings
+    switcher = _engine_switcher(request)
+    return EngineListResponse(
+        active=settings.runtime_backend,
+        env_override=env_backend_override(),
+        engines=list_engines(settings),
+        switch=switcher.status.model_copy() if switcher is not None else EngineSwitchStatus(),
+    )
+
+
+@admin.get('/runtime/engines', response_model=EngineListResponse)
+async def list_runtime_engines(request: Request) -> EngineListResponse:
+    """Every TTS engine with its install state, plus the progress of a running (or the last) live switch."""
+    return await asyncio.to_thread(_engine_list, request)
+
+
+@admin.post('/runtime/backend', response_model=EngineListResponse)
+async def switch_runtime_backend(request: Request, payload: EngineSwitchRequest) -> EngineListResponse:
+    """Switch the TTS engine without a restart. Running jobs finish on the old engine (cancelled after
+    drain_timeout_s), queued and new requests go to the new one. The choice is saved in runtime_settings.json."""
+    await _start_engine_switch(request, payload.backend, wait=payload.wait, drain_timeout_s=payload.drain_timeout_s)
+    return await asyncio.to_thread(_engine_list, request)
 
 
 @admin.get('/settings/presets', response_model=SettingsPresetListResponse)
@@ -1143,6 +1368,10 @@ async def admin_delete_job(request: Request, job_id: str) -> dict[str, bool]:
 @admin.post('/benchmarks/runs', response_model=BenchmarkRunResponse)
 async def admin_create_benchmark(request: Request, payload: BenchmarkRunCreateRequest) -> BenchmarkRunResponse:
     service: BenchmarkService = request.app.state.benchmark_service
+    settings = request.app.state.settings
+    payload = payload.model_copy(
+        update={'cases': [case.model_copy(update={'request': map_speech_request(settings, case.request)}) for case in payload.cases]}
+    )
     return await service.create_run(payload)
 
 
@@ -1155,6 +1384,7 @@ async def admin_list_benchmarks(request: Request) -> list[BenchmarkRunResponse]:
 @admin.post('/wer-benchmarks/runs', response_model=WerBenchmarkRunResponse)
 async def admin_create_wer_benchmark(request: Request, payload: WerBenchmarkCreateRequest) -> WerBenchmarkRunResponse:
     service: WerBenchmarkService = request.app.state.wer_benchmark_service
+    payload = payload.model_copy(update={'request': map_speech_request(request.app.state.settings, payload.request)})
     voice = (payload.request.voice or '').strip()
     if voice:
         store = request.app.state.store
@@ -1204,6 +1434,7 @@ async def create_voice_profile(
     consent: bool = Form(False),
     ref_text: str | None = Form(default=None),
 ) -> VoiceProfileCreateResponse:
+    _require_voice_profiles(request)
     if not consent:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Consent is required to save an OmniVoice clone profile.')
     if not (ref_text or '').strip():
@@ -1265,6 +1496,7 @@ def _transcode_to_wav(raw: bytes) -> bytes:
 
 @admin.patch('/voices/{voice_id}', response_model=VoiceProfileListItem)
 async def update_voice_profile(request: Request, voice_id: str, payload: VoiceProfilePatchRequest) -> VoiceProfileListItem:
+    _require_voice_profiles(request)
     store = request.app.state.store
     voice = store.voice_profiles.get(voice_id)
     if voice is None:
@@ -1283,6 +1515,7 @@ async def update_voice_profile(request: Request, voice_id: str, payload: VoicePr
 
 @admin.delete('/voices/{voice_id}')
 async def delete_voice_profile(request: Request, voice_id: str) -> dict[str, bool]:
+    _require_voice_profiles(request)
     store = request.app.state.store
     if voice_id not in store.voice_profiles:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Voice not found')
@@ -1593,6 +1826,7 @@ async def finetune_generate_sentences(request: Request, domain_id: str, payload:
 
 @finetune.post('/generate', response_model=DatagenRunResponse)
 async def finetune_start_generate(request: Request, payload: DatagenStartRequest) -> DatagenRunResponse:
+    _require_finetune_engine(request)
     try:
         return await _finetune(request).start_datagen(payload)
     except ValueError as exc:
@@ -1684,6 +1918,7 @@ def _trainer(request: Request) -> FinetuneTrainer:
 
 @finetune.post('/train', response_model=TrainRunResponse)
 async def finetune_start_training(request: Request, payload: TrainStartRequest) -> TrainRunResponse:
+    _require_finetune_engine(request)
     try:
         return await _trainer(request).start_training(payload)
     except ValueError as exc:
@@ -1707,6 +1942,7 @@ async def finetune_cancel_training(request: Request, run_id: str) -> OkResponse:
 
 @finetune.post('/train/{run_id}/promote', response_model=CheckpointItem)
 async def finetune_promote_training(request: Request, run_id: str, payload: PromoteRequest) -> CheckpointItem:
+    _require_finetune_engine(request)
     trainer = _trainer(request)
     try:
         item = trainer.promote_run(run_id, payload.name)

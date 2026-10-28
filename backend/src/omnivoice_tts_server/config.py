@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal, Mapping
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -63,7 +65,21 @@ RUNTIME_SETTINGS_FIELDS = {
     'position_temperature',
     'class_temperature',
     'text_optimization_default',
+    # Engine selection (live switch: POST /api/admin/runtime/backend). An explicit
+    # OMNIVOICE_TTS_RUNTIME_BACKEND env var still wins over the saved value at startup.
+    'runtime_backend',
+    'ming_model_id',
+    'ming_model_dir',
+    'ming_max_slots',
+    'ming_cuda_graphs',
+    'ming_output_sample_rate',
+    'ming_first_chunk_latents',
+    'ming_max_chunk_latents',
 }
+# Saved as str, loaded back as Path.
+PATH_SETTINGS_FIELDS = {'models_root_dir', 'ming_model_dir'}
+RUNTIME_BACKENDS = ('omnivoice', 'phonon', 'ming', 'mock')
+RUNTIME_BACKEND_ENV = 'OMNIVOICE_TTS_RUNTIME_BACKEND'
 
 
 class Settings(BaseSettings):
@@ -111,6 +127,19 @@ class Settings(BaseSettings):
     # Rust thread-pool size per engine (RAYON_NUM_THREADS). 0 = cpu_count // (2 * phonon_workers). Left at the
     # runtime default (one pool per core per engine), the engines oversubscribe the CPU and run ~3x slower.
     phonon_threads: int = Field(default=0, ge=0, le=64)
+    # runtime_backend='ming' serves inclusionAI Ming-3.0-tts 0.5B (MIT) from this folder (ming/ package,
+    # MingSynthesizer in ming_runtime.py). Voice profiles clone through the '...-Base' alias.
+    ming_model_id: str = 'inclusionAI/Ming-3.0-tts-0.5B'
+    ming_model_dir: Path = Field(default=DEFAULT_MODELS_ROOT / 'Ming-3.0-tts-0.5b')
+    # Rows the engine decodes at once (continuous batching: new rows join at the next LM step).
+    ming_max_slots: int = Field(default=16, ge=1, le=64)
+    # CUDA graphs for the per-step LM/flow-head/decoder launches (the eager loop is launch-bound).
+    ming_cuda_graphs: bool = True
+    # 24000 keeps the client contract (raw /v1/audio/speech PCM is 24 kHz); 44100 is the native rate.
+    ming_output_sample_rate: Literal[24000, 44100] = 24000
+    # Latents (80 ms each) in the first streamed chunk of a sentence (time to first audio) and in later chunks.
+    ming_first_chunk_latents: int = Field(default=2, ge=1, le=8)
+    ming_max_chunk_latents: int = Field(default=8, ge=1, le=32)
     allow_model_downloads: bool = True
     enable_cpu_offload: bool = False
     compile_model: bool = True
@@ -175,6 +204,8 @@ class Settings(BaseSettings):
     # Spoken-text optimization for public requests that do not set text_optimization
     # themselves ('off' | 'deterministic'). Benchmarks and finetune jobs stay 'off'.
     text_optimization_default: Literal['off', 'deterministic'] = 'off'
+    # Set by engine_switch while a non-OmniVoice engine is active (see persisted_overrides).
+    _persisted_overrides_store: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     @field_validator('models_root_dir', mode='before')
     @classmethod
@@ -182,6 +213,18 @@ class Settings(BaseSettings):
         if isinstance(value, Path):
             return value.expanduser()
         return Path(value).expanduser()
+
+    @field_validator('ming_model_dir', mode='before')
+    @classmethod
+    def validate_ming_model_dir(cls, value: str | Path) -> Path:
+        if isinstance(value, Path):
+            return value.expanduser()
+        return Path(value).expanduser()
+
+    @field_validator('runtime_backend', mode='before')
+    @classmethod
+    def validate_runtime_backend(cls, value: str) -> str:
+        return str(value or 'omnivoice').strip().lower()
 
     @field_validator('frontend_dist_dir', mode='before')
     @classmethod
@@ -198,7 +241,12 @@ class Settings(BaseSettings):
         return Path(value).expanduser()
 
 
-def load_runtime_settings(settings: Settings) -> None:
+def load_runtime_settings(settings: Settings, environ: Mapping[str, str] | None = None) -> None:
+    """Apply data/runtime_settings.json. runtime_backend is the one saved field an explicit
+    environment variable overrides (env > saved file > 'omnivoice'), so a container or a
+    start script can pin the engine; every other saved field wins over the environment."""
+    env = os.environ if environ is None else environ
+    env_backend = any(name.upper() == RUNTIME_BACKEND_ENV for name in env)
     path = settings.data_dir / RUNTIME_SETTINGS_FILE
     if not path.exists():
         return
@@ -212,7 +260,13 @@ def load_runtime_settings(settings: Settings) -> None:
         if field_name not in payload:
             continue
         value = payload[field_name]
-        if field_name == 'models_root_dir':
+        if field_name == 'runtime_backend':
+            if env_backend:
+                continue
+            value = str(value or '').strip().lower()
+            if value not in RUNTIME_BACKENDS:
+                continue
+        if field_name in PATH_SETTINGS_FIELDS:
             value = Path(value).expanduser()
         setattr(settings, field_name, value)
 
@@ -223,11 +277,38 @@ def save_runtime_settings(settings: Settings, fields: Iterable[str] | None = Non
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     payload = {}
     names = RUNTIME_SETTINGS_FIELDS if fields is None else RUNTIME_SETTINGS_FIELDS & set(fields)
+    # A non-OmniVoice engine rewrites some fields in memory (its model alias as active_model, ...);
+    # those keep their OmniVoice value on disk so the next OmniVoice start is not broken by them.
+    overrides = persisted_overrides(settings)
     for field_name in sorted(names):
-        value = getattr(settings, field_name)
+        value = overrides[field_name] if field_name in overrides else getattr(settings, field_name)
         payload[field_name] = str(value) if isinstance(value, Path) else value
     path = settings.data_dir / RUNTIME_SETTINGS_FILE
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+# Fields a non-OmniVoice engine's build_synthesizer rewrites in memory. engine_switch keeps the
+# OmniVoice values of them (the "baseline") and restores them when the engine changes again.
+ENGINE_MUTATED_FIELDS = ('supported_models', 'active_model', 'built_in_voices', 'default_voice')
+
+
+def snapshot_engine_fields(settings: Settings) -> dict[str, Any]:
+    return {name: copy.deepcopy(getattr(settings, name)) for name in ENGINE_MUTATED_FIELDS}
+
+
+def restore_engine_fields(settings: Settings, snapshot: Mapping[str, Any], fields: Iterable[str] = ENGINE_MUTATED_FIELDS) -> None:
+    for name in fields:
+        if name in snapshot:
+            setattr(settings, name, copy.deepcopy(snapshot[name]))
+
+
+def set_persisted_overrides(settings: Settings, overrides: Mapping[str, Any] | None) -> None:
+    """Values save_runtime_settings writes instead of the in-memory ones (None/{} = none)."""
+    settings._persisted_overrides_store = dict(overrides or {})
+
+
+def persisted_overrides(settings: Settings) -> dict[str, Any]:
+    return dict(getattr(settings, '_persisted_overrides_store', None) or {})
 
 
 @lru_cache

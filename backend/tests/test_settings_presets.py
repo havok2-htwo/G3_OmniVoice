@@ -13,6 +13,8 @@ from omnivoice_tts_server.domain.models import ServerSettingsUpdateRequest
 from test_app import make_client
 
 TIER_NAMES = ['32GB VRAM', '24GB VRAM', '24+8 VRAM']
+MING_TIER_NAMES = ['Ming 32GB VRAM', 'Ming 24GB VRAM', 'Ming 24+8 VRAM', 'Ming best performance']
+BUILTIN_NAMES = [*TIER_NAMES, *MING_TIER_NAMES]
 NOW = '2026-10-16T12:00:00+00:00'
 
 
@@ -40,8 +42,8 @@ def test_builtin_tiers_come_first_in_tier_order(monkeypatch, tmp_path) -> None:
     _cards(monkeypatch, 32607)
     presets.save_preset(tmp_path, 'aaa first by name', {'max_batch_size': 4}, now_iso=NOW)
     listed = presets.list_presets(tmp_path)
-    assert [preset['name'] for preset in listed] == [*TIER_NAMES, 'aaa first by name']
-    assert [preset['built_in'] for preset in listed] == [True, True, True, False]
+    assert [preset['name'] for preset in listed] == [*BUILTIN_NAMES, 'aaa first by name']
+    assert [preset['built_in'] for preset in listed] == [True] * len(BUILTIN_NAMES) + [False]
     assert '8+24 VRAM' not in presets.BUILTIN_PRESETS
 
 
@@ -200,7 +202,7 @@ def test_admin_preset_routes(monkeypatch) -> None:
     client = make_client()
     try:
         listed = client.get('/api/admin/settings/presets').json()['presets']
-        assert [preset['name'] for preset in listed] == TIER_NAMES
+        assert [preset['name'] for preset in listed] == BUILTIN_NAMES
         assert listed[2]['values']['preferred_device'] == 'cuda:0'
         assert listed[0]['built_in'] is True and listed[0]['description']
 
@@ -287,3 +289,46 @@ def test_create_app_applies_the_tier_only_to_the_server_settings(monkeypatch, tm
 
     app_module.create_app(Settings(runtime_backend='mock', data_dir=explicit_dir))
     assert not (explicit_dir / 'runtime_settings.json').exists()
+
+
+# --- Ming engine tiers --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('name', MING_TIER_NAMES)
+def test_ming_tiers_select_the_engine_and_are_valid_settings(name) -> None:
+    values = presets.BUILTIN_PRESETS[name]['values']
+    assert values['runtime_backend'] == 'ming'
+    assert set(values) <= set(presets.PRESET_KEYS)
+    assert 'preferred_device' not in values
+    assert presets.preset_values(values) == values
+    assert values['ming_output_sample_rate'] == 24000, 'raw PCM clients expect 24 kHz'
+    assert values['ming_cuda_graphs'] is True
+    assert values['max_parallel_requests'] == values['ming_max_slots']
+
+
+@pytest.mark.parametrize(
+    ('name', 'slots'), [('Ming 32GB VRAM', 32), ('Ming 24GB VRAM', 16), ('Ming 24+8 VRAM', 16), ('Ming best performance', 48)]
+)
+def test_ming_tiers_carry_the_provisional_slots(name, slots) -> None:
+    assert presets.BUILTIN_PRESETS[name]['values']['ming_max_slots'] == slots
+
+
+def test_omnivoice_tiers_do_not_pick_an_engine() -> None:
+    for name in TIER_NAMES:
+        values = presets.BUILTIN_PRESETS[name]['values']
+        assert 'runtime_backend' not in values
+        assert not any(key.startswith('ming_') for key in values)
+
+
+def test_ming_two_card_tier_picks_the_24gb_card(monkeypatch, tmp_path) -> None:
+    _cards(monkeypatch, 8192, 24576)
+    tier = _tier(tmp_path, 'Ming 24+8 VRAM')
+    assert tier['values']['preferred_device'] == 'cuda:1'
+    assert 'preferred_device' not in _tier(tmp_path, 'Ming 24GB VRAM')['values']
+
+
+@pytest.mark.parametrize('values', [{'ming_max_slots': 0}, {'ming_max_slots': 65}, {'ming_output_sample_rate': 22050}, {'runtime_backend': 'tortoise'}])
+def test_invalid_ming_values_are_rejected(tmp_path, values) -> None:
+    key = next(iter(values))
+    with pytest.raises(ValueError, match=key):
+        presets.save_preset(tmp_path, 'bad', values, now_iso=NOW)

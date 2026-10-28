@@ -13,6 +13,13 @@ tier: it belongs on the 24 GB card of the two-card box. A tier with a target car
 picks preferred_device by matching the detected CUDA cards' total memory (machines
 number their cards differently), see resolve_presets. Single-card tiers never set it.
 
+Engine tiers ("Ming 32GB VRAM", "Ming 24GB VRAM", "Ming 24+8 VRAM", "Ming best
+performance") also set runtime_backend='ming' and the ming_* keys; saving such a preset
+switches the engine live. The OmniVoice tiers deliberately do NOT carry runtime_backend:
+their values stay byte-identical (and the first-start tier never pins an engine), so
+applying one only tunes the OmniVoice keys. Switch back to OmniVoice with the engine
+selector (or POST /api/admin/runtime/backend), then apply the OmniVoice tier.
+
 Saved presets live in <data_dir>/settings_presets.json ({name: {name, values,
 created_at}}); they cannot reuse a built-in name, and their values are filtered to
 PRESET_KEYS and normalised exactly like PUT /api/admin/settings does.
@@ -70,6 +77,12 @@ PRESET_KEYS = (
     'num_step',
     'audio_chunk_duration',
     'audio_chunk_threshold',
+    'runtime_backend',
+    'ming_max_slots',
+    'ming_cuda_graphs',
+    'ming_output_sample_rate',
+    'ming_first_chunk_latents',
+    'ming_max_chunk_latents',
 )
 # Every preset key is a persisted runtime setting and accepted by the settings PUT
 # under the same name (checked here so a rename cannot silently break presets).
@@ -138,6 +151,56 @@ BUILTIN_PRESETS: dict[str, dict[str, Any]] = {
         'values': dict(_TIER_SMALL),
     },
 }
+
+# ---------------------------------------------------------------------------
+# MING ENGINE TIERS (runtime_backend='ming'). Ming-3.0-tts 0.5B in bf16 + SDPA runs on
+# Ampere (RTX 3090) and newer; nothing here needs fp8 or sm_90+ kernels. Quality knobs are
+# fixed inside the engine (flow_steps 10, cfg 2.0, sigma 0.25); these keys only size the
+# continuous batch and the stream chunks. Output stays 24 kHz (the client contract).
+# max_parallel_requests matches the engine's slots so enough requests reach it at once;
+# batch_wait_ms 0 because rows join the running decode loop at the next step anyway.
+# ming_max_slots values are PROVISIONAL, set by benchmark (replace with measured numbers).
+# ---------------------------------------------------------------------------
+_MING_COMMON: dict[str, Any] = {
+    'runtime_backend': 'ming',
+    'ming_cuda_graphs': True,
+    'ming_output_sample_rate': 24000,
+    'ming_first_chunk_latents': 2,
+    'ming_max_chunk_latents': 8,
+    'batch_wait_ms': 0,
+}
+MING_PRESETS: dict[str, dict[str, Any]] = {
+    'Ming 32GB VRAM': {
+        'description': 'Ming-3.0-tts auf der RTX 5090, alle G3-Dienste auf einer Karte. 32 Slots '
+        '(vorlaeufig, wird per Benchmark gesetzt).',
+        'target_vram_gb': None,
+        # provisional, set by benchmark
+        'values': {**_MING_COMMON, 'ming_max_slots': 32, 'max_parallel_requests': 32},
+    },
+    'Ming 24GB VRAM': {
+        'description': 'Ming-3.0-tts auf einer 24-GB-Karte (RTX 4090 oder RTX 3090), alle G3-Dienste auf einer '
+        'Karte. 16 Slots (vorlaeufig, wird per Benchmark gesetzt).',
+        'target_vram_gb': None,
+        # provisional, set by benchmark
+        'values': {**_MING_COMMON, 'ming_max_slots': 16, 'max_parallel_requests': 16},
+    },
+    'Ming 24+8 VRAM': {
+        'description': 'Ming-3.0-tts auf der 24-GB-Karte (3090) der 24+8-Maschine. 16 Slots (vorlaeufig, wird per '
+        'Benchmark gesetzt).',
+        'target_vram_gb': 24,
+        # provisional, set by benchmark
+        'values': {**_MING_COMMON, 'ming_max_slots': 16, 'max_parallel_requests': 16},
+    },
+    'Ming best performance': {
+        'description': 'Ming-3.0-tts mit maximalem Durchsatz, wenn die Karte Ming allein gehoert: 48 Slots, '
+        'groessere Folge-Chunks; der erste Chunk bleibt kurz. Das Queue-Limit (nicht Teil des Presets) muss '
+        'mindestens 48 sein, sonst begrenzt es die gleichzeitigen Anfragen (vorlaeufig, wird per Benchmark gesetzt).',
+        'target_vram_gb': None,
+        # provisional, set by benchmark
+        'values': {**_MING_COMMON, 'ming_max_slots': 48, 'max_parallel_requests': 48, 'ming_max_chunk_latents': 16},
+    },
+}
+BUILTIN_PRESETS.update(MING_PRESETS)
 
 
 def _path(data_dir: Path) -> Path:

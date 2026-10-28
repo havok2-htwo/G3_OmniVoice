@@ -314,6 +314,21 @@ class ServerSettingsResponse(BaseModel):
     position_temperature: float | None = None
     class_temperature: float | None = None
     text_optimization_default: TextOptimizationMode = 'off'
+    # Set when OMNIVOICE_TTS_RUNTIME_BACKEND pins the engine at startup (a live switch still
+    # works, but the next start uses the env value again).
+    runtime_backend_env: str | None = None
+    # The engine a running live switch is moving to (None when no switch runs).
+    runtime_backend_pending: str | None = None
+    ming_model_id: str = 'inclusionAI/Ming-3.0-tts-0.5B'
+    ming_model_dir: str = ''
+    ming_max_slots: int = 16
+    ming_cuda_graphs: bool = True
+    ming_output_sample_rate: int = 24000
+    ming_first_chunk_latents: int = 2
+    ming_max_chunk_latents: int = 8
+
+
+RuntimeBackendName = Literal['omnivoice', 'phonon', 'ming', 'mock']
 
 
 class ServerSettingsUpdateRequest(BaseModel):
@@ -367,6 +382,75 @@ class ServerSettingsUpdateRequest(BaseModel):
     position_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
     class_temperature: float | None = Field(default=None, ge=0.0, le=5.0)
     text_optimization_default: TextOptimizationMode | None = None
+    # A different engine than the active one starts a live switch (same as POST /api/admin/runtime/backend).
+    runtime_backend: RuntimeBackendName | None = None
+    ming_model_id: str | None = None
+    ming_model_dir: str | None = None
+    ming_max_slots: int | None = Field(default=None, ge=1, le=64)
+    ming_cuda_graphs: bool | None = None
+    ming_output_sample_rate: Literal[24000, 44100] | None = None
+    ming_first_chunk_latents: int | None = Field(default=None, ge=1, le=8)
+    ming_max_chunk_latents: int | None = Field(default=None, ge=1, le=32)
+
+    @field_validator('runtime_backend', mode='before')
+    @classmethod
+    def _normalize_runtime_backend(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
+
+class EngineInfo(BaseModel):
+    id: str
+    label: str
+    description: str = ''
+    active: bool = False
+    # installed: the Python packages import; model_present: the weights are on disk.
+    installed: bool = False
+    model_present: bool = False
+    # available: a switch to this engine can start now (downloadable weights count).
+    available: bool = False
+    status: str = 'missing'
+    detail: str | None = None
+    model_id: str | None = None
+    model_dir: str | None = None
+    uses_voice_profiles: bool = True
+    native_streaming: bool = False
+    # The mock tone generator: listed for tests and demos only.
+    test_only: bool = False
+
+
+class EngineSwitchStatus(BaseModel):
+    # idle | draining | unloading | loading | ready | failed
+    state: str = 'idle'
+    from_backend: str | None = None
+    to_backend: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    message: str | None = None
+    error: str | None = None
+    drained_jobs: int = 0
+    cancelled_jobs: int = 0
+    requeued_jobs: int = 0
+
+
+class EngineListResponse(BaseModel):
+    active: str
+    env_override: str | None = None
+    engines: list[EngineInfo] = Field(default_factory=list)
+    switch: EngineSwitchStatus = Field(default_factory=EngineSwitchStatus)
+
+
+class EngineSwitchRequest(BaseModel):
+    backend: RuntimeBackendName
+    # True: answer once the new engine serves (and its model is loaded). False: answer at once; poll
+    # GET /api/admin/runtime/engines for the progress.
+    wait: bool = False
+    # In-flight jobs get this long to finish on the old engine; the rest are cancelled.
+    drain_timeout_s: float = Field(default=120.0, ge=0.0, le=3600.0)
+
+    @field_validator('backend', mode='before')
+    @classmethod
+    def _normalize_backend(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 class SettingsPresetItem(BaseModel):

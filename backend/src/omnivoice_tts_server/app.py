@@ -16,7 +16,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.router_v2 import router as api_router
 from .capacity import capacity_summary
-from .config import Settings, get_settings
+from .config import Settings, get_settings, snapshot_engine_fields
+from .engines import EngineSwitcher, engine_spec, fix_active_model, uses_voice_profiles
 from .domain.state import InMemoryStore
 from .finetune import FinetuneService, FinetuneTrainer
 from .finetune.registry import seed_supported_models
@@ -136,13 +137,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.models_root_dir.mkdir(parents=True, exist_ok=True)
         store = InMemoryStore(max_queue_size=settings.max_queue_size)
         store.load_secrets(settings.data_dir)
-        # Voice profiles are OmniVoice clone prompts; a Phonon server resolves voices from its own catalog instead.
-        if settings.runtime_backend.lower() != 'phonon':
+        backend = settings.runtime_backend.lower()
+        spec = engine_spec(backend)
+        # Voice profiles are clone prompts for OmniVoice and Ming; a Phonon server resolves voices from its own
+        # catalog instead.
+        profiles_active = uses_voice_profiles(backend)
+        if profiles_active:
             store.load_voices(settings.data_dir)
             try:
                 seed_voice_presets(store, settings.data_dir)
             except (OSError, ValueError) as exc:
                 logger.warning('voice presets not seeded: %s', exc)
+        # Re-seed the model list with any promoted custom finetune checkpoints so they are
+        # selectable and the existing model-ops endpoints can load them (OmniVoice ids only).
+        seed_supported_models(settings)
+        # A saved active_model the list does not contain (e.g. another engine's alias) falls back to OmniVoice-Base.
+        fix_active_model(settings)
+        # The OmniVoice values of the fields another engine's build_synthesizer rewrites; restored on a switch.
+        engine_baseline = snapshot_engine_fields(settings)
         store.active_model = settings.active_model
         events = EventHub(store)
         synthesizer = build_synthesizer(settings, store)
@@ -152,9 +164,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         benchmark_service = BenchmarkService(store, queue_service, events, settings)
         wer_benchmark_service = WerBenchmarkService(store, queue_service, transcription_service, events, settings)
         finetune_service = FinetuneService(store, queue_service, transcription_service, wer_benchmark_service, events, settings)
-        # Re-seed the model list with any promoted custom finetune checkpoints so they are
-        # selectable and the existing model-ops endpoints can load them.
-        seed_supported_models(settings)
         finetune_trainer = FinetuneTrainer(store, settings, events, synthesizer)
         app.state.settings = settings
         app.state.store = store
@@ -167,6 +176,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.wer_benchmark_service = wer_benchmark_service
         app.state.finetune_service = finetune_service
         app.state.finetune_trainer = finetune_trainer
+        engine_switcher = EngineSwitcher(app.state, engine_baseline)
+        engine_switcher.voice_profiles_active = profiles_active
+        # Never persist this engine's own alias as active_model (and Phonon's default voice).
+        engine_switcher.apply_persist_overrides()
+        app.state.engine_switcher = engine_switcher
         # Users/sessions/api_keys are seeded + pruned by store.load_secrets() above
         # (default admin/admin on a fresh deploy, forced password change on first login).
         logger.info(
@@ -211,7 +225,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # Pre-load the active model at startup so the first real request is never cold.
         # Also primes torch.compile / Triton kernel cache via a warmup inference pass.
-        if settings.runtime_backend.lower() == 'omnivoice' and settings.active_model:
+        if spec is not None and spec.preload and backend != 'mock' and settings.active_model:
             try:
                 logger.info('startup pre-loading model=%s', settings.active_model)
                 await synthesizer.ensure_model(settings.active_model)
@@ -230,7 +244,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
             store.save_secrets(settings.data_dir)
-            store.save_voices(settings.data_dir)
+            # Only when the profiles are loaded: saving an empty set (Phonon mode) would wipe voice_profiles.json.
+            if engine_switcher.voice_profiles_active:
+                store.save_voices(settings.data_dir)
             logger.info('shutdown complete')
 
     app = FastAPI(title=settings.app_name, lifespan=lifespan)

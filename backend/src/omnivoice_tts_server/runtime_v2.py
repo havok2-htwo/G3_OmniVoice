@@ -1425,6 +1425,17 @@ def build_synthesizer(settings: Settings, store: InMemoryStore) -> Any:
         settings.built_in_voices = [*settings.built_in_voices, *synthesizer.voice_names()]
         store.active_model = settings.phonon_model_id
         return synthesizer
+    if settings.runtime_backend.lower() == 'ming':
+        from .ming_runtime import MING_BASE_ALIAS, MingSynthesizer
+
+        # Weights load lazily (ensure_model); the queue's first batch or the startup preload pulls them in.
+        synthesizer = MingSynthesizer(settings=settings, store=store)
+        # One clone alias whose id ends in 'Base': task-type inference, the default voice profile and the
+        # OpenAI voice routing treat it exactly like OmniVoice-Base. Voice profiles stay loaded.
+        settings.supported_models = [MING_BASE_ALIAS]
+        settings.active_model = MING_BASE_ALIAS
+        store.active_model = MING_BASE_ALIAS
+        return synthesizer
     if settings.runtime_backend.lower() != 'omnivoice':
         raise RuntimeError(f'Unsupported runtime backend: {settings.runtime_backend}')
     return OmniVoiceSynthesizer(settings=settings, store=store)

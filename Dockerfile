@@ -92,7 +92,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # kernels==0.14.1, numpy==2.4.4, ... — while the Windows-only lines stay inert and the
 # already-installed +cu130 torch trio (above) satisfies its pins untouched.
 #
-# [ming] adds the Ming-3.0-tts engine's dependencies (einops, onnxruntime CPU for the CAM++
+# [ming] adds the Ming-3.0-tts engine's dependencies (onnxruntime CPU for the CAM++
 # speaker encoder, soxr). Its weights are not in the image: put them into the models volume
 # (models/Ming-3.0-tts-0.5b) or download them from the admin UI after switching to Ming.
 COPY backend/ ./backend/

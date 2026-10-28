@@ -38,7 +38,6 @@ extra `[ming]` (`install.ps1` installs `backend[dev,ming]`, the Dockerfile
 
 | Package | Version | Used for |
 | --- | --- | --- |
-| einops | 0.8.2 | tensor reshapes in the vendored model code |
 | onnxruntime | 1.31.1 (CPU) | CAM++ speaker embedding (`campplus.onnx`) of the voice profiles |
 | soxr | 1.1.0 | stateful 44.1 kHz -> 24 kHz resampler per stream |
 | soundfile | 0.14.0 | profile WAV decoding (already a core dependency) |

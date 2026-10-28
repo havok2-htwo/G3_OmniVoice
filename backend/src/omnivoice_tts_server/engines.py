@@ -82,7 +82,7 @@ ENGINES: dict[str, EngineSpec] = {
         label='Ming-3.0-tts 0.5B',
         description='inclusionAI Ming-3.0-tts 0.5B (MIT). Klonen ueber Stimmprofile, echtes Chunk-Streaming, '
         'kontinuierliches Batching; Ausgabe 24 kHz.',
-        packages=('omnivoice_tts_server.ming', 'omnivoice_tts_server.ming_runtime', 'einops', 'onnxruntime', 'soxr', 'soundfile'),
+        packages=('omnivoice_tts_server.ming', 'omnivoice_tts_server.ming_runtime', 'onnxruntime', 'soxr'),
         uses_voice_profiles=True,
         native_model_ids=False,
         native_streaming=True,

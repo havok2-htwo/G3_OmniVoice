@@ -150,8 +150,8 @@ Invoke-External -Label 'Installing optional Triton for torch.compile' -FilePath 
     '-m', 'pip', 'install', 'triton-windows<3.7'
 )
 
-# [ming] adds the Ming-3.0-tts engine's runtime dependencies (einops, onnxruntime for the CAM++ speaker
-# encoder, soxr for the 44.1 -> 24 kHz stream resampler).
+# [ming] adds the Ming-3.0-tts engine's runtime dependencies (onnxruntime for the CAM++ speaker encoder,
+# soxr for the 44.1 -> 24 kHz stream resampler).
 Invoke-External -Label 'Installing OmniVoice backend package (+ Ming engine extra)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming]")
 
 $MingDir = Join-Path $ModelsDir 'Ming-3.0-tts-0.5b'

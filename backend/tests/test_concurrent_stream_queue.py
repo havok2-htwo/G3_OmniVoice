@@ -336,7 +336,7 @@ def test_capacity_profile_sets_the_sentence_split_length(tmp_path) -> None:
     job = asyncio.run(run())
     assert job.sentences_total == 1, 'OmniVoice VRAM split length does not apply'
     plain = _queue(tmp_path, MockSynthesizer(), sentence_chunking=False, vram_budget_mb=7000)
-    assert plain._max_chars_per_sentence() > 0
+    assert plain.max_chars_per_sentence() > 0
     assert not plain._uses_concurrent_batches()
 
 
@@ -345,3 +345,67 @@ def test_concurrency_needs_both_capability_flags(tmp_path, flags) -> None:
     synth = FakeConcurrentSynth()
     synth.supports_native_streaming, synth.supports_concurrent_batches = flags
     assert not _queue(tmp_path, synth)._uses_concurrent_batches()
+
+
+def test_one_job_never_takes_the_slots_kept_for_newcomers(tmp_path) -> None:
+    synth = FakeConcurrentSynth(slots=8)  # headroom 2
+    queue = _queue(tmp_path, synth)
+
+    async def run():
+        long_job = await _submit(queue, ' '.join([S1, S2, S3] * 4))
+        async with queue.store.job_condition:
+            queue._promote_waiting_locked()
+            first = queue._build_concurrent_plan_locked()
+            queue._reserve_batch_locked(first)
+            queue._native_inflight.update(first)
+        newcomers = [await _submit(queue, S2) for _ in range(3)]
+        async with queue.store.job_condition:
+            queue._promote_waiting_locked()
+            second = queue._build_concurrent_plan_locked()
+        return long_job, newcomers, first, second
+
+    long_job, newcomers, first, second = asyncio.run(run())
+    assert first == [(long_job.job_id, index) for index in range(6)], 'one job fills all but the headroom'
+    # The newcomers take the two free slots first; the third waits for a finished row.
+    assert second == [(newcomers[0].job_id, 0), (newcomers[1].job_id, 0)]
+
+
+def test_further_sentences_go_to_the_least_loaded_job(tmp_path) -> None:
+    synth = FakeConcurrentSynth(slots=8)
+    queue = _queue(tmp_path, synth)
+
+    async def run():
+        jobs = [await _submit(queue, ' '.join([S1, S2, S3] * 2)) for _ in range(2)]
+        async with queue.store.job_condition:
+            queue._promote_waiting_locked()
+            queue._native_inflight.update({(jobs[0].job_id, 90), (jobs[0].job_id, 91)})  # job 0 renders two already
+            queue._native_inflight.add((jobs[1].job_id, 90))
+            plan = queue._build_concurrent_plan_locked()
+        return jobs, plan
+
+    jobs, plan = asyncio.run(run())
+    # 3 in flight, 8 slots, 2 kept free -> 3 more: job 1 (load 1) first, then alternating from equal load.
+    assert [job_id for job_id, _ in plan] == [jobs[1].job_id, jobs[0].job_id, jobs[1].job_id]
+
+
+def test_an_abandoned_stream_cancels_its_job_in_its_own_task() -> None:
+    from types import SimpleNamespace
+
+    from omnivoice_tts_server.api import router_v2
+
+    class Queue:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def cancel(self, job_id: str) -> None:
+            self.cancelled.append(job_id)
+
+    async def run():
+        queue = Queue()
+        router_v2._cancel_abandoned_stream(queue, SimpleNamespace(job_id='live', status=JobStatus.streaming))
+        router_v2._cancel_abandoned_stream(queue, SimpleNamespace(job_id='done', status=JobStatus.completed))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return queue.cancelled
+
+    assert asyncio.run(run()) == ['live']

@@ -174,7 +174,7 @@ class QueueService:
             enabled=self.settings.sentence_chunking,
             short_sentence_merge_max_chars=self.settings.short_sentence_merge_max_chars,
             following_sentence_merge_min_chars=self.settings.following_sentence_merge_min_chars,
-            max_chars=self._max_chars_per_sentence(),
+            max_chars=self.max_chars_per_sentence(),
         )
         if not sentences:
             raise RuntimeError('Missing input text')
@@ -310,7 +310,7 @@ class QueueService:
         await self._publish_state()
         return job
 
-    def _max_chars_per_sentence(self) -> int:
+    def max_chars_per_sentence(self) -> int:
         """Sentence split length: the synthesizer's own capacity profile when it has one (Ming), else the limit the
         OmniVoice VRAM budget implies."""
         profile = self._capacity_profile()
@@ -806,21 +806,25 @@ class QueueService:
                 return None
         return profile if isinstance(profile, dict) else None
 
-    def _concurrent_limits(self) -> tuple[int, int, int, int]:
-        """(sentences in flight, per job without headroom, slots kept free for new jobs, items per batch)."""
+    def _concurrent_limits(self) -> tuple[int, int, int]:
+        """(sentences in flight, slots kept free for jobs with nothing rendering, items per batch)."""
         profile = self._capacity_profile() or {}
         total = max(1, int(profile.get('max_inflight_items') or self.settings.max_batch_size))
-        per_job = max(1, int(profile.get('max_inflight_per_job') or 1))
-        headroom = max(0, int(profile.get('newcomer_headroom') or 0))
+        headroom = max(0, min(total - 1, int(profile.get('newcomer_headroom') or 0)))
         batch_items = max(1, int(profile.get('max_batch_items') or total))
-        return total, per_job, headroom, batch_items
+        return total, headroom, batch_items
 
     def _build_concurrent_plan_locked(self) -> list[tuple[str, int]]:
-        """Sentences to dispatch now: first the first sentence of every job that has none rendering yet (lowest
-        time to first audio), then round-robin. A job runs up to max_inflight_per_job sentences at once, more only
-        while newcomer_headroom slots stay free. Groups do not matter: every engine row carries its own voice,
-        language and seed."""
-        total, per_job, headroom, max_items = self._concurrent_limits()
+        """Sentences to dispatch now.
+
+        1. The next sentence of every job with nothing rendering (a new job's first sentence: lowest time to first
+           audio). These may use any free slot.
+        2. Further sentences, always to the job with the fewest sentences rendering (fair share), but only while
+           newcomer_headroom slots stay free: a request arriving during a busy period still starts at the next step.
+
+        Groups do not matter: every engine row carries its own voice, language and seed.
+        """
+        total, headroom, max_items = self._concurrent_limits()
         inflight = len(self._native_inflight)
         room = min(total - inflight, max_items)
         if room <= 0:
@@ -835,37 +839,34 @@ class QueueService:
         ]
         if not eligible:
             return []
-        running: dict[str, int] = {}
+        load: dict[str, int] = {job_id: 0 for job_id in eligible}
         for job_id, _ in self._native_inflight:
-            running[job_id] = running.get(job_id, 0) + 1
+            if job_id in load:
+                load[job_id] += 1
         plan: list[tuple[str, int]] = []
         planned: dict[str, int] = {}
 
         def take(job_id: str) -> None:
-            state = self.store.request_states[job_id]
             offset = planned.get(job_id, 0)
-            plan.append((job_id, state.pending_sentence_indices[offset]))
+            plan.append((job_id, self.store.request_states[job_id].pending_sentence_indices[offset]))
             planned[job_id] = offset + 1
+            load[job_id] += 1
 
         for job_id in eligible:
             if len(plan) >= room:
                 return plan
-            if running.get(job_id, 0) == 0:
+            if load[job_id] == 0:
                 take(job_id)
-        made_progress = True
-        while len(plan) < room and made_progress:
-            made_progress = False
-            for job_id in eligible:
-                if len(plan) >= room:
-                    break
-                state = self.store.request_states[job_id]
-                offset = planned.get(job_id, 0)
-                if offset >= len(state.pending_sentence_indices):
-                    continue
-                if running.get(job_id, 0) + offset >= per_job and inflight + len(plan) + 1 > total - headroom:
-                    continue
-                take(job_id)
-                made_progress = True
+        extra_room = min(room, total - headroom - inflight)
+        while len(plan) < extra_room:
+            candidates = [
+                job_id
+                for job_id in eligible
+                if planned.get(job_id, 0) < len(self.store.request_states[job_id].pending_sentence_indices)
+            ]
+            if not candidates:
+                break
+            take(min(candidates, key=lambda job_id: load[job_id]))
         return plan
 
     def _concurrent_dispatch_ready_locked(self) -> bool:

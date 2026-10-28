@@ -119,7 +119,9 @@ def _profile(voice_id='voice_sonja', name='SonjaV2', ref_text='Hallo Welt, das i
 
 
 @pytest.fixture
-def synth_env(tmp_path):
+def synth_env(tmp_path, monkeypatch):
+    # The real hook changes the process-wide SDPA order; test_load_restores_the_default_sdpa_order covers it.
+    monkeypatch.setattr(MingSynthesizer, '_reset_process_kernel_choices', staticmethod(lambda: None))
     model_dir = tmp_path / 'Ming-3.0-tts-0.5b'
     model_dir.mkdir()
     (model_dir / 'config.json').write_text('{}', encoding='utf-8')
@@ -350,7 +352,8 @@ def test_unload_free_memory_and_warmup(synth_env, monkeypatch) -> None:
     synth = synth_env.make()
     model, _ = asyncio.run(synth.warmup())
     engine = FakeEngine.instances[-1]
-    assert model == MING_BASE_ALIAS and engine.rendered == [ming_runtime.WARMUP_TEXT]
+    # One render at load (first-call paths) and one for the warmup itself.
+    assert model == MING_BASE_ALIAS and engine.rendered == [ming_runtime.WARMUP_TEXT] * 2
     info = synth.runtime_info()
     assert info['engine'] == 'ming' and info['loaded'] and info['engine_stats']['max_slots'] == 8
     cleanup = asyncio.run(synth.free_memory())
@@ -388,3 +391,15 @@ def test_submit_runs_off_the_event_loop(synth_env) -> None:
     engine.submit = submit
     asyncio.run(_collect(synth, [_item(0, 'a')]))
     assert threads and threads[0] != threading.main_thread().name
+
+
+def test_load_restores_the_default_sdpa_order(synth_env, monkeypatch) -> None:
+    import omnivoice_tts_server.runtime_v2 as runtime_v2
+
+    pytest.importorskip('torch')  # the hook only acts once torch is imported
+    monkeypatch.undo()
+    calls = []
+    monkeypatch.setattr(runtime_v2, 'apply_sdpa_backend_preference', lambda torch, prefer: calls.append(prefer))
+    synth = synth_env.make()
+    asyncio.run(synth.ensure_model(None))
+    assert calls == [False], 'graphs are captured with the default SDPA order, whatever OmniVoice set before'

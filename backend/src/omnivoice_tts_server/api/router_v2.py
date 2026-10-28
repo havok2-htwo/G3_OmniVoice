@@ -1628,7 +1628,6 @@ async def admin_optimize_text_preview(request: Request, payload: TextOptimizeReq
 
 
 async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest) -> TextOptimizeResponse:
-    from ..capacity import max_chars_per_chunk
     from ..prompt_batch import split_sentences
     from ..text_optimizer.service import optimize_request_text
 
@@ -1652,7 +1651,8 @@ async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest)
         enabled=settings.sentence_chunking,
         short_sentence_merge_max_chars=settings.short_sentence_merge_max_chars,
         following_sentence_merge_min_chars=settings.following_sentence_merge_min_chars,
-        max_chars=max_chars_per_chunk(getattr(settings, 'vram_budget_mb', 0)),
+        # The engine's own split length (Ming) when it has one, else the OmniVoice VRAM limit.
+        max_chars=request.app.state.queue_service.max_chars_per_sentence(),
     )
     return TextOptimizeResponse(
         text=outcome.text,
@@ -1670,6 +1670,29 @@ async def public_job_audio(request: Request, job_id: str, format: str | None = N
     return response
 
 
+_ABANDONED_STREAM_CANCELS: set[asyncio.Task] = set()
+
+
+def _cancel_abandoned_stream(queue: QueueService, job: Any) -> None:
+    """Cancel the job of a stream whose client went away before the end.
+
+    A disconnect usually surfaces as the response task being cancelled (or the generator
+    being closed), not through is_disconnected(), and an await in that finally block would be
+    cancelled again, so the cancel runs as its own task."""
+    if job.status in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
+        return
+
+    async def run() -> None:
+        try:
+            await queue.cancel(job.job_id)
+        except Exception:
+            pass
+
+    task = asyncio.get_running_loop().create_task(run())
+    _ABANDONED_STREAM_CANCELS.add(task)
+    task.add_done_callback(_ABANDONED_STREAM_CANCELS.discard)
+
+
 @router.post('/api/v1/synthesize/stream')
 async def synthesize_stream(request: Request, payload: SpeechRequest, api_key_id: str | None = Depends(authorize_api_key)) -> StreamingResponse:
     queue: QueueService = request.app.state.queue_service
@@ -1682,29 +1705,26 @@ async def synthesize_stream(request: Request, payload: SpeechRequest, api_key_id
     )
 
     async def iterator() -> Any:
-        disconnected = False
+        ended = False
         try:
             while True:
                 if await request.is_disconnected():
-                    disconnected = True
                     break
                 try:
                     event = await asyncio.wait_for(job.stream_events.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
                 if event is None:
+                    ended = True
                     break
                 yield json.dumps(event) + '\n'
         finally:
-            # Client gone mid-stream: cancel so the single worker stops rendering
-            # audio nobody consumes. Either way stop buffering into the queue and drop
-            # what is left, so the retained job holds no stream copies of its audio.
+            # Client gone mid-stream: cancel so the worker stops rendering audio nobody
+            # consumes. Either way stop buffering into the queue and drop what is left,
+            # so the retained job holds no stream copies of its audio.
             job.detach_stream()
-            if disconnected:
-                try:
-                    await queue.cancel(job.job_id)
-                except Exception:
-                    pass
+            if not ended:
+                _cancel_abandoned_stream(queue, job)
 
     return StreamingResponse(iterator(), media_type='application/x-ndjson')
 
@@ -1723,26 +1743,23 @@ async def speech(request: Request, payload: SpeechRequest, api_key_id: str | Non
         )
 
         async def stream_job() -> Any:
-            disconnected = False
+            ended = False
             try:
                 while True:
                     if await request.is_disconnected():
-                        disconnected = True
                         break
                     try:
                         chunk = await asyncio.wait_for(job.stream_chunks.get(), timeout=1.0)
                     except asyncio.TimeoutError:
                         continue
                     if chunk is None:
+                        ended = True
                         break
                     yield chunk
             finally:
                 job.detach_stream()
-                if disconnected:
-                    try:
-                        await queue.cancel(job.job_id)
-                    except Exception:
-                        pass
+                if not ended:
+                    _cancel_abandoned_stream(queue, job)
 
         return StreamingResponse(stream_job(), media_type='audio/pcm', headers=_text_optimization_headers(job))
 

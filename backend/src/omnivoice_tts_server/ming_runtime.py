@@ -177,6 +177,7 @@ class MingSynthesizer:
             if not (model_dir / 'config.json').exists():
                 raise RuntimeError(f'Ming checkpoint not found at {model_dir}. Download {self.model_id} there first.')
             started = time.perf_counter()
+            self._reset_process_kernel_choices()
             engine = self._engine_factory(**self._engine_kwargs())
             engine.load()
             self._engine = engine
@@ -184,12 +185,13 @@ class MingSynthesizer:
             with self._voice_lock:
                 self._voice_keys.clear()
             # The default voice's prompt is what most requests need first: encode it now, not in the first request.
+            # One short render runs the first-call paths (tokenizer, pinned staging, resampler) here too.
             profile = self._warmup_voice_profile()
-            if profile is not None:
-                try:
-                    self._prompt_from_profile(engine, profile, profile.ref_text)
-                except Exception as exc:  # noqa: BLE001 - only a head start
-                    logger.warning('ming: default voice prompt failed (non-critical): %s', exc)
+            try:
+                prompt = self._prompt_from_profile(engine, profile, profile.ref_text) if profile is not None else None
+                engine.render(WARMUP_TEXT, prompt=prompt, language=MING_DEFAULT_LANGUAGE, seed=MING_DEFAULT_SEED)
+            except Exception as exc:  # noqa: BLE001 - only a head start
+                logger.warning('ming: load warmup failed (non-critical): %s', exc)
             self._warm_ms = int((time.perf_counter() - started) * 1000)
             stats = engine.stats() if hasattr(engine, 'stats') else {}
             logger.info(
@@ -198,6 +200,26 @@ class MingSynthesizer:
                 self.sample_rate, self._warm_ms, stats.get('vram_reserved_mb'),
             )
             return self._warm_ms
+
+    @staticmethod
+    def _reset_process_kernel_choices() -> None:
+        """Undo process-wide kernel choices another engine made, before the CUDA graphs are captured.
+
+        OmniVoice puts cuDNN first in the SDPA backend order when it loads. After a live switch OmniVoice -> Ming the
+        graphs would capture cuDNN attention and render (equally valid, but) different audio than a Ming-only
+        process. The default order keeps Ming's output the same however the process got here; OmniVoice sets its
+        order again on its next load."""
+        import sys
+
+        torch = sys.modules.get('torch')
+        if torch is None:
+            return
+        try:
+            from .runtime_v2 import apply_sdpa_backend_preference
+
+            apply_sdpa_backend_preference(torch, False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('ming: could not restore the default SDPA backend order: %s', exc)
 
     def _lock_for_loop(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()

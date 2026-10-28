@@ -138,9 +138,9 @@ MING_MB_PER_SLOT = 8.5
 # Queue-level sentence cap: the engine splits long text into ~24-word fragments itself and streams them seamlessly in
 # one row, so this only bounds a row's length (and lets one long paragraph spread over several slots).
 MING_MAX_CHARS_PER_SENTENCE = 400
-# Sentences of one job that may run at the same time even when other jobs wait; more only while at least
-# `newcomer_headroom` slots stay free, so a request arriving during a busy period still starts within about one step.
-MING_INFLIGHT_PER_JOB = 2
+# Slots (a quarter) that only a job with nothing rendering may take: one job's further sentences never fill the
+# engine, so a request arriving during a busy period still starts within about one step.
+MING_NEWCOMER_HEADROOM_SHARE = 0.25
 
 
 def ming_resident_vram_mb(max_slots: int) -> int:
@@ -153,8 +153,7 @@ def ming_capacity_profile(max_slots: int) -> dict[str, Any]:
     max_chars_per_chunk   queue sentence split length (replaces the OmniVoice VRAM-derived limit)
     max_batch_items       sentences per dispatched stream batch
     max_inflight_items    sentences rendering at once over all running batches (= engine slots)
-    max_inflight_per_job  sentences of one job that always may run together
-    newcomer_headroom     slots kept free for new jobs before a job gets more than max_inflight_per_job
+    newcomer_headroom     slots only the next sentence of a job with nothing rendering may take
     """
     slots = max(1, int(max_slots))
     return {
@@ -162,7 +161,6 @@ def ming_capacity_profile(max_slots: int) -> dict[str, Any]:
         'max_chars_per_chunk': MING_MAX_CHARS_PER_SENTENCE,
         'max_batch_items': slots,
         'max_inflight_items': slots,
-        'max_inflight_per_job': min(slots, MING_INFLIGHT_PER_JOB),
-        'newcomer_headroom': max(1, slots // 4) if slots > MING_INFLIGHT_PER_JOB else 0,
+        'newcomer_headroom': int(slots * MING_NEWCOMER_HEADROOM_SHARE) if slots > 1 else 0,
         'estimated_peak_vram_mb': ming_resident_vram_mb(slots),
     }

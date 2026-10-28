@@ -424,6 +424,7 @@ class EngineSwitcher:
         old_synth = state.synthesizer
         held: list[str] = []
         success = False
+        shutting_down = False
         try:
             await self._publish('engine.switch.draining')
             drained, cancelled = await self._drain(drain_timeout_s, held)
@@ -438,14 +439,7 @@ class EngineSwitcher:
                 await old_synth.unload()
             except Exception as exc:  # noqa: BLE001
                 logger.warning('engine switch: unload of %s failed: %s', old_backend, exc)
-            close = getattr(old_synth, 'close', None)
-            if callable(close):
-                try:
-                    result = close()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning('engine switch: close of %s failed: %s', old_backend, exc)
+            # unload() is the whole contract: the old object must stay reloadable for a rollback.
             await asyncio.to_thread(release_cuda_memory)
 
             # Back to the OmniVoice values of the fields the old engine rewrote (an OmniVoice-like engine has
@@ -490,6 +484,12 @@ class EngineSwitcher:
                 self.sync_voice_profiles(target, new_synth)
                 self._bind(new_synth)
                 success = True
+        except asyncio.CancelledError:
+            # Server shutdown: leave the worker stopped.
+            shutting_down = True
+            self.status.state = 'failed'
+            self.status.error = 'Cancelled (server shutdown).'
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception('engine switch to %s failed', target)
             self.status.state = 'failed'
@@ -497,10 +497,11 @@ class EngineSwitcher:
         finally:
             self.apply_persist_overrides()
             self.status.requeued_jobs = await self._requeue(held)
-            try:
-                await queue.start_worker()
-            except Exception as exc:  # noqa: BLE001
-                logger.exception('engine switch: worker restart failed: %s', exc)
+            if not shutting_down:
+                try:
+                    await queue.start_worker()
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception('engine switch: worker restart failed: %s', exc)
             try:
                 save_runtime_settings(settings)
             except Exception as exc:  # noqa: BLE001

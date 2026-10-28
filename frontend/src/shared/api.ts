@@ -111,6 +111,58 @@ export interface ServerSettings {
   position_temperature?: number | null;
   class_temperature?: number | null;
   text_optimization_default?: TextOptimizationMode;
+  /** Set when OMNIVOICE_TTS_RUNTIME_BACKEND pins the engine at startup. */
+  runtime_backend_env?: string | null;
+  /** Engine a running live switch is moving to. */
+  runtime_backend_pending?: string | null;
+  ming_model_id?: string;
+  ming_model_dir?: string;
+  ming_max_slots?: number;
+  ming_cuda_graphs?: boolean;
+  ming_output_sample_rate?: number;
+  ming_first_chunk_latents?: number;
+  ming_max_chunk_latents?: number;
+}
+
+export type RuntimeBackend = "omnivoice" | "ming" | "phonon" | "mock";
+
+export interface EngineInfo {
+  id: RuntimeBackend;
+  label: string;
+  description: string;
+  active: boolean;
+  installed: boolean;
+  model_present: boolean;
+  available: boolean;
+  /** active | ready | downloadable | missing_package | missing_model */
+  status: string;
+  detail?: string | null;
+  model_id?: string | null;
+  model_dir?: string | null;
+  uses_voice_profiles: boolean;
+  native_streaming: boolean;
+  test_only: boolean;
+}
+
+export interface EngineSwitchStatus {
+  /** idle | draining | unloading | loading | ready | failed */
+  state: string;
+  from_backend?: string | null;
+  to_backend?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  message?: string | null;
+  error?: string | null;
+  drained_jobs: number;
+  cancelled_jobs: number;
+  requeued_jobs: number;
+}
+
+export interface EngineListResponse {
+  active: RuntimeBackend;
+  env_override?: string | null;
+  engines: EngineInfo[];
+  switch: EngineSwitchStatus;
 }
 
 export interface DashboardSnapshot {

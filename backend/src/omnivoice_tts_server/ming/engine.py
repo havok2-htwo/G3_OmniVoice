@@ -45,7 +45,8 @@ import torch.nn.functional as F
 from .fast import FastFlow, FastQwen, linear_plans, load_plans, save_plans
 from .flow import flow_timesteps
 from .model import MAX_CACHE_LEN, MingModel, load_ming_model
-from .prompt import build_input_ids, build_tts_prompt, normalize_language_id, validate_tokenizer
+from .prompt import (build_input_ids, build_tts_prompt, normalize_instruction, normalize_language_id,
+                     validate_tokenizer)
 from .streaming import ChunkSchedule, SilenceTrimmer, StreamResampler
 from .text import prepare_fragments
 from .vae_stream import SlotDecoder
@@ -133,6 +134,7 @@ class _Row:
     seed: int
     stream: 'MingStream'
     generator: torch.Generator
+    acoustic_prompt: bool
     trimmer: SilenceTrimmer
     resampler: StreamResampler
     schedule: ChunkSchedule
@@ -579,11 +581,16 @@ class MingEngine:
             self._voices.pop(key, None)
 
     def submit(self, text: str, *, prompt: MingVoicePrompt | None, language: str | None, seed: int,
-               row_id: str | None = None) -> MingStream:
+               row_id: str | None = None, instruction: str | None = None, acoustic_prompt: bool = True) -> MingStream:
+        """Queue one row. ``instruction`` is the assistant-side caption (free text or a structured control JSON);
+        ``acoustic_prompt=False`` clones from the speaker embedding only, without the reference latents and transcript
+        (upstream's EMOTION / BASIC cloning), which leaves the delivery to the instruction."""
         if not self._loaded:
             raise RuntimeError('Ming engine is not loaded')
         row_id = row_id or f'ming-{next(self._ids)}'
-        fragments = self._build_fragments(text, prompt, language)
+        acoustic_prompt = bool(acoustic_prompt) and prompt is not None
+        fragments = self._build_fragments(text, prompt, language, instruction=instruction,
+                                          acoustic_prompt=acoustic_prompt)
         stream = MingStream(row_id, self)
         gen = torch.Generator(device='cpu')
         gen.manual_seed(int(seed) % (2 ** 63))
@@ -596,7 +603,7 @@ class MingEngine:
             ids = torch.tensor(frag.input_ids, dtype=torch.long)
             frag.ids_host = ids.pin_memory() if pin else ids
         row = _Row(row_id=row_id, fragments=fragments, prompt=prompt, seed=int(seed), stream=stream, generator=gen,
-                   trimmer=SilenceTrimmer(self.native_sample_rate),
+                   acoustic_prompt=acoustic_prompt, trimmer=SilenceTrimmer(self.native_sample_rate),
                    resampler=StreamResampler(self.native_sample_rate, self.output_sample_rate),
                    schedule=ChunkSchedule(self.first_chunk_latents, self.max_chunk_latents))
         stream._row = row
@@ -609,8 +616,9 @@ class MingEngine:
         return stream
 
     def render(self, text: str, *, prompt: MingVoicePrompt | None = None, language: str | None = None, seed: int = 0,
-               row_id: str | None = None) -> np.ndarray:
-        stream = self.submit(text, prompt=prompt, language=language, seed=seed, row_id=row_id)
+               row_id: str | None = None, instruction: str | None = None, acoustic_prompt: bool = True) -> np.ndarray:
+        stream = self.submit(text, prompt=prompt, language=language, seed=seed, row_id=row_id,
+                             instruction=instruction, acoustic_prompt=acoustic_prompt)
         chunks = list(stream)
         return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
 
@@ -637,15 +645,19 @@ class MingEngine:
 
     # -- text / prompt preparation (caller thread) --------------------------------------------------------------------
 
-    def _build_fragments(self, text: str, prompt: MingVoicePrompt | None, language: str | None) -> list[_Fragment]:
+    def _build_fragments(self, text: str, prompt: MingVoicePrompt | None, language: str | None, *,
+                         instruction: str | None = None, acoustic_prompt: bool = True) -> list[_Fragment]:
         lang = normalize_language_id(language)
         tts_prompt = build_tts_prompt(lang)
+        instruction = normalize_instruction(instruction)
+        acoustic = prompt is not None and acoustic_prompt
         out = []
         for piece in prepare_fragments(text, lang):
             ids, spk_pos, lat_pos = build_input_ids(
                 self.tokenizer, tts_prompt, piece, num_speakers=1 if prompt is not None else 0,
-                prompt_text=prompt.ref_text if prompt is not None else None,
-                prompt_latent_steps=prompt.num_latents if prompt is not None else 0)
+                instruction=instruction,
+                prompt_text=prompt.ref_text if acoustic else None,
+                prompt_latent_steps=prompt.num_latents if acoustic else 0)
             budget = min(MAX_DECODE_STEPS, MAX_CACHE_LEN - len(ids))
             if budget <= STOP_MIN_STEP + 1:
                 raise ValueError(f'Ming prompt too long: {len(ids)} of {MAX_CACHE_LEN} positions used by voice prompt '
@@ -936,7 +948,7 @@ class MingEngine:
         self.prefill_last.fill_(length - 1)
         self._run(('prefill', lb), lambda: self._prefill_core(lb))
         self.noise[r.slot, :frag.budget].copy_(frag.noise_host, non_blocking=True)
-        if r.prompt is not None:
+        if r.prompt is not None and r.acoustic_prompt:
             self.history[r.slot].copy_(r.prompt.latent[0, -m.history_patch_size:].to(self.dtype))
         else:
             self.history[r.slot].zero_()

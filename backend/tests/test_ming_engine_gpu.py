@@ -120,6 +120,41 @@ def test_rows_with_different_voices_languages_and_seeds_are_independent(engine, 
     assert not np.array_equal(alone[0], engine.render(rows[0][0], prompt=voice_v3, language='de', seed=31))
 
 
+
+def test_rows_with_different_instructions_and_reference_modes_are_independent(engine, voice):
+    """Delivery controls are per row: captions (structured and free-form) and speaker-only cloning mixed in one
+    batch render every row like it renders alone, bit for bit; and a caption really changes the audio."""
+    from omnivoice_tts_server.ming.prompt import build_structured_instruction
+
+    happy = build_structured_instruction(emotion='高兴')
+    basic = build_structured_instruction(speed='快速', pitch='中', volume='中')
+    rows = [
+        ('Das ist ja großartig, wir haben es geschafft!', happy, False, 41),
+        ('Das ist ja großartig, wir haben es geschafft!', None, True, 41),
+        ('Wir sehen uns morgen früh am Bahnhof.', basic, False, 42),
+        ('Wir sehen uns morgen früh am Bahnhof.', 'Speak slowly, in a calm and warm voice.', True, 43),
+    ]
+    assert len(rows) <= ENGINE_KW['max_slots']
+    alone = [engine.render(t, prompt=voice, language='de', seed=seed, instruction=ins, acoustic_prompt=acoustic)
+             for t, ins, acoustic, seed in rows]
+    streams = [engine.submit(t, prompt=voice, language='de', seed=seed, instruction=ins, acoustic_prompt=acoustic)
+               for t, ins, acoustic, seed in rows]
+    together = [np.concatenate(list(s)) for s in streams]
+    for a, b in zip(alone, together):
+        np.testing.assert_array_equal(a, b)
+    for audio in alone:
+        assert np.isfinite(audio).all() and 0.01 < np.abs(audio).max() <= 1.5
+    text = rows[0][0]
+    speaker_only = engine.render(text, prompt=voice, language='de', seed=41, acoustic_prompt=False)
+    # The caption changes the audio (speaker-only, same seed), and so does dropping the acoustic prompt.
+    assert not np.array_equal(alone[0], speaker_only)
+    assert not np.array_equal(alone[1], speaker_only)
+    # A free-form caption changes the full clone too.
+    assert not np.array_equal(alone[3], engine.render(rows[3][0], prompt=voice, language='de', seed=43))
+    # Blank instruction means none.
+    np.testing.assert_array_equal(alone[1], engine.render(text, prompt=voice, language='de', seed=41,
+                                                          instruction='  '))
+
 def test_long_text_is_fragmented_and_streamed(engine, voice):
     text = ('Das ist ein sehr langer Text, der in mehrere Fragmente zerlegt werden muss, weil er mehr als '
             'vierundzwanzig Wörter hat. Und hier kommt noch ein zweiter Satz, damit wir sicher über die Grenze kommen.')

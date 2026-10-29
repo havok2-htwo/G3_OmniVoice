@@ -107,6 +107,7 @@ from ..presets import save_preset as _save_preset
 from ..services_v2 import (
     BenchmarkService,
     EventHub,
+    InvalidRequestFieldsError,
     QueueSaturatedError,
     QueueService,
     RequestTooLargeError,
@@ -885,6 +886,8 @@ async def _submit_or_429(
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     except RequestTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except InvalidRequestFieldsError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except RuntimeError as exc:
         # Validation failures (empty input, bad voice/model) are permanent -> 400, not 429.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1647,6 +1650,7 @@ async def admin_optimize_text_preview(request: Request, payload: TextOptimizeReq
 
 async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest) -> TextOptimizeResponse:
     from ..prompt_batch import split_sentences
+    from ..text_optimizer.omnivoice_tags import render_inline_tags
     from ..text_optimizer.service import optimize_request_text
 
     settings = request.app.state.settings
@@ -1662,6 +1666,8 @@ async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest)
             detail=f'Input text is {len(text)} characters; the limit is {max_input}.',
         )
     outcome = await asyncio.to_thread(optimize_request_text, text, payload.language, stage=payload.stage)
+    # Inline tags as the active engine gets them (QueueService.submit does the same).
+    outcome.text = render_inline_tags(outcome.text, settings.runtime_backend).strip()
     if not outcome.text:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Input text is empty after text optimization')
     sentences = split_sentences(

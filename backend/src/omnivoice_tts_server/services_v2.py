@@ -40,9 +40,11 @@ from .domain.models import (
     WerBenchmarkRunResponse,
     WerBenchmarkSeedSummary,
     WerBenchmarkSummary,
+    delivery_controls_conflict,
 )
 from .domain.state import InMemoryStore, JobRecord, RequestState, utcnow
 from .prompt_batch import chunk_pcm16le, split_sentences
+from .text_optimizer.omnivoice_tags import render_inline_tags
 from .runtime_v2 import BatchSynthesisItem, BatchSynthesisResult, query_nvidia_smi
 from .capacity import (
     DEFAULT_PROMPT_SECONDS,
@@ -85,6 +87,10 @@ class QueueSaturatedError(RuntimeError):
 
 class RequestTooLargeError(RuntimeError):
     """Raised by submit() when the input text exceeds max_input_chars -> HTTP 413."""
+
+
+class InvalidRequestFieldsError(RuntimeError):
+    """Raised by submit() for request fields that cannot be combined on the active engine -> HTTP 422."""
 
 
 class EventHub:
@@ -171,8 +177,13 @@ class QueueService:
         seed_from_profile = request.seed is None
         self._apply_voice_seed(request)
         self._validate_request_voice_model(request)
+        self._validate_delivery_controls(request)
         spoken_text, text_optimization = await self._optimize_spoken_text(request, text, owner_scope)
         request = self._drop_upstream_normalize_after_optimization(request, text_optimization)
+        # Inline tags ([laughter], [Cough], ...) in the active engine's spelling; tags it does not know are dropped.
+        spoken_text = render_inline_tags(spoken_text, self.settings.runtime_backend).strip()
+        if not spoken_text:
+            raise RuntimeError('Missing input text')
 
         sentences = split_sentences(
             spoken_text,
@@ -1594,6 +1605,15 @@ class QueueService:
         job.request.seed = None
         self._apply_voice_seed(job.request)
 
+    def _validate_delivery_controls(self, request: SpeechRequest) -> None:
+        # On Ming, instructions is the free-form instruction: it cannot be sent together with structured controls.
+        # Other engines ignore the delivery controls.
+        if self.settings.runtime_backend != 'ming':
+            return
+        conflict = delivery_controls_conflict(request)
+        if conflict:
+            raise InvalidRequestFieldsError(conflict)
+
     def _validate_request_voice_model(self, request: SpeechRequest) -> None:
         task_type = self._task_type_for_request(request)
         voice_profile = self._voice_profile_for_request(request)
@@ -1638,6 +1658,10 @@ class QueueService:
             'position_temperature': self.settings.position_temperature,
             'class_temperature': self.settings.class_temperature,
         }
+        delivery = request.delivery_controls()
+        if delivery:
+            # Only when set, so the keys of requests without delivery controls stay as they were.
+            generation_payload['delivery'] = delivery
         generation_hash = hashlib.sha1(json.dumps(generation_payload, sort_keys=True, default=str).encode('utf-8')).hexdigest()[:12]
         # The seed is not part of the group: items with different seeds share a batch (see runtime_v2 / row_seeds).
         return '|'.join([model_id, task_type.value, language, voice_key, instructions_hash, generation_hash])

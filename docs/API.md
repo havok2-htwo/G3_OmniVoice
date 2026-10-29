@@ -82,6 +82,7 @@ Useful notes:
 - `task_type` is inferred from `model` when omitted.
 - `voice` is a saved custom voice id for `Base` clone requests.
 - `instructions` is used by `VoiceDesign`; unsupported instruction words are rejected by OmniVoice.
+  On Ming it is the free-form delivery instruction (see "Ming delivery controls").
 - `ref_audio` is reserved for direct clone integrations; saved voice profiles are the normal UI/API path.
 - `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
 - Streaming uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.
@@ -115,6 +116,42 @@ Useful notes:
   `input`, `ref_text`, `instructions` and inline tags like `[laughter]` are never
   rewritten. OpenAI SDKs pass it via `extra_body` or `metadata.text_optimization`.
   Details: `API_DOCUMENTATION.md`, section "Text optimization".
+
+### Ming delivery controls
+
+Optional fields for cloned voices on the Ming engine (default `null`). OmniVoice and
+Phonon accept and ignore them.
+
+| Field | Values (German aliases) |
+| --- | --- |
+| `emotion` | `happy` (`fröhlich`), `sad` (`traurig`), `angry` (`wütend`, `verärgert`), `fearful` (`ängstlich`), `disgusted` (`angeekelt`), `surprised` (`überrascht`), `neutral` |
+| `speaking_rate` | `slow` (`langsam`), `medium` (`normal`), `fast` (`schnell`) |
+| `pitch` | `low` (`tief`), `medium` (`mittel`), `high` (`hoch`) |
+| `volume` | `low` (`leise`), `medium` (`mittel`), `high` (`laut`) |
+| `reference_mode` | `auto` (default), `full` (`voll`), `speaker` (`sprecher`) |
+
+- Values are case-insensitive; the ASCII forms (`froehlich`, `wuetend`, ...) work too.
+  Unknown values are `422`. `metadata.<field>` is read only when the top-level field is missing.
+- Emotion and speed / pitch / volume form one structured caption. When one of speed,
+  pitch or volume is set, the missing ones are sent as `medium`.
+- `instructions` is Ming's free-form caption. Together with a structured control it is `422`.
+  A queued job moved to Ming by an engine switch keeps the structured controls and drops it.
+- `reference_mode`: `full` clones from the reference latents, transcript and speaker
+  embedding; `speaker` from the speaker embedding only. `auto` uses `speaker` when a
+  structured control is set, else `full`.
+- Inline tags (`[Laughter]`, `[Sigh]`, `[Breathing]`, `[Cough]`, `[Uhm]`, ... and
+  OmniVoice's `[laughter]`, `[question-yi]`, ...) match in any case. They are spelled
+  for the active engine; a tag it does not know is removed, never read aloud.
+
+```json
+{
+  "input": "Das hätte ich nicht erwartet! [Laughter] Wirklich nicht.",
+  "voice": "SonjaV2",
+  "language": "Deutsch",
+  "emotion": "überrascht",
+  "speaking_rate": "fast"
+}
+```
 
 ## Public Routes
 
@@ -756,6 +793,7 @@ Common responses:
 | `401` | missing or invalid admin session, or missing/invalid client API key |
 | `404` | job, voice, audio or API route not found |
 | `409` | synthesis job was cancelled |
+| `422` | invalid field value, or fields the active engine cannot combine (Ming: `instructions` with `emotion` / `speaking_rate` / `pitch` / `volume`) |
 | `429` | queue saturated |
 | `500` | synthesis/runtime failure |
 

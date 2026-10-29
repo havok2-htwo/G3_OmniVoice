@@ -4,6 +4,38 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - Ming delivery controls for cloned voices
+
+- Synthesis requests take `emotion` (`happy`, `sad`, `angry`, `fearful`, `disgusted`, `surprised`, `neutral`),
+  `speaking_rate` (`slow`, `medium`, `fast`), `pitch` and `volume` (`low`, `medium`, `high`). German aliases work
+  too (`fröhlich`, `traurig`, `langsam`, `tief`, `laut`, ...), case-insensitive; unknown values are `422`. OpenAI
+  SDK clients can send them as `metadata.<field>`. On Ming they become one structured caption (upstream's EMOTION /
+  BASIC tasks); given speed / pitch / volume fields are filled with `medium`, emotion alone stays emotion-only.
+- On Ming, `instructions` is now the free-form instruction (upstream FREEFORM). It cannot be combined with the
+  structured controls (`422`). OmniVoice keeps `instructions` for VoiceDesign.
+- `reference_mode`: `full` clones with the reference latents, transcript and speaker embedding (as before),
+  `speaker` with the speaker embedding only. `auto` (default) uses `speaker` when a structured control is set,
+  else `full` (`AUTO_REFERENCE_MODE_WITH_CONTROLS` in `ming_runtime.py`). Rows with different controls share one
+  engine batch and render bit-identically to solo renders.
+- Inline tags work across engines: `[Laughter]`, `[Cough]`, `[Breathing]`, `[Uhm]`, ... match case-insensitively,
+  are protected from text optimization and are spelled for the active engine (`[Laughter]` on Ming, `[laughter]` on
+  OmniVoice). A tag the active engine does not know is removed instead of read aloud. This also runs with
+  `text_optimization` off. Glued tags (`[Uhm][Cough]`) are tags too. OmniVoice and Phonon ignore the delivery
+  controls.
+- Engine switch: a queued job moved to Ming keeps its structured controls and drops a free-form `instructions`
+  next to them. A queued sentence left with only tags the new engine does not know is skipped, not read aloud.
+- Admin quick synthesis on Ming: a "Ming-Ausdruck" box with emotion, tempo, pitch, volume and reference mode,
+  the free instruction (disabled while a structured control is set, so the panel never sends a `422` combination)
+  and buttons that insert sound tags at the cursor (German labels, rare ones behind "mehr Laute"). Language and
+  seed moved next to model and voice. WER and benchmark runs on Ming do not send the quick-synthesis free
+  instruction.
+- Measured on SonjaV2, JarvisV2 and Genesis3 (6 German sentences per control, pitch/loudness/duration, CAM++ voice
+  similarity, Whisper WER). With the full reference, emotion, pitch, volume and free instructions barely change the
+  output; only `fast` shortens it (9-14 %). With `speaker`, emotion clearly changes the delivery (Genesis3 `happy`
+  +49 % F0, JarvisV2 `surprised` +40 %), at a voice-similarity cost of about 0.03-0.06. Tempo works in both modes;
+  pitch and volume do not reliably. A free-form "whisper" instruction had no measurable effect. WER stayed ~0, but
+  one of 216 `speaker` renders ran on to 24.7 s instead of 3 s.
+
 ### Fixed - WER scorer counts spoken number formats as equal
 
 - Whisper writes `14:35 Uhr` for a spoken `14 Uhr 35` and `24,50 Euro` for `24 Euro und 50 Cent`, so the scorer

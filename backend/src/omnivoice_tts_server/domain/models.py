@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from ..text_optimizer.modes import parse_text_optimization_mode
 
@@ -31,6 +32,82 @@ def bounded_metadata_seconds(key: str, value: Any) -> float | None:
     if not math.isfinite(seconds) or seconds < 0 or seconds > limit:
         raise ValueError(f'metadata.{key} must be between 0 and {limit:g} seconds')
     return seconds
+
+
+DeliveryEmotion = Literal['happy', 'sad', 'angry', 'fearful', 'disgusted', 'surprised', 'neutral']
+DeliveryRate = Literal['slow', 'medium', 'fast']
+DeliveryLevel = Literal['low', 'medium', 'high']
+ReferenceMode = Literal['auto', 'full', 'speaker']
+
+# Delivery controls (Ming only; other engines ignore them). Each field takes its English value or a German alias,
+# case-insensitive; the request stores the English value.
+DELIVERY_CONTROL_ALIASES: dict[str, dict[str, str]] = {
+    'emotion': {
+        'happy': 'happy', 'froehlich': 'happy', 'fröhlich': 'happy',
+        'sad': 'sad', 'traurig': 'sad',
+        'angry': 'angry', 'wuetend': 'angry', 'wütend': 'angry', 'veraergert': 'angry', 'verärgert': 'angry',
+        'fearful': 'fearful', 'aengstlich': 'fearful', 'ängstlich': 'fearful',
+        'disgusted': 'disgusted', 'angeekelt': 'disgusted',
+        'surprised': 'surprised', 'ueberrascht': 'surprised', 'überrascht': 'surprised',
+        'neutral': 'neutral',
+    },
+    'speaking_rate': {
+        'slow': 'slow', 'langsam': 'slow',
+        'medium': 'medium', 'normal': 'medium', 'mittel': 'medium',
+        'fast': 'fast', 'schnell': 'fast',
+    },
+    'pitch': {
+        'low': 'low', 'tief': 'low', 'niedrig': 'low',
+        'medium': 'medium', 'mittel': 'medium', 'normal': 'medium',
+        'high': 'high', 'hoch': 'high',
+    },
+    'volume': {
+        'low': 'low', 'leise': 'low',
+        'medium': 'medium', 'mittel': 'medium', 'normal': 'medium',
+        'high': 'high', 'laut': 'high',
+    },
+    'reference_mode': {
+        'auto': 'auto',
+        'full': 'full', 'voll': 'full',
+        'speaker': 'speaker', 'sprecher': 'speaker', 'nur sprecher': 'speaker',
+    },
+}
+# The structured controls: one Ming caption (emotion and / or speed, pitch, volume).
+STRUCTURED_DELIVERY_FIELDS = ('emotion', 'speaking_rate', 'pitch', 'volume')
+DELIVERY_FIELDS = (*STRUCTURED_DELIVERY_FIELDS, 'reference_mode')
+
+
+def parse_delivery_control(key: str, value: Any) -> str | None:
+    """Normalize one delivery control: None / blank stay None, an alias maps to its English value.
+    Raises ValueError for anything else."""
+    if value is None:
+        return None
+    aliases = DELIVERY_CONTROL_ALIASES[key]
+    if isinstance(value, str):
+        # NFC first: a decomposed umlaut (u + U+0308, e.g. from macOS) is the same alias as the composed one.
+        lowered = unicodedata.normalize('NFC', value).strip().casefold()
+        if not lowered:
+            return None
+        if lowered in aliases:
+            return aliases[lowered]
+    allowed = ', '.join(dict.fromkeys(aliases.values()))
+    raise ValueError(f'{key} must be one of {allowed} (or a German alias), got {value!r}')
+
+
+def delivery_controls_conflict(request: Any) -> str | None:
+    """Why a request's delivery controls cannot be combined (Ming), or None. Upstream never combines the free-form
+    instruction with emotion or speed / pitch / volume: both are the same assistant caption."""
+    if not (getattr(request, 'instructions', None) or '').strip():
+        return None
+    structured = [key for key in STRUCTURED_DELIVERY_FIELDS if getattr(request, key, None) is not None]
+    if not structured:
+        return None
+    return (f"instructions (Ming free-form instruction) cannot be combined with {', '.join(structured)}; "
+            'send either the free-form instruction or the structured controls.')
+
+
+def _unset(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 class JobStatus(str, Enum):
@@ -69,6 +146,32 @@ class SpeechRequest(BaseModel):
     # None = admin default (text_optimization_default) for public requests, 'off' otherwise.
     # Also accepts true/false. 'llm' is reserved. ref_text / instructions are never touched.
     text_optimization: TextOptimizationMode | None = None
+    # Ming delivery controls for cloned voices (English values or German aliases; other engines ignore them).
+    # Also read from metadata.<field> when the top-level field is not sent. On Ming, 'instructions' is the
+    # free-form instruction and cannot be combined with emotion / speaking_rate / pitch / volume.
+    emotion: DeliveryEmotion | None = None
+    speaking_rate: DeliveryRate | None = None
+    pitch: DeliveryLevel | None = None
+    volume: DeliveryLevel | None = None
+    # full: reference latents + transcript + speaker embedding; speaker: speaker embedding only;
+    # auto / None: ming_runtime.resolve_reference_mode decides.
+    reference_mode: ReferenceMode | None = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def _delivery_controls_from_metadata(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or not isinstance(data.get('metadata'), dict):
+            return data
+        metadata = data['metadata']
+        # A metadata value counts only when the top-level field is missing (None or blank); the lifted values are
+        # validated like the top-level fields, the ignored ones not at all.
+        lifted = {key: metadata[key] for key in DELIVERY_FIELDS if _unset(data.get(key)) and key in metadata}
+        return {**data, **lifted} if lifted else data
+
+    @field_validator('emotion', 'speaking_rate', 'pitch', 'volume', 'reference_mode', mode='before')
+    @classmethod
+    def _validate_delivery_control(cls, value: Any, info: ValidationInfo) -> str | None:
+        return parse_delivery_control(info.field_name, value)
 
     @field_validator('text_optimization', mode='before')
     @classmethod
@@ -84,6 +187,10 @@ class SpeechRequest(BaseModel):
         for key in METADATA_SECONDS_LIMITS:
             bounded_metadata_seconds(key, value.get(key))
         return value
+
+    def delivery_controls(self) -> dict[str, str]:
+        """The delivery controls this request sets (empty for most requests)."""
+        return {key: getattr(self, key) for key in DELIVERY_FIELDS if getattr(self, key) is not None}
 
 
 class TextOptimizationInfo(BaseModel):

@@ -177,6 +177,9 @@ Notes:
 - `voice` is a saved custom voice id for `Base` clone requests.
 - `language` is an optional synthesis hint. `Auto` (the default) and any unrecognized value let OmniVoice auto-detect the language from the text. The curated UI labels (`Deutsch`, `English`, `Français`, …) are mapped to OmniVoice language codes (`de`, `en`, `fr`, …) before generation; specifying the language can slightly improve pronunciation/quality. The label list is served by `GET /api/v1/languages` and surfaced as a dropdown in both the Demo and Admin Quick Synthesis UIs.
 - `instructions` is used by `VoiceDesign`; invalid instruction terms are rejected.
+  On Ming it is the free-form delivery instruction (see "Delivery controls (Ming)").
+- `emotion`, `speaking_rate`, `pitch`, `volume` and `reference_mode` are Ming delivery
+  controls for cloned voices (see below). Other engines ignore them.
 - `response_format` accepts `wav` and `mp3` for non-streaming audio responses.
 - Streaming still uses PCM chunks for low-latency playback; completed stream jobs can be downloaded as MP3.
 - `metadata` overrides runtime generation settings for one request.
@@ -198,6 +201,66 @@ Notes:
   applied), `normalize_text` is skipped, because the text is in spoken form at that
   point.
 - `text_optimization` turns on spoken-text optimization for German and English (see below).
+
+### Delivery controls (Ming)
+
+Ming-3.0-tts can change how a cloned voice speaks. All fields are optional and
+default to `null`. OmniVoice and Phonon accept and ignore them.
+
+| Field | Values | German aliases |
+| --- | --- | --- |
+| `emotion` | `happy`, `sad`, `angry`, `fearful`, `disgusted`, `surprised`, `neutral` | `fröhlich`/`froehlich`, `traurig`, `wütend`/`wuetend`/`verärgert`/`veraergert`, `ängstlich`/`aengstlich`, `angeekelt`, `überrascht`/`ueberrascht`, `neutral` |
+| `speaking_rate` | `slow`, `medium`, `fast` | `langsam`, `normal`, `schnell` |
+| `pitch` | `low`, `medium`, `high` | `tief`, `mittel`, `hoch` |
+| `volume` | `low`, `medium`, `high` | `leise`, `mittel`, `laut` |
+| `reference_mode` | `auto`, `full`, `speaker` | `voll`, `sprecher` |
+| `instructions` | free text (Ming: free-form instruction) | - |
+
+Values are case-insensitive and stored as the English value. Anything else is
+rejected with `422`. OpenAI SDK clients can send each field as `metadata.<field>`;
+it is read (and validated) only when the top-level field is missing or blank.
+
+Behaviour on Ming:
+
+- `emotion`, `speaking_rate`, `pitch` and `volume` form one structured caption
+  (upstream's EMOTION / BASIC tasks). Emotion alone stays an emotion-only caption.
+  When one of speed, pitch or volume is set, the missing ones are sent as `medium`.
+- `instructions` is a free-form caption, e.g. `"Speak slowly, in a calm and warm voice."`.
+  It cannot be combined with the structured controls: such a request is `422`.
+  A job accepted on another engine and moved to Ming by an engine switch keeps
+  the structured controls and drops the free-form instruction.
+- `reference_mode` picks what the clone uses from the voice profile. `full` uses
+  the reference audio latents, its transcript and the speaker embedding (normal
+  cloning). `speaker` uses the speaker embedding only, so the reference's own
+  delivery does not override the caption. `auto` (or omitted) uses `speaker` when
+  a structured control is set, else `full`.
+- Requests with different controls share one engine batch; the controls are part
+  of the queue's batch key.
+
+Example:
+
+```json
+{
+  "input": "Das hätte ich nicht erwartet! [Laughter] Wirklich nicht.",
+  "voice": "SonjaV2",
+  "language": "Deutsch",
+  "emotion": "überrascht",
+  "speaking_rate": "fast"
+}
+```
+
+Inline tags: `[Breathing]`, `[Cough]`, `[Sigh]`, `[Laughter]`, `[Uhm]`,
+`[Surprise-ah]`, `[Surprise-oh]`, `[Dissatisfaction-hnn]`, `[Confirmation-en]`,
+`[Question-ei]`, `[Question-ah]`, `[Question-en]`, `[Question-oh]`, `[Question-huh]`
+(Ming) and OmniVoice's lowercase tags (`[laughter]`, `[sigh]`, ..., plus
+`[question-yi]`, `[surprise-wa]`, `[surprise-yo]`) match case-insensitively. The
+server spells each tag for the active engine (`[Laughter]` on Ming, `[laughter]` on
+OmniVoice) and removes a tag the engine does not know (Ming: `[question-yi]`,
+`[surprise-wa]`, `[surprise-yo]`; OmniVoice: `[Breathing]`, `[Cough]`, `[Uhm]`,
+`[Question-huh]`; Phonon: all), so a tag is never read aloud. This runs with and
+without `text_optimization`. Glued tags (`[Uhm][Cough]`) work. A tag removed between
+two words leaves one space (`Hallo[Cough]Welt` -> `Hallo Welt`). A queued sentence
+that has only unknown tags left after an engine switch is skipped.
 
 ### Text optimization (`text_optimization`)
 
@@ -245,9 +308,9 @@ set; any other explicit language (`fr`, `Français`, ...) leaves the text unchan
 3. Otherwise nothing is bound and the text is left unchanged (`none`). Pass an
    explicit `language` when the text is very short or mixed.
 
-Bracketed text is ordinary text: only OmniVoice's own control spans (the non-verbal
-tags such as `[laughter]` / `[sigh]` and ARPAbet pronunciations such as `[B EY1 S]`)
-are protected, so `[ca. 5 €]` or a citation `[1]` is optimized like the rest.
+Bracketed text is ordinary text: only the engines' control spans (the non-verbal
+tags such as `[laughter]` / `[Cough]` in any case, and ARPAbet pronunciations such as
+`[B EY1 S]`) are protected, so `[ca. 5 €]` or a citation `[1]` is optimized like the rest.
 
 Limits: the rule passes have a 5-second budget per request. Number-dense input (long
 digit lists, `1.1.1...` runs) can exceed it; the raw text is then spoken
@@ -257,8 +320,9 @@ dreißig`), a lone attributive `1` (`1 Person`, `Ich kaufe 1 Butter`) stays a di
 German, a keycap `1️⃣` becomes `1`, and a sentence-initial `Am 3.4.` is lower-cased.
 
 What is never changed: `request.input` stays the raw text (job lists show it),
-`ref_text` and `instructions` are not touched, and OmniVoice inline control spans
-such as `[laughter]` or CMU pronunciations like `[B EY1 S]` pass through verbatim.
+`ref_text` and `instructions` are not touched, and inline control spans such as
+`[laughter]` or CMU pronunciations like `[B EY1 S]` pass through the rules verbatim
+(tags are then spelled for the active engine, see "Delivery controls (Ming)").
 `max_input_chars` is checked on the raw input; the spoken text is usually longer, so
 it can produce more chunks.
 
@@ -572,6 +636,7 @@ OpenAI-client tolerance:
 - a resolved custom voice profile automatically routes the request to the active engine's `...-Base` (voice clone) alias (`k2-fsa/OmniVoice-Base`, or `inclusionAI/Ming-3.0-tts-0.5B-Base` while Ming runs)
 - the `Authorization: Bearer ...` header sent by OpenAI clients is accepted and ignored (the endpoint stays public, like all synthesis endpoints)
 - `text_optimization` (top level via `extra_body`, or `metadata.text_optimization`) is honoured; when it ran, the response has an `X-Text-Optimization` header
+- the Ming delivery controls (`emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode`) are honoured the same way (top level via `extra_body`, or `metadata.<field>`); OpenAI's own `instructions` field is Ming's free-form instruction
 
 Example:
 

@@ -17,6 +17,21 @@ export interface VoiceItem {
 /** Engines a voice profile stores a best seed for (mock renders like OmniVoice). */
 export type SeedEngine = "omnivoice" | "ming" | "phonon";
 
+/** Ming delivery controls on a speech request; OmniVoice and Phonon ignore them. */
+export type MingEmotion = "happy" | "sad" | "angry" | "fearful" | "disgusted" | "surprised" | "neutral";
+export type MingSpeakingRate = "slow" | "medium" | "fast";
+export type MingLevel = "low" | "medium" | "high";
+/** auto: speaker embedding only when a structured control is set, else full cloning. */
+export type ReferenceMode = "auto" | "full" | "speaker";
+
+export interface MingDeliveryFields {
+  emotion?: MingEmotion;
+  speaking_rate?: MingSpeakingRate;
+  pitch?: MingLevel;
+  volume?: MingLevel;
+  reference_mode?: ReferenceMode;
+}
+
 export interface ModelInfo {
   model_id: string;
   loaded: boolean;

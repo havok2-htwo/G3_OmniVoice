@@ -244,6 +244,83 @@ def map_speech_request(settings: Settings, request: SpeechRequest) -> SpeechRequ
     return request.model_copy(update={'model': mapped})
 
 
+def _render_pending_tags(request_state: Any, backend: str) -> list[int]:
+    """Respell the inline tags of a held job's pending sentences for the engine it now runs on. A tag the old engine
+    already dropped stays dropped.
+
+    A sentence left with nothing to say (only tags the new engine does not know, maybe some punctuation) is dropped,
+    never sent as is: it would be read aloud. It counts as rendered with no audio. Returns the dropped indices."""
+    import regex
+
+    from .text_optimizer.omnivoice_tags import render_inline_tags
+
+    dropped: list[int] = []
+    for index in request_state.pending_sentence_indices:
+        text = request_state.sentences[index]
+        rendered = render_inline_tags(text, backend)
+        if rendered == text:
+            continue
+        rendered = rendered.strip()
+        if regex.search(r'[\p{L}\p{N}]', rendered):
+            request_state.sentences[index] = rendered
+        else:
+            dropped.append(index)
+    if dropped:
+        _drop_pending_sentences(request_state, dropped)
+    return dropped
+
+
+def _drop_pending_sentences(request_state: Any, indices: list[int]) -> None:
+    """Take sentences out of the render plan; they emit no audio. Both emit paths (a rendered batch's
+    ready_sentence_pcm, a native stream's completed_streaming_sentence_indices) step over them."""
+    drop = set(indices)
+    request_state.pending_sentence_indices = type(request_state.pending_sentence_indices)(
+        index for index in request_state.pending_sentence_indices if index not in drop
+    )
+    # Leading dropped sentences: nothing to wait for, the next sentence is the first to emit.
+    while request_state.next_emit_sentence_index in drop:
+        drop.discard(request_state.next_emit_sentence_index)
+        request_state.next_emit_sentence_index += 1
+    for index in drop:
+        request_state.ready_sentence_pcm[index] = b''
+        request_state.sentence_duration_ms[index] = 0
+        request_state.completed_streaming_sentence_indices.add(index)
+
+
+def _resolve_delivery_conflict(job: Any, backend: str) -> None:
+    """A held job moving to Ming with a free-form instruction and structured controls (accepted on another engine,
+    which ignores the controls): the structured controls win, the free-form instruction is dropped. Submitting such
+    a request on Ming is a 422; a job already accepted is not failed for it."""
+    from .domain.models import delivery_controls_conflict
+
+    if backend != 'ming' or not delivery_controls_conflict(job.request):
+        return
+    logger.warning('engine switch: job %s runs on ming with emotion/speaking_rate/pitch/volume; its free-form '
+                   'instructions are dropped', job.job_id)
+    job.request = job.request.model_copy(update={'instructions': None})
+
+
+def _finish_without_rendering(queue: Any, job: Any, request_state: Any, backend: str) -> bool:
+    """A held job whose remaining sentences were all dropped (_render_pending_tags) has nothing left to render:
+    complete it with the audio it already has, or fail it when there is none. Returns True when the job is done.
+    Called with the store lock held."""
+    if request_state.pending_sentence_indices or request_state.inflight_sentence_indices:
+        return False
+    complete = getattr(queue, '_complete_job_locked', None)
+    fail = getattr(queue, '_fail_job_locked', None)
+    flush = getattr(queue, '_flush_ready_sentences_locked', None)
+    if not (callable(complete) and callable(fail) and callable(flush)):
+        return False
+    if not job.pcm_parts and not any(request_state.ready_sentence_pcm.values()):
+        fail(job, f'Input text is empty on the {backend} engine: it reads none of the inline tags left.')
+        return True
+    flush(job, request_state)
+    if request_state.is_complete():
+        complete(job, request_state)
+        return True
+    return False
+
+
 def fix_active_model(settings: Settings) -> bool:
     """Reset an active_model the model list does not contain (e.g. a Phonon id saved by an older version).
     Returns True when it changed."""
@@ -616,11 +693,15 @@ class EngineSwitcher:
                 if job is None or job.status in _TERMINAL_JOB:
                     continue
                 job.request = map_speech_request(settings, job.request)
+                _resolve_delivery_conflict(job, settings.runtime_backend)
                 # A seed taken from the voice profile belongs to the old engine: resolve it for the new one.
                 reapply_seed = getattr(queue, 'reapply_voice_seed', None)
                 if callable(reapply_seed):
                     reapply_seed(job)
                 request_state = store.request_states.get(job_id)
+                if request_state is not None and _render_pending_tags(request_state, settings.runtime_backend):
+                    if _finish_without_rendering(queue, job, request_state, settings.runtime_backend):
+                        continue
                 group_key = getattr(queue, '_group_key_for_request', None)
                 if request_state is not None and callable(group_key):
                     try:

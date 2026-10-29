@@ -87,9 +87,10 @@ class FakeEngine:
         self.dropped.append(key)
         self.voices.pop(key, None)
 
-    def submit(self, text, *, prompt, language, seed, row_id=None):
+    def submit(self, text, *, prompt, language, seed, row_id=None, instruction=None, acoustic_prompt=True):
         stream = FakeStream(row_id)
-        self.submitted.append({'text': text, 'prompt': prompt, 'language': language, 'seed': seed, 'row_id': row_id})
+        self.submitted.append({'text': text, 'prompt': prompt, 'language': language, 'seed': seed, 'row_id': row_id,
+                               'instruction': instruction, 'acoustic_prompt': acoustic_prompt})
         self.streams.append(stream)
         if self.auto:
             for value in (0.25, 0.5):
@@ -303,6 +304,34 @@ def test_seed_and_language_mapping(synth_env) -> None:
     assert [s['seed'] for s in submitted] == [ming_runtime.MING_DEFAULT_SEED, 42, 0, 0]
     assert [s['language'] for s in submitted] == ['de', 'en', 'de', 'fr']
 
+
+
+def test_delivery_controls_reach_the_engine_per_row(synth_env) -> None:
+    """Rows with different delivery controls share one batch; each gets its own caption and reference mode."""
+    from omnivoice_tts_server.ming.prompt import build_structured_instruction
+
+    synth = synth_env.make()
+    results = asyncio.run(_collect(synth, [
+        _item(0, 'Eins.', job_id='plain'),
+        _item(1, 'Zwei.', job_id='happy', emotion='happy'),
+        _item(2, 'Drei.', job_id='slow', speaking_rate='slow', reference_mode='full'),
+        _item(3, 'Vier.', job_id='free', instructions='Sprich flüsternd.'),
+        _item(4, 'Fünf.', job_id='speaker', reference_mode='speaker'),
+        _item(5, 'Sechs.', job_id='both', instructions='leise', emotion='sad'),
+    ]))
+    submitted = {s['row_id'].split(':')[0]: s for s in FakeEngine.instances[-1].submitted}
+    assert set(submitted) == {'plain', 'happy', 'slow', 'free', 'speaker'}
+    assert (submitted['plain']['instruction'], submitted['plain']['acoustic_prompt']) == (None, True)
+    assert submitted['happy']['instruction'] == build_structured_instruction(emotion='高兴')
+    assert submitted['happy']['acoustic_prompt'] is False
+    assert submitted['slow']['instruction'] == build_structured_instruction(speed='慢速', pitch='中', volume='中')
+    assert submitted['slow']['acoustic_prompt'] is True
+    assert (submitted['free']['instruction'], submitted['free']['acoustic_prompt']) == ('Sprich flüsternd.', True)
+    assert (submitted['speaker']['instruction'], submitted['speaker']['acoustic_prompt']) == (None, False)
+    # Free-form plus a structured control fails only its own row.
+    failed = [r for r in results if r.job_id == 'both']
+    assert len(failed) == 1 and 'cannot be combined' in failed[0].error
+    assert all(r.error is None for r in results if r.job_id != 'both')
 
 def test_ming_language() -> None:
     assert ming_language('de-DE') == 'de'

@@ -1,7 +1,11 @@
 # Vendored from inclusionAI/Ming-3.0-tts @ 9332fb9 (prompt_contract.py, tts_tasks.py), MIT license, see LICENSE in
 # this directory. Trimmed to the dense (0.5B) layout and the plain TTS / zero-shot cloning task. The strings are part
 # of the model's input protocol and must stay byte-identical to upstream.
+# Also from tts_tasks.py: the structured control caption (EMOTION / BASIC) and the instruction normalization.
 from __future__ import annotations
+
+import json
+from collections import OrderedDict
 
 DEFAULT_TTS_PROMPT = 'Please generate speech based on the following description.\n'
 
@@ -63,6 +67,42 @@ def build_tts_prompt(target_language: str | None = None) -> str:
     language = str(target_language).strip()
     name = TARGET_LANGUAGE_NAMES.get(language.lower(), language)
     return DEFAULT_TTS_PROMPT + f'Target language: {name}.\n'
+
+
+BASIC_ATTRIBUTE_VALUES = {
+    'speed': ('慢速', '中速', '快速'),
+    'pitch': ('低', '中', '高'),
+    'volume': ('低', '中', '高'),
+}
+EMOTION_VALUES = ('高兴', '悲伤', '愤怒', '恐惧', '厌恶', '惊讶', '中性')
+
+_ZH_FIELDS = ('序号', '说话人', '方言', '风格', '语速', '基频', '音量', '情感')
+_EN_FIELDS = ('id', 'speaker', 'dialect', 'style', 'speed', 'pitch', 'volume', 'emotion')
+_BGM_FIELDS = ('Genre', 'Mood', 'Instrument', 'Theme', 'ENV', 'SNR')
+
+
+def build_structured_instruction(*, dialect=None, style=None, speed=None, pitch=None, volume=None, emotion=None,
+                                 ip=None, schema='zh') -> str:
+    """The ordered assistant-side caption the checkpoint was fine-tuned on (EMOTION / BASIC / ... tasks)."""
+    schema = str(schema).strip().lower()
+    values = (1, 'speaker_1', dialect, style, speed, pitch, volume, emotion)
+    if schema in {'zh', 'chinese'}:
+        fields, ip_key = _ZH_FIELDS, 'IP'
+    elif schema in {'en', 'english'}:
+        fields, ip_key = _EN_FIELDS, 'ip'
+    else:
+        raise ValueError(f'Unsupported structured instruction schema: {schema!r}')
+    item = OrderedDict(zip(fields, values))
+    item['BGM'] = OrderedDict((key, None) for key in _BGM_FIELDS)
+    item[ip_key] = ip
+    return json.dumps(OrderedDict((('audio_sequence', [item]),)), ensure_ascii=False)
+
+
+def normalize_instruction(instruction: str | None) -> str | None:
+    """Blank means no instruction, not an empty assistant EOS prefix."""
+    if instruction is None or not str(instruction).strip():
+        return None
+    return str(instruction).strip()
 
 
 def validate_tokenizer(tokenizer) -> None:

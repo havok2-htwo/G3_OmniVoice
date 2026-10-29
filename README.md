@@ -209,6 +209,11 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   (done by `install.bat`) and its weights with `install.bat -DownloadMing` (into
   `models/Ming-3.0-tts-0.5b`). Ming presets: `Ming 32GB VRAM`, `Ming 24GB VRAM` (RTX 4090/3090),
   `Ming 24+8 VRAM`, `Ming best performance`.
+- **Ming delivery controls** - cloned voices on Ming take `emotion`, `speaking_rate`, `pitch`,
+  `volume` and `reference_mode` (English values or German aliases such as `fröhlich`, `langsam`,
+  `laut`), or a free-form `instructions` text. Inline tags like `[Laughter]` or `[Cough]` are
+  spelled for the active engine and removed where the engine does not know them. See
+  `API_DOCUMENTATION.md` "Delivery controls (Ming)".
 - **Settings presets** - read-only built-in GPU tiers (`32GB VRAM`, `24GB VRAM`,
   `24+8 VRAM`; the OmniVoice tiers do not change the engine, the `Ming ...` tiers
   switch to Ming) plus named runtime/VRAM parameter sets you save, load into the

@@ -49,6 +49,19 @@ import {
   voiceDesignValueForGroup,
 } from "../shared/voiceDesign";
 import { SYNTH_LANGUAGE_OPTIONS } from "../shared/languages";
+import {
+  EMPTY_MING_DELIVERY,
+  MING_EMOTION_OPTIONS,
+  MING_PITCH_OPTIONS,
+  MING_RATE_OPTIONS,
+  MING_TAGS,
+  resolvedReferenceMode,
+  MING_VOLUME_OPTIONS,
+  REFERENCE_MODE_OPTIONS,
+  hasStructuredMingControl,
+  mingDeliveryFields,
+  type MingDeliveryDraft,
+} from "../shared/mingDelivery";
 import { DataGenerationPanel } from "./DataGenerationPanel";
 import { TrainingPanel } from "./TrainingPanel";
 
@@ -182,6 +195,13 @@ const ADMIN_HELP = {
   quickText: "Text fuer den Streaming-Test. Der erste Satz bekommt einen Fast-Path, danach werden kompatible Saetze wieder gebatcht.",
   quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
   quickInstructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wird von OmniVoice abgelehnt.",
+  quickMingInstruction: "Ming: freie Anweisung zur Sprechweise (z.B. \"spricht ruhig und warm, leicht laechelnd\"). Nicht mit Emotion/Tempo/Tonhoehe/Lautstaerke kombinierbar; solange eines davon gesetzt ist, wird sie nicht gesendet.",
+  mingEmotion: "Ming: Emotion der Ausgabe. Geht zusammen mit Tempo/Tonhoehe/Lautstaerke als eine strukturierte Anweisung an das Modell.",
+  mingRate: "Ming: Sprechtempo. Ist einer von Tempo/Tonhoehe/Lautstaerke gesetzt, fuellt der Server die anderen mit 'mittel'.",
+  mingPitch: "Ming: Tonhoehe der Ausgabe.",
+  mingVolume: "Ming: Lautstaerke der Ausgabe.",
+  mingReferenceMode: "Ming: wie die Klon-Stimme genutzt wird. voll = Referenz-Audio + Transkript + Sprecher-Embedding (normales Klonen). nur Sprecher = nur das Sprecher-Embedding, damit die Sprechweise der Referenz die Anweisung nicht ueberdeckt. auto = nur Sprecher, sobald Emotion/Tempo/Tonhoehe/Lautstaerke gesetzt ist, sonst voll.",
+  mingTags: "Ming: fuegt einen Geraeusch-Tag an der Cursorposition im Text ein. Tags werden nicht vorgelesen; eine Engine ohne diesen Tag entfernt ihn.",
   quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
   quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese (bei 'off' den Originaltext). Sprache Auto: Deutsch/Englisch wird an Schreibweise (24.09.2026, 14:30 Uhr, 3:30 PM) oder an typischen Woertern erkannt; andere Sprachen bleiben unveraendert.",
   textOptimizationDefault: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus. Wirkt nur, wenn der Request de/en angibt oder der Text bei Auto/ohne Sprache als Deutsch/Englisch erkannt wird (Schreibweise oder typische Woerter); andere Sprachen bleiben unveraendert. Benchmarks, WER und Finetune bleiben immer aus.",
@@ -465,6 +485,8 @@ export function AdminApp() {
   const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
   const [quickSeed, setQuickSeed] = useState("");
+  const [quickMingDelivery, setQuickMingDelivery] = useState<MingDeliveryDraft>(EMPTY_MING_DELIVERY);
+  const quickTextRef = useRef<HTMLTextAreaElement | null>(null);
   const [quickTextOptimization, setQuickTextOptimization] = useState<"" | TextOptimizationMode>("");
   const [quickOptimizePreview, setQuickOptimizePreview] = useState<TextOptimizeResponse | null>(null);
   const [quickMetrics, setQuickMetrics] = useState<JobMetrics | null>(null);
@@ -859,6 +881,10 @@ export function AdminApp() {
   const customVoices = useMemo(() => voices.filter((voice) => voice.source === "custom"), [voices]);
   // The engine whose voice seeds apply right now (requests and WER runs without a seed of their own).
   const activeSeedEngine = seedEngineKey(engineList?.active ?? snapshot?.settings.runtime_backend);
+  // Ming reads delivery controls and a free-form instruction; the other engines ignore them.
+  const mingEngineActive = (engineList?.active ?? snapshot?.settings.runtime_backend) === "ming";
+  const quickMingActive = mingEngineActive && quickTaskType !== "VoiceDesign";
+  const quickMingStructured = quickMingActive && hasStructuredMingControl(quickMingDelivery);
   const libraryVoices = customVoices;
   const resolvedModelOpsModel = modelOpsModel || settingsDraft?.default_model || "";
   const modelControlCards = useMemo(
@@ -932,6 +958,26 @@ export function AdminApp() {
       if (baseModel) setQuickModel(baseModel);
     }
     setQuickVoice(voiceId);
+  }
+
+  function patchQuickMingDelivery(patch: Partial<MingDeliveryDraft>) {
+    setQuickMingDelivery((current) => ({ ...current, ...patch }));
+  }
+
+  /** Inserts a Ming tag at the cursor of the text field (replacing a selection), padded with spaces. */
+  function insertQuickTag(tag: string) {
+    const field = quickTextRef.current;
+    const start = field?.selectionStart ?? quickText.length;
+    const end = field?.selectionEnd ?? quickText.length;
+    const before = quickText.slice(0, start);
+    const after = quickText.slice(end);
+    const inserted = `${before && !/\s$/.test(before) ? " " : ""}${tag}${after && !/^\s/.test(after) ? " " : ""}`;
+    setQuickText(`${before}${inserted}${after}`);
+    const caret = before.length + inserted.length;
+    window.requestAnimationFrame(() => {
+      field?.focus();
+      field?.setSelectionRange(caret, caret);
+    });
   }
 
   async function handleAuthenticate() {
@@ -1074,12 +1120,14 @@ export function AdminApp() {
           model: quickModel,
           voice: quickTaskType === "VoiceDesign" ? null : quickVoice,
           task_type: quickTaskType,
-          instructions: quickTaskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickInstructions,
+          // On Ming a structured control replaces the free instruction (the server rejects both together).
+          instructions: quickTaskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickMingStructured ? "" : quickInstructions,
           language: quickLanguage,
           stream: true,
           response_format: "pcm",
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
           text_optimization: quickTextOptimization || null,
+          ...(quickMingActive ? mingDeliveryFields(quickMingDelivery) : {}),
         },
         onEvent: async (event: SynthStreamEvent) => {
           if (event.type === "start") {
@@ -1378,7 +1426,7 @@ export function AdminApp() {
                 voice: taskType === "VoiceDesign" ? null : settingsDraft.default_voice,
                 task_type: taskType,
                 language: "Auto",
-                instructions: taskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickInstructions,
+                instructions: benchmarkInstructions(taskType),
                 response_format: "wav",
               },
             },
@@ -1392,6 +1440,13 @@ export function AdminApp() {
     } finally {
       setBenchmarkBusy(false);
     }
+  }
+
+  // Benchmark and WER runs measure the plain voice. On Ming the quick-synthesis textarea is the free-form
+  // instruction (a caption the engine applies), so it is not sent with them; VoiceDesign keeps its design tags.
+  function benchmarkInstructions(taskType: TaskType): string {
+    if (taskType === "VoiceDesign") return voiceDesignInstructOrDefault(quickInstructions);
+    return mingEngineActive ? "" : quickInstructions;
   }
 
   async function handleWerBenchmarkRun() {
@@ -1432,7 +1487,7 @@ export function AdminApp() {
             voice: taskType === "VoiceDesign" ? null : (werVoice || settingsDraft.default_voice),
             task_type: taskType,
             language: "Auto",
-            instructions: taskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickInstructions,
+            instructions: benchmarkInstructions(taskType),
             response_format: "wav",
           },
         },
@@ -2274,10 +2329,87 @@ export function AdminApp() {
           <div className="field-grid two">
             <label className="with-help" title={ADMIN_HELP.quickModel}>Modell<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{models.map((model) => <option key={model.model_id} value={model.model_id}>{model.model_id}</option>)}</select></label>
             <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)} disabled={quickTaskType === "VoiceDesign"}>{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
+            <label className="with-help" title={ADMIN_HELP.quickLanguage}>Sprache<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+            <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
           </div>
-          <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
-          <label className="with-help" title={ADMIN_HELP.quickLanguage}>Sprache<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
-          <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} readOnly={quickTaskType === "VoiceDesign"} /></label>
+          <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea ref={quickTextRef} value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
+          {quickMingActive ? (
+            <div className="tag-insert" title={ADMIN_HELP.mingTags}>
+              <div className="tag-insert-row">
+                <span className="tag-insert-label">Geraeusch einfuegen</span>
+                {MING_TAGS.filter((item) => item.common).map((item) => (
+                  <button key={item.tag} className="secondary-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
+                ))}
+              </div>
+              <details className="tag-insert-more">
+                <summary>mehr Laute</summary>
+                <div className="tag-insert-row">
+                  {MING_TAGS.filter((item) => !item.common).map((item) => (
+                    <button key={item.tag} className="secondary-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
+                  ))}
+                </div>
+              </details>
+            </div>
+          ) : null}
+          {quickMingActive ? (
+            <>
+              <fieldset className="ming-delivery">
+                <legend>Ming-Ausdruck</legend>
+                <p className="ming-delivery-hint">Emotion und Tempo wirken am staerksten, Tonhoehe und Lautstaerke kaum. Mit Emotion nutzt &quot;auto&quot; nur das Sprecher-Embedding: mehr Ausdruck, die Stimme klingt aber etwas weniger nach der Referenz.</p>
+                <div className="ming-delivery-grid">
+                <label className="with-help" title={ADMIN_HELP.mingEmotion}>Emotion
+                  <select value={quickMingDelivery.emotion} onChange={(event) => patchQuickMingDelivery({ emotion: event.target.value as MingDeliveryDraft["emotion"] })}>
+                    <option value="">keine</option>
+                    {MING_EMOTION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="with-help" title={ADMIN_HELP.mingRate}>Tempo
+                  <select value={quickMingDelivery.speaking_rate} onChange={(event) => patchQuickMingDelivery({ speaking_rate: event.target.value as MingDeliveryDraft["speaking_rate"] })}>
+                    <option value="">Standard</option>
+                    {MING_RATE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="with-help" title={ADMIN_HELP.mingPitch}>Tonhoehe
+                  <select value={quickMingDelivery.pitch} onChange={(event) => patchQuickMingDelivery({ pitch: event.target.value as MingDeliveryDraft["pitch"] })}>
+                    <option value="">Standard</option>
+                    {MING_PITCH_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="with-help" title={ADMIN_HELP.mingVolume}>Lautstaerke
+                  <select value={quickMingDelivery.volume} onChange={(event) => patchQuickMingDelivery({ volume: event.target.value as MingDeliveryDraft["volume"] })}>
+                    <option value="">Standard</option>
+                    {MING_VOLUME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="with-help" title={ADMIN_HELP.mingReferenceMode}>Referenzmodus
+                  <select value={quickMingDelivery.reference_mode === "auto" ? "" : quickMingDelivery.reference_mode} onChange={(event) => patchQuickMingDelivery({ reference_mode: event.target.value as MingDeliveryDraft["reference_mode"] })}>
+                    <option value="">auto ({resolvedReferenceMode(quickMingDelivery) === "speaker" ? "nur Sprecher" : "voll"})</option>
+                    {REFERENCE_MODE_OPTIONS.filter((option) => option.value !== "auto").map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                </div>
+              <label className="with-help" title={ADMIN_HELP.quickMingInstruction}>Freie Anweisung (statt Emotion/Tempo)
+                <textarea
+                  value={quickInstructions}
+                  onChange={(event) => setQuickInstructions(event.target.value)}
+                  disabled={quickMingStructured}
+                  placeholder={quickMingStructured ? "Aus, solange Emotion/Tempo/Tonhoehe/Lautstaerke gesetzt ist." : "z.B. spricht ruhig und warm, leicht laechelnd"}
+                />
+              </label>
+              {quickMingStructured && quickInstructions.trim() ? (
+                <div className="message">Die freie Anweisung wird nicht gesendet, solange Emotion, Tempo, Tonhoehe oder Lautstaerke gesetzt ist.</div>
+              ) : null}
+              {hasStructuredMingControl(quickMingDelivery) || quickMingDelivery.reference_mode || quickInstructions ? (
+                <div className="button-row">
+                  <button className="secondary-button" type="button" onClick={() => setQuickMingDelivery(EMPTY_MING_DELIVERY)} disabled={!hasStructuredMingControl(quickMingDelivery) && !quickMingDelivery.reference_mode}>Ming-Steuerung zuruecksetzen</button>
+                  <button className="secondary-button" type="button" onClick={() => setQuickInstructions("")} disabled={!quickInstructions}>Freie Anweisung leeren</button>
+                </div>
+              ) : null}
+              </fieldset>
+            </>
+          ) : (
+            <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} readOnly={quickTaskType === "VoiceDesign"} /></label>
+          )}
           {quickTaskType === "VoiceDesign" ? (
             <div className="voice-design-builder" title={ADMIN_HELP.quickInstructions}>
               {VOICE_DESIGN_GROUPS.map((group) => (
@@ -2296,7 +2428,6 @@ export function AdminApp() {
               ))}
             </div>
           ) : null}
-          <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
           <label className="with-help" title={ADMIN_HELP.quickTextOptimization}>Textoptimierung<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
             <option value="">Server-Default ({snapshot?.settings.text_optimization_default ?? "off"})</option>
             <option value="off">off</option>

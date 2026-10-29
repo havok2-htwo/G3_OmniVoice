@@ -84,6 +84,62 @@ def ming_language(language: str | None, text: str = '') -> str:
     return resolved or MING_DEFAULT_LANGUAGE
 
 
+# -- delivery controls (SpeechRequest emotion / speaking_rate / pitch / volume / reference_mode / instructions) --------
+
+# The structured caption's values (ming/prompt.py BASIC_ATTRIBUTE_VALUES / EMOTION_VALUES) for the request's English
+# control values.
+MING_EMOTIONS = {'happy': '高兴', 'sad': '悲伤', 'angry': '愤怒', 'fearful': '恐惧', 'disgusted': '厌恶',
+                 'surprised': '惊讶', 'neutral': '中性'}
+MING_SPEEDS = {'slow': '慢速', 'medium': '中速', 'fast': '快速'}
+MING_LEVELS = {'low': '低', 'medium': '中', 'high': '高'}
+# reference_mode 'auto' (or unset) with a structured control set: upstream clones EMOTION / BASIC from the speaker
+# embedding only, because the reference latents carry the reference's own delivery. Without one: the full clone.
+# Change this one constant after listening tests if 'full' turns out better for our cloned voices.
+AUTO_REFERENCE_MODE_WITH_CONTROLS = 'speaker'
+
+
+def ming_instruction(request: Any) -> str | None:
+    """The assistant-side caption of a request: the structured EMOTION / BASIC JSON, else the free-form
+    ``instructions``, else None. Raises ValueError when both are set (upstream never combines them).
+
+    Emotion alone stays an emotion-only caption. Any of speaking_rate / pitch / volume makes it a BASIC caption, the
+    missing ones filled with the medium value (upstream's BASIC always sends all three)."""
+    from .domain.models import delivery_controls_conflict
+    from .ming.prompt import build_structured_instruction, normalize_instruction
+
+    conflict = delivery_controls_conflict(request)
+    if conflict:
+        raise ValueError(conflict)
+    emotion = getattr(request, 'emotion', None)
+    rate = getattr(request, 'speaking_rate', None)
+    pitch = getattr(request, 'pitch', None)
+    volume = getattr(request, 'volume', None)
+    controls: dict[str, str] = {}
+    if emotion is not None:
+        controls['emotion'] = MING_EMOTIONS[emotion]
+    if (rate, pitch, volume) != (None, None, None):
+        controls['speed'] = MING_SPEEDS[rate or 'medium']
+        controls['pitch'] = MING_LEVELS[pitch or 'medium']
+        controls['volume'] = MING_LEVELS[volume or 'medium']
+    if controls:
+        return build_structured_instruction(**controls)
+    return normalize_instruction(getattr(request, 'instructions', None))
+
+
+def resolve_reference_mode(request: Any) -> str:
+    """'full' (reference latents + transcript + speaker embedding) or 'speaker' (speaker embedding only).
+    An explicit reference_mode wins; 'auto' / unset follows AUTO_REFERENCE_MODE_WITH_CONTROLS when a structured
+    control is set, else 'full'."""
+    from .domain.models import STRUCTURED_DELIVERY_FIELDS
+
+    mode = getattr(request, 'reference_mode', None) or 'auto'
+    if mode in ('full', 'speaker'):
+        return mode
+    if any(getattr(request, key, None) is not None for key in STRUCTURED_DELIVERY_FIELDS):
+        return AUTO_REFERENCE_MODE_WITH_CONTROLS
+    return 'full'
+
+
 def _decode_audio(raw: bytes) -> tuple[np.ndarray, int]:
     import soundfile
 
@@ -460,11 +516,13 @@ class MingSynthesizer:
 
     def _submit_items(self, engine: Any, items: list[BatchSynthesisItem]) -> list[Any]:
         """Resolve each voice and submit each row on its own: a batch mixes unrelated requests, so a bad voice (or an
-        over-long prompt) fails only its own item. Each entry is the engine stream, or that item's exception."""
+        over-long prompt) fails only its own item. Each entry is the engine stream, or that item's exception.
+        Instruction and reference mode are per row too: rows with different delivery controls share the batch."""
         streams: list[Any] = []
         try:
             for item in items:
                 try:
+                    instruction = ming_instruction(item.request)
                     prompt = self._prompt_for(engine, item.request)
                     stream = engine.submit(
                         item.text,
@@ -472,6 +530,8 @@ class MingSynthesizer:
                         language=ming_language(getattr(item.request, 'language', None), item.text),
                         seed=self._seed(item.request),
                         row_id=f'{item.job_id}:{item.sentence_index}',
+                        instruction=instruction,
+                        acoustic_prompt=resolve_reference_mode(item.request) == 'full',
                     )
                 except Exception as exc:  # noqa: BLE001 - reported for this item only
                     logger.warning('ming: sentence %s:%s rejected: %s', item.job_id, item.sentence_index, exc)

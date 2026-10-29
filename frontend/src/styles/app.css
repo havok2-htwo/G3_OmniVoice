@@ -192,7 +192,7 @@ button:disabled {
 }
 
 .status-row {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .status-grid {
@@ -402,6 +402,78 @@ input[type="checkbox"] {
 
 .voice-design-builder label {
   gap: 7px;
+}
+
+.tag-insert {
+  display: grid;
+  gap: 6px;
+}
+
+.tag-insert-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-insert-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-right: 2px;
+}
+
+.tag-insert-more summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-bottom: 6px;
+}
+
+.ming-delivery {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.ming-delivery legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+.ming-delivery .message {
+  margin-top: 0;
+}
+
+.ming-delivery-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.ming-delivery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.ming-delivery-grid label {
+  gap: 7px;
+}
+
+textarea:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tag-insert-row .secondary-button {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
 }
 
 .message {

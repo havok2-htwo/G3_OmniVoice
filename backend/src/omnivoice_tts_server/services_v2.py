@@ -2241,6 +2241,30 @@ class BenchmarkService:
 WER_ORTHOGRAPHY_RULE = 'Schreibe Umlaute und ß als echte Zeichen (ä, ö, ü, ß), nie als ae, oe, ue oder ss.'
 # Chunks in a row that add no new sentence before the template pool fills the rest.
 WER_MAX_STALLED_CHUNKS = 3
+# Unit abbreviations the scorer spells out ("1,8 kg" = "1,8 Kilogramm").
+WER_UNIT_WORDS = {
+    'km/h': 'kilometer pro stunde',
+    'kg': 'kilogramm',
+    'km': 'kilometer',
+    'cm': 'zentimeter',
+    'mm': 'millimeter',
+    'ml': 'milliliter',
+}
+# Folded German ordinal stems 1-31 ("ersten", "zwoelfte") -> digits, so "am 12. Mai" = "am zwoelften Mai".
+WER_ORDINAL_STEMS = {
+    stem: str(number)
+    for number, stem in enumerate(
+        [
+            'erst', 'zweit', 'dritt', 'viert', 'fuenft', 'sechst', 'siebt', 'acht', 'neunt', 'zehnt',
+            'elft', 'zwoelft', 'dreizehnt', 'vierzehnt', 'fuenfzehnt', 'sechzehnt', 'siebzehnt', 'achtzehnt',
+            'neunzehnt', 'zwanzigst', 'einundzwanzigst', 'zweiundzwanzigst', 'dreiundzwanzigst',
+            'vierundzwanzigst', 'fuenfundzwanzigst', 'sechsundzwanzigst', 'siebenundzwanzigst',
+            'achtundzwanzigst', 'neunundzwanzigst', 'dreissigst', 'einunddreissigst',
+        ],
+        start=1,
+    )
+}
+WER_ORDINAL_STEMS['siebent'] = '7'
 
 
 class WerBenchmarkService:
@@ -3313,6 +3337,7 @@ class WerBenchmarkService:
     def _normalize_words(text: str) -> list[str]:
         normalized = WerBenchmarkService._replace_number_words(text)
         normalized = WerBenchmarkService._fold_german_orthography(normalized)
+        normalized = WerBenchmarkService._canonicalize_spoken_formats(normalized)
         normalized = re.sub(r'[^a-z0-9\s]+', ' ', normalized)
         return [WerBenchmarkService._normalize_wer_token(word) for word in normalized.split() if word]
 
@@ -3328,6 +3353,45 @@ class WerBenchmarkService:
         )
         normalized = unicodedata.normalize('NFKD', normalized)
         return ''.join(char for char in normalized if not unicodedata.combining(char))
+
+    @staticmethod
+    def _canonicalize_spoken_formats(text: str) -> str:
+        """Give times, prices, units and ordinals one written form, so the scorer counts what was spoken.
+
+        Whisper writes "14:35 Uhr" for a spoken "14 Uhr 35" and "24,50 Euro" for "24 Euro und 50 Cent". Only
+        the score uses this; the sentence the engine reads is never rewritten. Expects folded lowercase text.
+        """
+        text = re.sub(r'(?<![\d.,])(\d{1,3}(?:\.\d{3})+)(?!\d|\.\d)', lambda m: m.group(1).replace('.', ''), text)
+
+        def time(match: re.Match[str]) -> str:
+            hours, minutes = int(match.group(1)), int(match.group(2))
+            if hours > 24 or minutes > 59:
+                return match.group(0)
+            return f'{hours} uhr' if minutes == 0 else f'{hours} uhr {minutes}'
+
+        text = re.sub(r'\b(\d{1,2})[:.](\d{2})\s*uhr\b', time, text)
+        text = re.sub(r'\b(\d{1,2}):(\d{2})\b', time, text)
+        text = re.sub(r'\b(\d{1,2})\s+uhr\s+(\d{1,2})(?:\s+minuten)?\b', time, text)
+
+        def price(match: re.Match[str]) -> str:
+            euros, cents = match.group(1), int(match.group(2) or match.group(3))
+            return f'{euros} euro' if cents == 0 else f'{euros} euro {cents}'
+
+        text = re.sub(r'\b(\d+),(\d{2})()[\s-]*(?:euro|€)', price, text)
+        # "und 50" only counts as cents with "Cent" after it ("5 Euro und 3 Kinder" stays as it is).
+        text = re.sub(
+            r'\b(\d+)[\s-]*(?:euro|€)\s+(?:und\s+(\d{1,2})\s+cent|(\d{1,2})(?:\s+cent)?)\b(?![.,]\d)', price, text
+        )
+        text = re.sub(r'(\d)\s*€', r'\1 euro', text)
+
+        for short, word in WER_UNIT_WORDS.items():
+            text = re.sub(rf'(?<=\d)\s*{re.escape(short)}\b|\b{re.escape(short)}\b', f' {word}', text)
+        text = re.sub(r'(\d)\s*%', r'\1 prozent', text)
+
+        def ordinal(match: re.Match[str]) -> str:
+            return WER_ORDINAL_STEMS.get(match.group(1), match.group(0))
+
+        return re.sub(r'\b([a-z]+?)(?:e|en|er|es|em)\b', ordinal, text)
 
     @staticmethod
     def _normalize_wer_token(word: str) -> str:

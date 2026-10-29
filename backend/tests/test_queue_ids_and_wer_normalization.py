@@ -137,3 +137,41 @@ def test_wer_fallback_produces_1000_unique_bounded_sentences_per_prompt() -> Non
         for sentence in first + second
     )
     assert set(first) != set(second)
+
+
+@pytest.mark.parametrize(
+    ('reference', 'hypothesis'),
+    [
+        ('Der Zug fährt um 14 Uhr 35 ab.', 'Der Zug fährt um 14:35 Uhr ab.'),
+        ('Der Zug fährt um 14 Uhr 35 ab.', 'Der Zug fährt um 14.35 Uhr ab.'),
+        ('Der Zug nach Berlin fährt um 18 Uhr 45 Minuten.', 'Der Zug nach Berlin fährt um 18.45 Uhr.'),
+        ('Wir treffen uns um 18:00 Uhr im Büro.', 'Wir treffen uns um 18 Uhr im Büro.'),
+        ('Das Ticket kostet 24 Euro und 50 Cent.', 'Das Ticket kostet 24,50 Euro.'),
+        ('Das Ticket kostet 25 Euro 50 pro Person.', 'Das Ticket kostet 25,50 € pro Person.'),
+        ('Das Laptop wiegt 1,8 Kilogramm.', 'Das Laptop wiegt 1,8 kg.'),
+        ('Die Miete wird am ersten überwiesen.', 'Die Miete wird am 1. überwiesen.'),
+        ('Mein Flug startet am 12. März.', 'Mein Flug startet am zwölften März.'),
+        ('Das Auto kostet 12.500 Euro.', 'Das Auto kostet 12500 Euro.'),
+        ('Das Sofa kostet 1.250,50 Euro.', 'Das Sofa kostet 1250 Euro und 50 Cent.'),
+        ('Ich brauche eine 2,50-Euro-Münze.', 'Ich brauche eine 2,50 Euro Münze.'),
+        ('Am siebenten Mai.', 'Am 7. Mai.'),
+    ],
+)
+def test_wer_counts_spoken_time_price_unit_and_ordinal_forms_as_equal(reference: str, hypothesis: str) -> None:
+    assert WerBenchmarkService._wer(reference, hypothesis, tolerance_letters=0)['word_errors'] == 0
+    assert WerBenchmarkService._wer(hypothesis, reference, tolerance_letters=0)['word_errors'] == 0
+
+
+@pytest.mark.parametrize(
+    ('reference', 'hypothesis'),
+    [
+        ('Das neue Telefon kostet 899 Euro.', 'Das neue Telefon kostet 809 Euro.'),
+        ('Das Medikament kostet 19,50 Euro.', 'Das Medikament kostet 1950 Euro.'),
+        ('Das neue Telefon kostet 899 Euro.', 'Das neue Telefon kostet 8,99 Euro.'),
+        ('Der Zug fährt um 14 Uhr 35 ab.', 'Der Zug fährt um 14:45 Uhr ab.'),
+        ('Bitte zahlen Sie 12,50 Euro bar.', 'Bitte zahlen Sie 12,50 bar.'),
+        ('Das kostet 5 Euro und 3 Kinder kommen.', 'Das kostet 5 Euro 3 Kinder kommen.'),
+    ],
+)
+def test_wer_still_counts_misread_numbers(reference: str, hypothesis: str) -> None:
+    assert WerBenchmarkService._wer(reference, hypothesis, tolerance_letters=2)['word_errors'] > 0

@@ -710,6 +710,8 @@ Behavior:
 - Changing TTS seed or generation settings does not change cached sentences.
 - `seed_range > 0` runs `random_seed` through `random_seed + seed_range` and returns a sorted seed leaderboard.
 - Whisper transcriptions are batched by `transcription_concurrency`.
+- Before scoring, times, prices, units and ordinals get one form: `14 Uhr 35` = `14:35 Uhr`, `24 Euro und 50 Cent` =
+  `24,50 €`, `kg` = `Kilogramm`, `am ersten` = `am 1.`. Misread numbers (`899` vs `809`) still count as errors.
 - WER normalization tolerates common German spelling variants, number words vs digits, and joined/split compounds, while still counting real wrong words.
 - The run renders on the active engine and reports it as `engine`, and the voice profile it renders with as
   `resolved_voice` (its `voice`, else the default voice at its start); without a seed it uses that voice's best

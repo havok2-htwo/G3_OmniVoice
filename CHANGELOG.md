@@ -4,6 +4,14 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - WER scorer counts spoken number formats as equal
+
+- Whisper writes `14:35 Uhr` for a spoken `14 Uhr 35` and `24,50 Euro` for `24 Euro und 50 Cent`, so the scorer
+  counted 1-3 errors on sentences every engine read correctly, the same for every seed. Times, prices, `€`, unit
+  abbreviations (`kg`, `km`, `cm`, `mm`, `ml`, `km/h`, `%`), ordinals 1-31 (`ersten`, `zwoelften`) and thousands
+  dots (`12.500`) now get one form before scoring. In the Ming seed sweeps this cleared 223 of 318 deviating samples;
+  the rest are real misreadings (`899` read as `809`). Only the score changes, never the text the engine reads.
+
 ### Fixed - WER test sentences with real umlauts
 
 - The template pool that fills a WER sentence pool when vLLM delivers too few unique sentences was written in ASCII

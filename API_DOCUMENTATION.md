@@ -1372,6 +1372,9 @@ Behavior:
 - identical sentence-generation inputs reuse the in-memory sentence cache
 - Whisper transcriptions are batched by `transcription_concurrency`
 - WER normalization tolerates common German spelling variants, number words vs digits, and joined/split compounds
+- WER normalization gives times, prices, units and ordinals one form before scoring: `14 Uhr 35` = `14:35 Uhr` =
+  `14.35 Uhr`, `24 Euro und 50 Cent` = `24,50 €`, `kg` = `Kilogramm`, `am ersten` = `am 1.`, `12.500` = `12500`;
+  misread numbers (`899` vs `809`) still count as errors
 - WER runs, generated source text, transcripts, and sentence cache are in-memory only
 - a run records the engine it runs on (`engine` in the response, the active engine at its start) and the voice
   profile it renders with (`resolved_voice`: its `voice`, else the default voice at its start, `null` without a

@@ -428,6 +428,7 @@ export interface WerBenchmarkRunResponse {
   completion_timeout_seconds: number;
   sentence_cache_hit: boolean;
   sentence_cache_key?: string | null;
+  fallback_sentence_count?: number;
   exclusive: boolean;
   voice?: string | null;
   /** Voice profile id the run renders with (its voice, else the default voice at its start); null without one. */

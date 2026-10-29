@@ -1366,7 +1366,9 @@ Request:
 
 Behavior:
 
-- vLLM generates sentence pools in chunks of 4 sentences
+- vLLM generates sentence pools in chunks of 4 sentences, with real umlauts and ß (the engines read `fuer` literally)
+- a chunk that adds no new sentence is retried up to 3 times in a row; after that a fixed template pool fills the
+  rest, and the run reports how many sentences came from it as `fallback_sentence_count` (also on a cache hit)
 - identical sentence-generation inputs reuse the in-memory sentence cache
 - Whisper transcriptions are batched by `transcription_concurrency`
 - WER normalization tolerates common German spelling variants, number words vs digits, and joined/split compounds

@@ -2174,6 +2174,7 @@ export function AdminApp() {
                   <span className="pill">worst {formatPercent(run.summary.wer_max)}</span>
                   <span className="pill">exact {formatPercent(run.summary.exact_rate)}</span>
                   <span className={`pill ${run.sentence_cache_hit ? "active" : ""}`}>{run.sentence_cache_hit ? "cached sentences" : "new sentences"}</span>
+                  {run.fallback_sentence_count ? <span className="pill">{run.fallback_sentence_count} Vorlagen-Saetze (LLM lieferte zu wenige)</span> : null}
                   <span className="pill">Stimme: {run.voice ? voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice : `Standard${werRunVoice(run) ? ` (${werRunVoice(run)?.name})` : ""}`}</span>
                   <span className="pill">Engine: {seedEngineLabel(run.engine)}</span>
                 </div>

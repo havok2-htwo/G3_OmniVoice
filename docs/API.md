@@ -703,7 +703,9 @@ WER benchmark request:
 
 Behavior:
 
-- vLLM generates sentence pools in chunks of 4 sentences.
+- vLLM generates sentence pools in chunks of 4 sentences, with real umlauts and ß (the engines read `fuer` literally).
+- A chunk that adds no new sentence is retried up to 3 times in a row; then a fixed template pool fills the rest and
+  the run reports how many sentences came from it as `fallback_sentence_count` (also on a cache hit).
 - For identical `count`, `language`, word limits and prompt, the sentence pool is cached.
 - Changing TTS seed or generation settings does not change cached sentences.
 - `seed_range > 0` runs `random_seed` through `random_seed + seed_range` and returns a sorted seed leaderboard.

@@ -2237,6 +2237,12 @@ class BenchmarkService:
         return clean[lower] * (1.0 - weight) + clean[upper] * weight
 
 
+# The TTS engines read ASCII transliterations literally ("fuer" is not "für"), so test sentences use real letters.
+WER_ORTHOGRAPHY_RULE = 'Schreibe Umlaute und ß als echte Zeichen (ä, ö, ü, ß), nie als ae, oe, ue oder ss.'
+# Chunks in a row that add no new sentence before the template pool fills the rest.
+WER_MAX_STALLED_CHUNKS = 3
+
+
 class WerBenchmarkService:
     def __init__(
         self,
@@ -2391,6 +2397,7 @@ class WerBenchmarkService:
         sentences, cache_info = await self._generate_sentences(payload)
         run['sentence_cache_hit'] = cache_info['hit']
         run['sentence_cache_key'] = cache_info['key']
+        run['fallback_sentence_count'] = int(cache_info.get('fallback_count') or 0)
         run['count'] = len(sentences)
         seed_values = list(run.get('seed_values') or self._seed_values(payload))
         run['seed_values'] = seed_values
@@ -2462,14 +2469,15 @@ class WerBenchmarkService:
             excluded_keys=excluded_keys,
         )
         if cached is not None:
-            return cached, {'hit': True, 'key': cache_key}
+            fallback_count = int(self.store.wer_sentence_cache[cache_key].get('fallback_count') or 0)
+            return cached, {'hit': True, 'key': cache_key, 'fallback_count': fallback_count}
 
         if self.settings.runtime_backend.lower() == 'mock' or payload.vllm_base_url.strip().lower() == 'mock':
             sentences: list[str] = []
             seen: set[str] = set()
             candidate_count = payload.count + len(excluded_keys)
             for index in range(1, candidate_count + 1):
-                sentence = f'Dies ist ein kurzer WER Testsatz Nummer {index} mit klaren deutschen Woertern.'
+                sentence = f'Dies ist ein kurzer WER Testsatz Nummer {index} mit klaren deutschen Wörtern.'
                 if not self._is_valid_wer_sentence(
                     sentence,
                     min_words=payload.min_words,
@@ -2483,17 +2491,18 @@ class WerBenchmarkService:
                 seen.add(sentence_key)
                 if len(sentences) >= payload.count:
                     break
-            if len(sentences) < payload.count:
+            fallback_count = max(0, payload.count - len(sentences))
+            if fallback_count:
                 sentences.extend(
                     self._fallback_sentences(
                         payload,
-                        payload.count - len(sentences),
+                        fallback_count,
                         offset=len(sentences),
                         existing_sentences=sentences,
                     )
                 )
-            self._store_sentence_cache(cache_key, sentences)
-            return list(sentences), {'hit': False, 'key': cache_key}
+            self._store_sentence_cache(cache_key, sentences, fallback_count=fallback_count)
+            return list(sentences), {'hit': False, 'key': cache_key, 'fallback_count': fallback_count}
 
         base_url = self._normalize_base_url(payload.vllm_base_url)
         model = (payload.vllm_model or '').strip() or await self._resolve_vllm_model(base_url)
@@ -2502,6 +2511,9 @@ class WerBenchmarkService:
         seen: set[str] = set()
         async with httpx.AsyncClient(timeout=90, trust_env=False) as client:
             chunk_index = 1
+            # A chunk with nothing new (repeats, out-of-bounds lengths, unparsable reply) is retried a few times
+            # before the template pool fills the rest: those sentences are far less varied.
+            stalled_chunks = 0
             while len(parsed) < payload.count:
                 previous_len = len(parsed)
                 missing = payload.count - len(parsed)
@@ -2529,24 +2541,27 @@ class WerBenchmarkService:
                     seen.add(normalized_key)
                     if len(parsed) >= payload.count:
                         break
-                if not candidates:
-                    break
-                if len(parsed) == previous_len:
-                    break
                 chunk_index += 1
-        if len(parsed) < payload.count:
+                if len(parsed) > previous_len:
+                    stalled_chunks = 0
+                    continue
+                stalled_chunks += 1
+                if stalled_chunks >= WER_MAX_STALLED_CHUNKS:
+                    break
+        fallback_count = max(0, payload.count - len(parsed))
+        if fallback_count:
             parsed.extend(
                 self._fallback_sentences(
                     payload,
-                    payload.count - len(parsed),
+                    fallback_count,
                     offset=len(parsed),
                     existing_sentences=parsed,
                 )
             )
         run_count = payload.count
         sentences = parsed[:run_count]
-        self._store_sentence_cache(cache_key, sentences)
-        return list(sentences), {'hit': False, 'key': cache_key}
+        self._store_sentence_cache(cache_key, sentences, fallback_count=fallback_count)
+        return list(sentences), {'hit': False, 'key': cache_key, 'fallback_count': fallback_count}
 
     @staticmethod
     def _is_valid_wer_sentence(sentence: str, *, min_words: int, max_words: int) -> bool:
@@ -2607,23 +2622,25 @@ class WerBenchmarkService:
         custom_prompt = (payload.prompt or '').strip()
         if custom_prompt:
             prompt = (
-                f'Nutze diese Anforderungen fuer einen WER-Test: {custom_prompt}\n\n'
-                f'Erzeuge jetzt genau {chunk_count} neue, voneinander unabhaengige Testsaetze auf {payload.language}. '
-                f'Jeder Satz soll {payload.min_words} bis {payload.max_words} Woerter haben. '
-                'Keine Nummerierung, keine Listenmarker, keine Abkuerzungen, keine chinesischen Zeichen und keine Mischsprache. '
+                f'Nutze diese Anforderungen für einen WER-Test: {custom_prompt}\n\n'
+                f'Erzeuge jetzt genau {chunk_count} neue, voneinander unabhängige Testsätze auf {payload.language}. '
+                f'Jeder Satz soll {payload.min_words} bis {payload.max_words} Wörter haben. '
+                'Keine Nummerierung, keine Listenmarker, keine Abkürzungen, keine chinesischen Zeichen und keine Mischsprache. '
                 'Zahlen immer als Ziffern schreiben, zum Beispiel 3 Uhr statt drei Uhr. '
-                'Antworte ausschliesslich mit einem JSON-Array von Strings, ohne Objekt, ohne chunk_id und ohne Wrapper.'
+                f'{WER_ORTHOGRAPHY_RULE} '
+                'Antworte ausschließlich mit einem JSON-Array von Strings, ohne Objekt, ohne chunk_id und ohne Wrapper.'
             )
         else:
             prompt = (
-                f'Erzeuge genau {chunk_count} voneinander unabhaengige Testsaetze auf {payload.language}. '
-                f'Jeder Satz soll {payload.min_words} bis {payload.max_words} Woerter haben, natuerlich klingen '
+                f'Erzeuge genau {chunk_count} voneinander unabhängige Testsätze auf {payload.language}. '
+                f'Jeder Satz soll {payload.min_words} bis {payload.max_words} Wörter haben, natürlich klingen '
                 'und keine Nummerierung enthalten. Verwende gemischte Alltagsthemen, aber keine Zitate, Listenmarker '
-                'oder Abkuerzungen. Keine chinesischen Zeichen und keine Mischsprache. '
+                'oder Abkürzungen. Keine chinesischen Zeichen und keine Mischsprache. '
                 'Zahlen immer als Ziffern schreiben, zum Beispiel 3 Uhr statt drei Uhr. '
-                'Gib ausschliesslich ein JSON-Array von Strings zurueck, ohne Objekt, ohne chunk_id und ohne Wrapper.'
+                f'{WER_ORTHOGRAPHY_RULE} '
+                'Gib ausschließlich ein JSON-Array von Strings zurück, ohne Objekt, ohne chunk_id und ohne Wrapper.'
             )
-        prompt += f' Chunk: {chunk_index}; bisherige Saetze: {existing_count}.'
+        prompt += f' Chunk: {chunk_index}; bisherige Sätze: {existing_count}.'
 
         response = await client.post(
             f'{base_url}/v1/chat/completions',
@@ -2632,7 +2649,7 @@ class WerBenchmarkService:
                 'messages': [
                     {
                         'role': 'system',
-                        'content': 'Du erzeugst saubere TTS-Testsaetze und antwortest nur mit JSON.',
+                        'content': 'Du erzeugst saubere TTS-Testsätze und antwortest nur mit JSON.',
                     },
                     {'role': 'user', 'content': prompt},
                 ],
@@ -2668,12 +2685,12 @@ class WerBenchmarkService:
             'Die Lehrerin',
             'Mein Nachbar',
             'Eine junge Familie',
-            'Der freundliche Verkaeufer',
+            'Der freundliche Verkäufer',
             'Unsere kleine Gruppe',
         ]
         verbs = [
             'beschreibt',
-            'erklaert',
+            'erklärt',
             'sortiert',
             'plant',
             'findet',
@@ -2681,35 +2698,35 @@ class WerBenchmarkService:
             'beobachtet',
             'notiert',
             'bespricht',
-            'prueft',
+            'prüft',
             'erinnert',
             'ordnet',
         ]
         objects = [
             'den hellen Morgen im Park',
-            'eine kurze Nachricht fuer die Gruppe',
-            'das neue Rezept aus der Kueche',
+            'eine kurze Nachricht für die Gruppe',
+            'das neue Rezept aus der Küche',
             'mehrere ruhige Wege durch die Stadt',
             'einen einfachen Gedanken zum Feierabend',
             'die warmen Farben am Fenster',
             'ein klares Ergebnis nach dem Test',
             'den leisen Klang im leeren Raum',
-            'einen wichtigen Termin fuer morgen',
+            'einen wichtigen Termin für morgen',
             'die Einkaufsliste auf dem Tisch',
-            'eine kleine Aenderung im Tagesplan',
-            'den naechsten Ausflug am Wochenende',
+            'eine kleine Änderung im Tagesplan',
+            'den nächsten Ausflug am Wochenende',
         ]
         endings = [
             'mit sehr deutlicher Aussprache',
             'ohne Hast und ohne fremde Namen',
-            'in einem natuerlichen deutschen Satz',
-            'fuer einen fairen Vergleich',
-            'mit einfachen und bekannten Woertern',
-            'waehrend draussen der Abend beginnt',
+            'in einem natürlichen deutschen Satz',
+            'für einen fairen Vergleich',
+            'mit einfachen und bekannten Wörtern',
+            'während draußen der Abend beginnt',
             'bei einer Tasse Tee',
             'vor dem gemeinsamen Mittagessen',
             'nach einem kurzen Telefonat',
-            'mit einem freundlichen Laecheln',
+            'mit einem freundlichen Lächeln',
         ]
         total_combinations = len(subjects) * len(verbs) * len(objects) * len(endings)
         seed_material = json.dumps(
@@ -2791,9 +2808,10 @@ class WerBenchmarkService:
         cached['hits'] = int(cached.get('hits') or 0) + 1
         return list(sentences)
 
-    def _store_sentence_cache(self, cache_key: str, sentences: list[str]) -> None:
+    def _store_sentence_cache(self, cache_key: str, sentences: list[str], *, fallback_count: int = 0) -> None:
         self.store.wer_sentence_cache[cache_key] = {
             'sentences': list(sentences),
+            'fallback_count': int(fallback_count),
             'created_at': utcnow(),
             'last_used_at': utcnow(),
             'hits': 0,
@@ -2818,7 +2836,7 @@ class WerBenchmarkService:
         exclude_sentences: list[str] | None = None,
     ) -> str:
         payload = {
-            'generator_version': 5,
+            'generator_version': 6,
             'count': count,
             'language': (language or '').strip().lower(),
             'min_words': min_words,
@@ -3032,6 +3050,7 @@ class WerBenchmarkService:
             tolerance_letters_per_word=run.get('tolerance_letters_per_word', 2),
             completion_timeout_seconds=run.get('completion_timeout_seconds', 180),
             sentence_cache_hit=bool(run.get('sentence_cache_hit', False)),
+            fallback_sentence_count=int(run.get('fallback_sentence_count') or 0),
             sentence_cache_key=run.get('sentence_cache_key'),
             exclusive=run.get('exclusive', True),
             voice=run.get('voice'),

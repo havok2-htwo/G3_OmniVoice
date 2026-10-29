@@ -711,6 +711,8 @@ class WerBenchmarkRunResponse(BaseModel):
     completion_timeout_seconds: int
     sentence_cache_hit: bool = False
     sentence_cache_key: str | None = None
+    # Sentences the template pool filled in because the LLM did not deliver enough unique ones.
+    fallback_sentence_count: int = 0
     exclusive: bool
     voice: str | None = None
     # The voice profile id the run renders with (voice, else the default voice at the start); None without one.

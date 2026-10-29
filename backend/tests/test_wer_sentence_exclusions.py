@@ -76,7 +76,7 @@ def test_mock_generation_excludes_previous_pool_and_caches_new_pool(tmp_path) ->
     assert first_cache['key'] != second_cache['key']
     assert second_cache['hit'] is False
     assert repeated == second
-    assert repeated_cache == {'hit': True, 'key': second_cache['key']}
+    assert repeated_cache == {'hit': True, 'key': second_cache['key'], 'fallback_count': second_cache['fallback_count']}
 
 
 def test_cached_pool_is_rejected_when_it_contains_excluded_or_duplicate_sentences(tmp_path) -> None:
@@ -101,7 +101,7 @@ def test_cached_pool_is_rejected_when_it_contains_excluded_or_duplicate_sentence
 
     sentences, cache_info = asyncio.run(service._generate_sentences(payload))
 
-    assert cache_info == {'hit': False, 'key': cache_key}
+    assert cache_info == {'hit': False, 'key': cache_key, 'fallback_count': 0}
     assert len(service._sentence_keys(sentences)) == payload.count
     assert service._sentence_identity(excluded) not in service._sentence_keys(sentences)
 
@@ -126,6 +126,8 @@ def test_llm_candidates_are_filtered_against_exclusions_and_local_duplicates(tmp
                 accepted.upper(),
             ],
             [],
+            [],
+            [],
         ]
     )
     monkeypatch.setattr(service, '_generate_sentence_chunk', generate_chunk)
@@ -137,7 +139,44 @@ def test_llm_candidates_are_filtered_against_exclusions_and_local_duplicates(tmp
     assert len(sentences) == len(sentence_keys) == payload.count
     assert service._sentence_identity(excluded) not in sentence_keys
     assert service._sentence_identity(accepted) in sentence_keys
-    assert generate_chunk.await_count == 2
+    # One useful chunk, then three empty ones before the template pool fills the remaining 3.
+    assert generate_chunk.await_count == 4
+    assert cache_info['fallback_count'] == 3
+
+
+def test_a_stalled_llm_chunk_is_retried_before_the_template_pool(tmp_path, monkeypatch) -> None:
+    service, store = _service(tmp_path, runtime_backend='omnivoice')
+    payload = WerBenchmarkCreateRequest(
+        count=2,
+        vllm_base_url='http://vllm.test',
+        vllm_model='test-model',
+        min_words=4,
+        max_words=16,
+    )
+    first = 'Am Nachmittag besucht meine Schwester den ruhigen Wochenmarkt.'
+    second = 'Der Zug nach Hamburg fährt heute pünktlich vom dritten Gleis.'
+    generate_chunk = AsyncMock(side_effect=[[first], [first], [], [second]])
+    monkeypatch.setattr(service, '_generate_sentence_chunk', generate_chunk)
+
+    sentences, cache_info = asyncio.run(service._generate_sentences(payload))
+
+    assert sentences == [first, second]
+    assert cache_info['fallback_count'] == 0
+    assert generate_chunk.await_count == 4
+    # A cache hit reports the same fallback count as the run that generated the pool.
+    _, repeated = asyncio.run(service._generate_sentences(payload))
+    assert repeated == {'hit': True, 'key': cache_info['key'], 'fallback_count': 0}
+
+
+def test_fallback_pool_uses_real_umlauts() -> None:
+    # The engines read ASCII transliterations literally ("fuer" is spoken as "vor"), which inflates the WER.
+    payload = WerBenchmarkCreateRequest(count=1000, min_words=4, max_words=16)
+    sentences = WerBenchmarkService._fallback_sentences(payload, payload.count)
+
+    text = ' '.join(sentences)
+    for folded in ('fuer', 'Verkaeufer', 'erklaert', 'prueft', 'naechsten', 'Woertern', 'waehrend', 'draussen'):
+        assert folded not in text
+    assert 'für' in text
 
 
 def test_fallback_scans_beyond_exclusions_for_a_disjoint_1000_sentence_pool() -> None:

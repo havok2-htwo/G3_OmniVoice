@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - WER test sentences with real umlauts
+
+- The template pool that fills a WER sentence pool when vLLM delivers too few unique sentences was written in ASCII
+  transliteration (`fuer`, `Verkaeufer`, `naechsten`), and so were the vLLM prompts. The engines read those words
+  literally (Ming says "vor" for `fuer`), which inflated the WER of every engine and made seed rankings depend on
+  how a seed happens to pronounce `fuer`. Pool and prompts now use real umlauts and ß, and the prompt asks the LLM
+  for them explicitly. Sentence pools cached before this change are not reused (cache key version 6).
+- A vLLM chunk that adds no new sentence is retried up to 3 times in a row instead of falling back to the template
+  pool at once. Runs report `fallback_sentence_count` (admin panel: "Vorlagen-Saetze"), also on a cache hit.
+
 ### Added - best seed per engine
 
 - A voice profile stores one best seed per engine: `seed` stays the OmniVoice seed (older profiles, presets and PATCH

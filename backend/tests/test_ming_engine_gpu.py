@@ -88,6 +88,38 @@ def test_rows_are_independent_of_batch_composition(engine, voice):
     np.testing.assert_array_equal(np.concatenate(list(late)), alone[0])
 
 
+@pytest.fixture(scope='module')
+def voice_v3(engine):
+    import json
+
+    import soundfile as sf
+
+    presets_dir = REPO / 'backend' / 'src' / 'omnivoice_tts_server' / 'voice_presets'
+    preset = next(p for p in json.loads((presets_dir / 'presets.json').read_text(encoding='utf-8'))
+                  if p['voice_id'] == 'voice_preset_sonjav3')
+    audio, sr = sf.read(str(presets_dir / preset['audio_file']), dtype='float32')
+    return engine.voice_prompt('sonjav3', audio, sr, preset['ref_text'], seed=0)
+
+
+def test_rows_with_different_voices_languages_and_seeds_are_independent(engine, voice, voice_v3):
+    """A mixed continuous batch (two clone prompts, de + en, one seed per row) renders every row like it renders
+    alone, bit for bit."""
+    rows = [
+        ('Guten Morgen zusammen.', voice, 'de', 31),
+        ('The weather is lovely today.', voice_v3, 'en', 32),
+        ('See you later!', voice, 'en', 33),
+        ('Heute ist ein schöner Tag.', voice_v3, 'de', 34),
+    ]
+    assert len(rows) <= ENGINE_KW['max_slots']
+    alone = [engine.render(t, prompt=vp, language=lang, seed=seed) for t, vp, lang, seed in rows]
+    streams = [engine.submit(t, prompt=vp, language=lang, seed=seed) for t, vp, lang, seed in rows]
+    together = [np.concatenate(list(s)) for s in streams]
+    for a, b in zip(alone, together):
+        np.testing.assert_array_equal(a, b)
+    # Same text and seed, other voice: the prompt really reaches its own row.
+    assert not np.array_equal(alone[0], engine.render(rows[0][0], prompt=voice_v3, language='de', seed=31))
+
+
 def test_long_text_is_fragmented_and_streamed(engine, voice):
     text = ('Das ist ein sehr langer Text, der in mehrere Fragmente zerlegt werden muss, weil er mehr als '
             'vierundzwanzig Wörter hat. Und hier kommt noch ein zweiter Satz, damit wir sicher über die Grenze kommen.')

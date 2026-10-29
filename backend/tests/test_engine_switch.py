@@ -510,3 +510,51 @@ def test_switch_waits_for_a_stream_batch_dispatched_at_the_last_moment(fake_ming
 
     asyncio.run(run())
     assert order == ['batch done', 'unload']
+
+
+def test_held_job_gets_the_voice_seed_of_the_new_engine(fake_ming) -> None:
+    """A job without its own seed that waits through a switch renders with the new engine's voice seed; a client
+    seed stays."""
+    from datetime import datetime, timezone
+
+    from omnivoice_tts_server.domain.state import VoiceProfileRecord
+
+    client = _client(fake_ming)
+    try:
+        state = client.app.state
+        state.store.voice_profiles['voice_seeded'] = VoiceProfileRecord(
+            voice_id='voice_seeded', name='Seeded', source='custom', created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            audio_bytes=b'RIFF', ref_text='Hallo.', consent=True, seed=9305, engine_seeds={'ming': 41},
+        )
+        old = GatedSynthesizer()
+        state.synthesizer = old
+        state.queue_service.synthesizer = old
+        first = client.post('/v1/jobs', json={'input': 'Erster Satz.', 'voice': 'Auto Voice'}).json()['job_id']
+        assert old.started.wait(5)
+        held = []
+        for extra in ({}, {'seed': 5}):
+            response = client.post(
+                '/v1/jobs',
+                json={'input': 'Wartet.', 'voice': 'voice_seeded', 'model': 'k2-fsa/OmniVoice-Base', **extra},
+            )
+            assert response.status_code in (200, 202), response.text
+            held.append(response.json()['job_id'])
+        assert [state.store.jobs[job_id].request.seed for job_id in held] == [9305, 5]
+
+        assert client.post('/api/admin/runtime/backend', json={'backend': 'ming'}).status_code == 200
+        old.gate.set()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            body = client.get('/api/admin/runtime/engines').json()
+            if body['switch']['state'] in {'ready', 'failed'}:
+                break
+            time.sleep(0.05)
+        assert body['switch']['state'] == 'ready', body['switch']
+        assert body['switch']['requeued_jobs'] == 2
+        assert [state.store.jobs[job_id].request.seed for job_id in held] == [41, 5]
+        for job_id in (first, *held):
+            deadline = time.time() + 10
+            while time.time() < deadline and client.get(f'/api/admin/jobs/{job_id}').json()['status'] != 'completed':
+                time.sleep(0.05)
+    finally:
+        _close(client)

@@ -483,3 +483,49 @@ def test_concurrent_engines_skip_the_batch_wait_window(tmp_path) -> None:
         queue.store.worker_stop.set()
 
     asyncio.run(run())
+
+
+class RecordingConcurrentSynth(FakeConcurrentSynth):
+    """Records what every engine row carries (voice, language, seed)."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.rows: list[list[tuple[str | None, str | None, int | None]]] = []
+
+    def stream_batch(self, items, chunk_size=None, overlap=None):
+        self.rows.append([(item.request.voice, item.request.language, item.request.seed) for item in items])
+        return super().stream_batch(items, chunk_size, overlap)
+
+
+def test_jobs_with_different_voices_and_seeds_share_one_concurrent_batch(tmp_path) -> None:
+    from datetime import datetime, timezone
+
+    from omnivoice_tts_server.domain.state import VoiceProfileRecord
+
+    synth = RecordingConcurrentSynth(slots=4)
+    queue = _queue(tmp_path, synth, runtime_backend='ming', active_model='k2-fsa/OmniVoice-Base')
+    for voice_id, seed, ming_seed in (('voice_v2', 9305, 41), ('voice_v3', 9301, 42)):
+        queue.store.voice_profiles[voice_id] = VoiceProfileRecord(
+            voice_id=voice_id, name=voice_id, source='custom', created_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+            audio_bytes=b'RIFF', ref_text='Hallo.', consent=True, seed=seed, engine_seeds={'ming': ming_seed},
+        )
+    requests = [
+        SpeechRequest(input=S1, voice='voice_v2', language='de', stream=True),
+        SpeechRequest(input='The train to Hamburg leaves from platform seven today.', voice='voice_v3', language='en', stream=True),
+        SpeechRequest(input=S2, voice='voice_v3', language='de', seed=7, stream=True),
+    ]
+
+    async def run():
+        # All three wait before the worker starts, so the first dispatch plans them together.
+        jobs = [await queue.submit(request, stream_consumer=STREAM_EVENTS) for request in requests]
+        await queue.start_worker()
+        await _wait(lambda: all(job.status == JobStatus.completed for job in jobs))
+        queue.store.worker_stop.set()
+        return jobs
+
+    jobs = asyncio.run(run())
+    # Rows keep their own voice, language and seed (the voice's Ming seed unless the request sent one).
+    assert sorted(synth.rows[0]) == sorted([('voice_v2', 'de', 41), ('voice_v3', 'en', 42), ('voice_v3', 'de', 7)])
+    assert len(synth.rows) == 1, 'one dispatch carried all three jobs'
+    for job in jobs:
+        assert _wav_values(job.final_audio) == [_chunk_value(0, c) for c in range(3)]

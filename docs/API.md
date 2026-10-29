@@ -593,6 +593,7 @@ DELETE /api/admin/jobs/{job_id}
 ```http
 GET    /api/admin/voices
 POST   /api/admin/voices
+PATCH  /api/admin/voices/{voice_id}
 GET    /api/admin/voices/{voice_id}/audio
 DELETE /api/admin/voices/{voice_id}
 POST   /api/admin/voices/transcribe
@@ -608,6 +609,18 @@ Create a voice profile with `multipart/form-data`:
 | `ref_text` | yes | exact spoken text for OmniVoice clone prompting |
 
 Uploaded samples are normalized to 24 kHz WAV and persisted under `data/voices`.
+
+`PATCH` renames a profile and/or sets its best seed for one engine:
+
+```json
+{ "name": "SonjaV3", "seed": 41, "engine": "ming" }
+```
+
+`engine` is `omnivoice` (default when omitted), `ming` or `phonon` (anything else is `400`); `seed: null` clears
+that engine's seed. A request or WER run without a seed uses the seed of the engine active at that moment; a queued job held through
+an engine switch gets the new engine's seed.
+Responses carry `seed` (the OmniVoice seed, as before) and `engine_seeds` with every engine's seed, e.g.
+`{"omnivoice": 9301, "ming": 41}`.
 
 Transcription accepts `multipart/form-data` with field `file` and forwards it to
 the configured Whisper server. It returns:
@@ -696,6 +709,10 @@ Behavior:
 - `seed_range > 0` runs `random_seed` through `random_seed + seed_range` and returns a sorted seed leaderboard.
 - Whisper transcriptions are batched by `transcription_concurrency`.
 - WER normalization tolerates common German spelling variants, number words vs digits, and joined/split compounds, while still counting real wrong words.
+- The run renders on the active engine and reports it as `engine`, and the voice profile it renders with as
+  `resolved_voice` (its `voice`, else the default voice at its start); without a seed it uses that voice's best
+  seed for that engine. An engine switch while it still renders stops it (`status: "failed"`, `error_message`
+  names both engines), so a leaderboard never mixes engines.
 
 Response summary includes:
 

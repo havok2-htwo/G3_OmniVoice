@@ -9,8 +9,13 @@ export interface VoiceItem {
   ref_text?: string | null;
   filename?: string | null;
   has_audio?: boolean;
+  /** The OmniVoice seed (older field); engine_seeds holds every engine's best seed, OmniVoice included. */
   seed?: number | null;
+  engine_seeds?: Partial<Record<SeedEngine, number>>;
 }
+
+/** Engines a voice profile stores a best seed for (mock renders like OmniVoice). */
+export type SeedEngine = "omnivoice" | "ming" | "phonon";
 
 export interface ModelInfo {
   model_id: string;
@@ -425,6 +430,10 @@ export interface WerBenchmarkRunResponse {
   sentence_cache_key?: string | null;
   exclusive: boolean;
   voice?: string | null;
+  /** Voice profile id the run renders with (its voice, else the default voice at its start); null without one. */
+  resolved_voice?: string | null;
+  /** Engine the run renders on (active at its start); a switch during the run stops it. */
+  engine: string;
   summary: {
     total: number;
     completed: number;

@@ -30,6 +30,7 @@ import {
   type ModelOperationResponse,
   type RuntimeDeviceInfo,
   type RuntimeDeviceListResponse,
+  type SeedEngine,
   type ServerSettings,
   type SynthStreamEvent,
   type TaskType,
@@ -253,9 +254,30 @@ const ADMIN_HELP = {
   werSeedRange: "Wenn groesser 0, testet der WER-Benchmark alle Seeds von Seed bis Seed + Range. Wird ignoriert, wenn Seed eine kommagetrennte Liste ist.",
   werVoice: "Stimme, mit der der WER-Benchmark rechnet. Standard = Stimme aus den Einstellungen. Nur eigene Stimmen (Klon-Profile) stehen zur Wahl.",
   werCancel: "Stoppt den laufenden WER-Benchmark: laufende und wartende TTS-Jobs werden abgebrochen, der Lauf endet mit Status cancelled. Bereits fertige Ergebnisse bleiben sichtbar.",
-  voiceSeed: "Bester Seed dieser Stimme (aus dem WER-Benchmark). Ohne eigenen Seed im Request und ohne Seed im WER-Benchmark nutzt OmniVoice diesen Wert. Leer = kein Seed, dann zufaellig.",
+  voiceSeed: "Bester Seed dieser Stimme pro Engine (aus dem WER-Benchmark). Ohne eigenen Seed im Request und ohne Seed im WER-Benchmark nutzt die aktive Engine ihren Wert; ein Seed passt nur zu der Engine, auf der er gemessen wurde. Leer = kein Seed, dann zufaellig.",
+  werSaveSeed: "Speichert diesen Seed als besten Seed der Stimme des Runs, fuer die Engine, auf der der Run lief.",
   werPrompt: "Optionaler eigener vLLM Prompt. Er sollte ein JSON-Array von Saetzen erzeugen.",
 };
+
+const SEED_ENGINES: Array<{ id: SeedEngine; label: string }> = [
+  { id: "omnivoice", label: "OmniVoice" },
+  { id: "ming", label: "Ming" },
+  { id: "phonon", label: "Phonon" },
+];
+
+/** The seed slot an engine reads; mock (tests) renders like OmniVoice. */
+function seedEngineKey(engine?: string | null): SeedEngine {
+  return engine === "ming" || engine === "phonon" ? engine : "omnivoice";
+}
+
+function seedEngineLabel(engine?: string | null) {
+  return SEED_ENGINES.find((item) => item.id === seedEngineKey(engine))?.label ?? "OmniVoice";
+}
+
+function voiceEngineSeed(voice: VoiceItem, engine?: string | null): number | null {
+  const key = seedEngineKey(engine);
+  return voice.engine_seeds?.[key] ?? (key === "omnivoice" ? voice.seed ?? null : null);
+}
 
 function preferredBaseModel(models: DashboardSnapshot["models"]) {
   return (
@@ -835,6 +857,8 @@ export function AdminApp() {
     return match.source === "custom" ? match.voice_id : match.name;
   }, [defaultVoiceOptions, settingsDraft?.default_voice]);
   const customVoices = useMemo(() => voices.filter((voice) => voice.source === "custom"), [voices]);
+  // The engine whose voice seeds apply right now (requests and WER runs without a seed of their own).
+  const activeSeedEngine = seedEngineKey(engineList?.active ?? snapshot?.settings.runtime_backend);
   const libraryVoices = customVoices;
   const resolvedModelOpsModel = modelOpsModel || settingsDraft?.default_model || "";
   const modelControlCards = useMemo(
@@ -1437,9 +1461,25 @@ export function AdminApp() {
     }
   }
 
-  async function handleSaveVoiceSeed(voice: VoiceItem) {
+  async function saveVoiceSeed(voice: VoiceItem, engine: SeedEngine, seed: number | null) {
+    if (!adminKey) return false;
+    setError("");
+    try {
+      await apiFetch(`/api/admin/voices/${encodeURIComponent(voice.voice_id)}`, { method: "PATCH", adminKey, body: { seed, engine } });
+      const label = seedEngineLabel(engine);
+      setMessage(seed === null ? `${label}-Seed fuer ${voice.name} entfernt.` : `Bester ${label}-Seed fuer ${voice.name}: ${seed}.`);
+      await loadSnapshot(adminKey);
+      return true;
+    } catch (seedError) {
+      setError(seedError instanceof Error ? seedError.message : "Seed konnte nicht gespeichert werden.");
+      return false;
+    }
+  }
+
+  async function handleSaveVoiceSeed(voice: VoiceItem, engine: SeedEngine) {
     if (!adminKey) return;
-    const raw = (voiceSeedEdits[voice.voice_id] ?? String(voice.seed ?? "")).trim();
+    const editKey = `${voice.voice_id}:${engine}`;
+    const raw = (voiceSeedEdits[editKey] ?? String(voiceEngineSeed(voice, engine) ?? "")).trim();
     let seed: number | null = null;
     if (raw !== "") {
       const parsed = Number(raw);
@@ -1449,19 +1489,36 @@ export function AdminApp() {
       }
       seed = parsed;
     }
-    setError("");
-    try {
-      await apiFetch(`/api/admin/voices/${encodeURIComponent(voice.voice_id)}`, { method: "PATCH", adminKey, body: { seed } });
+    if (await saveVoiceSeed(voice, engine, seed)) {
       setVoiceSeedEdits((current) => {
         const next = { ...current };
-        delete next[voice.voice_id];
+        delete next[editKey];
         return next;
       });
-      setMessage(seed === null ? `Seed fuer ${voice.name} entfernt.` : `Bester Seed fuer ${voice.name}: ${seed}.`);
-      await loadSnapshot(adminKey);
-    } catch (seedError) {
-      setError(seedError instanceof Error ? seedError.message : "Seed konnte nicht gespeichert werden.");
     }
+  }
+
+  /** The voice profile a WER run rendered with (resolved by the server at its start), or undefined. */
+  function werRunVoice(run: WerBenchmarkRunResponse): VoiceItem | undefined {
+    const name = (run.resolved_voice || "").trim();
+    if (!name) return undefined;
+    const lowered = name.toLowerCase();
+    return (
+      customVoices.find((voice) => voice.voice_id === name || voice.name === name) ??
+      customVoices.find((voice) => voice.voice_id.toLowerCase() === lowered || voice.name.toLowerCase() === lowered)
+    );
+  }
+
+  /** Leaderboard cell: save the row's seed as the best seed of the run's voice for the run's engine. */
+  function renderSaveSeedCell(run: WerBenchmarkRunResponse, seed: number | null | undefined) {
+    const runVoice = werRunVoice(run);
+    if (!runVoice || seed === null || seed === undefined) return "-";
+    if (voiceEngineSeed(runVoice, run.engine) === seed) return <span className="pill active">gespeichert</span>;
+    return (
+      <button className="secondary-button" type="button" title={ADMIN_HELP.werSaveSeed} onClick={() => void saveVoiceSeed(runVoice, seedEngineKey(run.engine), seed)}>
+        Fuer {runVoice.name} ({seedEngineLabel(run.engine)}) speichern
+      </button>
+    );
   }
 
   function handleVoiceFileChange(file: File | null) {
@@ -2093,7 +2150,10 @@ export function AdminApp() {
             <label className="with-help" title={ADMIN_HELP.werTimeout}>Timeout sec<input type="number" min="1" max="3600" value={werTimeout} onChange={(event) => setWerTimeout(Number(event.target.value) || 1)} /></label>
             <label className="with-help" title={ADMIN_HELP.werVoice}>Stimme<select value={werVoice} onChange={(event) => setWerVoice(event.target.value)}>
               <option value="">Standard-Stimme aus den Einstellungen</option>
-              {customVoices.map((voice) => <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{voice.seed != null ? ` (bester Seed ${voice.seed})` : " (ohne Seed)"}</option>)}
+              {customVoices.map((voice) => {
+                const seed = voiceEngineSeed(voice, activeSeedEngine);
+                return <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{seed != null ? ` (bester ${seedEngineLabel(activeSeedEngine)}-Seed ${seed})` : ` (ohne ${seedEngineLabel(activeSeedEngine)}-Seed)`}</option>;
+              })}
             </select></label>
             <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer = bester Seed der Stimme, 8888 oder 8888,8890,2912" /></label>
             <label className="with-help" title={ADMIN_HELP.werSeedRange}>Seed range<input type="number" min="0" max="1024" value={werSeedRange} onChange={(event) => setWerSeedRange(Number(event.target.value) || 0)} /></label>
@@ -2114,7 +2174,8 @@ export function AdminApp() {
                   <span className="pill">worst {formatPercent(run.summary.wer_max)}</span>
                   <span className="pill">exact {formatPercent(run.summary.exact_rate)}</span>
                   <span className={`pill ${run.sentence_cache_hit ? "active" : ""}`}>{run.sentence_cache_hit ? "cached sentences" : "new sentences"}</span>
-                  <span className="pill">Stimme: {voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice ?? "Standard"}</span>
+                  <span className="pill">Stimme: {run.voice ? voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice : `Standard${werRunVoice(run) ? ` (${werRunVoice(run)?.name})` : ""}`}</span>
+                  <span className="pill">Engine: {seedEngineLabel(run.engine)}</span>
                 </div>
                 {isRunActive(run.status) ? (
                   <div className="button-row">
@@ -2134,6 +2195,7 @@ export function AdminApp() {
                           <th>Median</th>
                           <th>Worst</th>
                           {run.seed_leaderboard.some((item) => item.failure_count > 0) ? <th>Fail</th> : null}
+                          <th>Bester Seed</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2145,6 +2207,7 @@ export function AdminApp() {
                             <td>{formatPercent(item.wer_p50)}</td>
                             <td>{formatPercent(item.wer_max)}</td>
                             {run.seed_leaderboard.some((entry) => entry.failure_count > 0) ? <td>{item.failure_count}</td> : null}
+                            <td>{renderSaveSeedCell(run, item.seed)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -2297,18 +2360,25 @@ export function AdminApp() {
                   <span>Referenztext</span>
                   <p>{voice.ref_text || "-"}</p>
                 </div>
-                <div className="voice-seed-row">
-                  <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed
-                    <input
-                      type="number"
-                      min="0"
-                      max="2147483647"
-                      placeholder="kein Seed"
-                      value={voiceSeedEdits[voice.voice_id] ?? (voice.seed ?? "")}
-                      onChange={(event) => setVoiceSeedEdits((current) => ({ ...current, [voice.voice_id]: event.target.value }))}
-                    />
-                  </label>
-                  <button className="secondary-button" type="button" onClick={() => void handleSaveVoiceSeed(voice)}>Seed speichern</button>
+                <div className="voice-seed-list">
+                  {SEED_ENGINES.map((engine) => {
+                    const editKey = `${voice.voice_id}:${engine.id}`;
+                    return (
+                      <div key={engine.id} className="voice-seed-row">
+                        <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed {engine.label}{activeSeedEngine === engine.id ? " (aktiv)" : ""}
+                          <input
+                            type="number"
+                            min="0"
+                            max="2147483647"
+                            placeholder="kein Seed"
+                            value={voiceSeedEdits[editKey] ?? (voiceEngineSeed(voice, engine.id) ?? "")}
+                            onChange={(event) => setVoiceSeedEdits((current) => ({ ...current, [editKey]: event.target.value }))}
+                          />
+                        </label>
+                        <button className="secondary-button" type="button" onClick={() => void handleSaveVoiceSeed(voice, engine.id)}>Seed speichern</button>
+                      </div>
+                    );
+                  })}
                 </div>
                 {voiceAudioUrls[voice.voice_id] ? <audio controls src={voiceAudioUrls[voice.voice_id]} /> : null}
               </article>

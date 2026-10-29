@@ -168,6 +168,7 @@ class QueueService:
                 'Split it into smaller requests.'
             )
         self._apply_default_voice(request)
+        seed_from_profile = request.seed is None
         self._apply_voice_seed(request)
         self._validate_request_voice_model(request)
         spoken_text, text_optimization = await self._optimize_spoken_text(request, text, owner_scope)
@@ -195,6 +196,7 @@ class QueueService:
             stream_consumer=stream_consumer,
             text_optimization=text_optimization,
             spoken_text=spoken_text if text_optimization is not None else None,
+            seed_from_profile=seed_from_profile,
         )
         job.metrics['sentences_total'] = len(sentences)
         state = RequestState(
@@ -1575,12 +1577,22 @@ class QueueService:
             request.voice = profile.voice_id
 
     def _apply_voice_seed(self, request: SpeechRequest) -> None:
-        # A voice profile may carry its benchmarked seed; it applies only when the request sends no seed.
+        # A voice profile may carry its benchmarked seed; it applies only when the request sends no seed. Seeds
+        # are per engine: the active one (read live, a switch rewrites settings.runtime_backend) picks the seed.
         if request.seed is not None:
             return
         profile = self._voice_profile_for_request(request)
-        if profile is not None and profile.seed is not None:
-            request.seed = int(profile.seed)
+        seed = profile.seed_for_engine(self.settings.runtime_backend) if profile is not None else None
+        if seed is not None:
+            request.seed = int(seed)
+
+    def reapply_voice_seed(self, job: JobRecord) -> None:
+        """Resolve the profile seed again for the engine active now (a held job requeued after an engine switch).
+        A seed the client sent stays as it is."""
+        if not job.seed_from_profile:
+            return
+        job.request.seed = None
+        self._apply_voice_seed(job.request)
 
     def _validate_request_voice_model(self, request: SpeechRequest) -> None:
         task_type = self._task_type_for_request(request)
@@ -2241,20 +2253,35 @@ class WerBenchmarkService:
         self.settings = settings
         self._tasks: dict[str, asyncio.Task[Any]] = {}
 
-    def best_seed_for_voice(self, voice_name: str | None) -> int | None:
-        """The seed saved on the voice (its benchmarked best), or None. An unknown or empty voice has none."""
+    def _voice_profile(self, voice_name: str | None) -> Any:
+        """The voice profile a run renders with: its own voice, else the default voice; None when there is none."""
         name = (voice_name or self.settings.default_voice or '').strip()
         if not name:
             return None
         lowered = name.casefold()
-        profile = next(
+        return next(
             (p for p in self.store.voice_profiles.values() if name in (p.voice_id, p.name)),
             None,
         ) or next(
             (p for p in self.store.voice_profiles.values() if lowered in (p.voice_id.casefold(), str(p.name or '').casefold())),
             None,
         )
-        return profile.seed if profile is not None else None
+
+    def best_seed_for_voice(self, voice_name: str | None) -> int | None:
+        """The seed saved on the voice for the active engine (its benchmarked best), or None. An unknown or empty
+        voice has none."""
+        profile = self._voice_profile(voice_name)
+        return profile.seed_for_engine(self.settings.runtime_backend) if profile is not None else None
+
+    def _check_engine(self, run: dict[str, Any]) -> None:
+        """Stop a run whose engine was switched away: one leaderboard must not mix two engines' results."""
+        engine = run.get('engine')
+        active = self.settings.runtime_backend
+        if engine is not None and active != engine:
+            raise RuntimeError(
+                f'The engine was switched from {engine} to {active} during the run; '
+                'the run was stopped so results of two engines do not mix. Start a new run.'
+            )
 
     async def cancel_run(self, run_id: str) -> WerBenchmarkRunResponse:
         """Stop a running benchmark: end its task and cancel its queued and running synthesis jobs."""
@@ -2285,6 +2312,7 @@ class WerBenchmarkService:
     async def create_run(self, payload: WerBenchmarkCreateRequest) -> WerBenchmarkRunResponse:
         run_id = f'wer_{uuid.uuid4().hex[:10]}'
         seed_values = self._seed_values(payload)
+        resolved_profile = self._voice_profile(payload.request.voice)
         run: dict[str, Any] = {
             'run_id': run_id,
             'name': payload.name,
@@ -2308,6 +2336,10 @@ class WerBenchmarkService:
             'sentence_cache_key': None,
             'exclusive': payload.exclusive,
             'voice': payload.request.voice,
+            # The profile the run renders with, fixed at the start (a later default-voice change must not move a
+            # leaderboard seed to another voice).
+            'resolved_voice': resolved_profile.voice_id if resolved_profile is not None else None,
+            'engine': self.settings.runtime_backend,
             'results': [],
             'error_message': None,
         }
@@ -2368,7 +2400,11 @@ class WerBenchmarkService:
 
         for requested_seed in seed_values:
             # No seed in the benchmark means the voice's saved best seed, the same seed a request without one gets.
-            seed = requested_seed if requested_seed is not None else self.best_seed_for_voice(payload.request.voice)
+            seed = (
+                requested_seed
+                if requested_seed is not None
+                else self.best_seed_for_voice(run.get('resolved_voice') or payload.request.voice)
+            )
             syntheses: list[dict[str, Any]] = []
 
             # Keep TTS batching honest: submit a whole wave together, wait for that wave's audio,
@@ -2377,9 +2413,12 @@ class WerBenchmarkService:
             indexed_sentences = list(enumerate(sentences, start=1))
             for start in range(0, len(indexed_sentences), wave_size):
                 wave = indexed_sentences[start : start + wave_size]
+                self._check_engine(run)
                 wave_results = await asyncio.gather(
                     *(self._synthesize_wer_item(index, sentence, payload, seed=seed) for index, sentence in wave)
                 )
+                # A switch while the wave rendered may have moved its held jobs to the new engine: drop the wave.
+                self._check_engine(run)
                 for item in wave_results:
                     if item.get('success'):
                         syntheses.append(item)
@@ -2996,6 +3035,8 @@ class WerBenchmarkService:
             sentence_cache_key=run.get('sentence_cache_key'),
             exclusive=run.get('exclusive', True),
             voice=run.get('voice'),
+            resolved_voice=run.get('resolved_voice'),
+            engine=run.get('engine') or 'omnivoice',
             summary=self._summary(results, total_per_seed * seed_count),
             seed_leaderboard=self._seed_leaderboard(results, total_per_seed),
             results=results if include_results else [],

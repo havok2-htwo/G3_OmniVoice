@@ -73,7 +73,17 @@ from ..domain.models import (
     WerBenchmarkDeviationsResponse,
     WerBenchmarkRunResponse,
 )
-from ..domain.state import STREAM_CHUNKS, STREAM_EVENTS, VoiceProfileRecord, live_mean, live_throughput_x, new_id, utcnow
+from ..domain.state import (
+    SEED_ENGINES,
+    STREAM_CHUNKS,
+    STREAM_EVENTS,
+    VoiceProfileRecord,
+    live_mean,
+    live_throughput_x,
+    new_id,
+    seed_engine_key,
+    utcnow,
+)
 from ..runtime_v2 import (
     DEFAULT_VOICE_DESIGN_INSTRUCT,
     OMNIVOICE_MODEL_ID,
@@ -374,6 +384,7 @@ def _voice_items(request: Request, *, include_details: bool = False) -> list[Voi
             filename=voice.filename if include_details else None,
             has_audio=bool(voice.audio_bytes) if include_details else False,
             seed=voice.seed if include_details else None,
+            engine_seeds=voice.all_engine_seeds() if include_details else {},
         )
         for voice in sorted(store.voice_profiles.values(), key=lambda item: item.created_at, reverse=True)
     ]
@@ -1501,13 +1512,20 @@ async def update_voice_profile(request: Request, voice_id: str, payload: VoicePr
     voice = store.voice_profiles.get(voice_id)
     if voice is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Voice not found')
+    # Seeds are per engine (see VoiceProfileRecord.seed_for_engine); no engine is the OmniVoice seed.
+    engine = payload.engine if payload.engine is not None else 'omnivoice'
+    if seed_engine_key(engine) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f'Unknown engine: {engine}. Use one of {", ".join(SEED_ENGINES)}.',
+        )
     if 'name' in payload.model_fields_set and payload.name is not None:
         name = payload.name.strip()
         if not name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Name must not be empty.')
         voice.name = name
     if 'seed' in payload.model_fields_set:
-        voice.seed = payload.seed
+        voice.set_seed_for_engine(engine, payload.seed)
     store.save_voices(request.app.state.settings.data_dir)
     await request.app.state.events.publish('dashboard.snapshot', {'reason': 'voice.updated'})
     return next(item for item in _voice_items(request, include_details=True) if item.voice_id == voice_id)

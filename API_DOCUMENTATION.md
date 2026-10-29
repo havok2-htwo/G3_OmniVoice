@@ -1208,6 +1208,36 @@ Persistence:
 - normalized audio is stored as `data/voices/<voice_id>.wav`
 - metadata is stored in `data/voice_profiles.json`
 
+### `PATCH /api/admin/voices/{voice_id}`
+
+Purpose:
+
+- renames a voice profile and/or sets its best seed for one engine
+
+Request (every field optional):
+
+```json
+{ "name": "SonjaV3", "seed": 41, "engine": "ming" }
+```
+
+| Field | Description |
+| --- | --- |
+| `name` | new display name (not empty) |
+| `seed` | best seed `0..2147483647`; `null` clears it |
+| `engine` | engine the seed belongs to: `omnivoice` (default when omitted), `ming` or `phonon`; anything else is `400` |
+
+Behavior:
+
+- seeds are per engine: a request without a seed (and a WER run without a seed) uses the voice's seed for the
+  engine that is active at that moment, read live after an engine switch (`mock` uses the OmniVoice seed); a
+  queued job held through an engine switch gets the new engine's seed (a seed the client sent stays)
+- `seed` in the response is the OmniVoice seed (unchanged for older clients); `engine_seeds` lists every engine's
+  seed, OmniVoice included, e.g. `{"omnivoice": 9301, "ming": 41}`; `GET /api/admin/voices` returns both fields
+- Phonon does not use voice profiles, so a Phonon seed is stored but only applies once Phonon clones from profiles
+- shipped presets may carry `engine_seeds` in `voice_presets/presets.json`; each engine's value is filled once into
+  an existing preset voice that has no seed for that engine (operator values are never overwritten, cleared ones stay
+  cleared, and a later shipped value for an engine that was already filled is not applied)
+
 ### `DELETE /api/admin/voices/{voice_id}`
 
 Purpose:
@@ -1303,7 +1333,7 @@ Purpose:
 Purpose:
 
 - generates reference sentences with vLLM
-- synthesizes them with OmniVoice
+- synthesizes them with the active engine (OmniVoice, Ming or Phonon)
 - transcribes the audio with the configured Whisper server
 - computes word error rate and optional seed leaderboard
 
@@ -1341,6 +1371,12 @@ Behavior:
 - Whisper transcriptions are batched by `transcription_concurrency`
 - WER normalization tolerates common German spelling variants, number words vs digits, and joined/split compounds
 - WER runs, generated source text, transcripts, and sentence cache are in-memory only
+- a run records the engine it runs on (`engine` in the response, the active engine at its start) and the voice
+  profile it renders with (`resolved_voice`: its `voice`, else the default voice at its start, `null` without a
+  profile); without a seed it uses that voice's best seed for that engine
+- an engine switch while the run still renders stops it with status `failed` and an `error_message` naming both
+  engines, so one leaderboard never mixes two engines' results (the TTS wave that saw the switch is dropped); a
+  switch during the Whisper pass after the last TTS wave does not stop it
 
 Response summary shape:
 

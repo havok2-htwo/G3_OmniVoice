@@ -52,6 +52,35 @@ def hash_token(raw_token: str) -> str:
 def generate_api_key() -> str:
     return f'{API_KEY_PREFIX}_{secrets.token_urlsafe(24)}'
 
+# --- per-engine voice seeds (VoiceProfileRecord) ---
+# Engines a voice profile can store a best seed for. The OmniVoice seed lives in VoiceProfileRecord.seed (the field
+# every older profile, preset and PATCH client uses); the others in engine_seeds.
+SEED_ENGINES = ('omnivoice', 'ming', 'phonon')
+MAX_SEED = 2_147_483_647
+
+
+def seed_engine_key(engine: str | None) -> str | None:
+    """The seed slot an engine reads ('mock' renders like OmniVoice); None for an unknown engine."""
+    key = str(engine or '').strip().lower()
+    if key == 'mock':
+        return 'omnivoice'
+    return key if key in SEED_ENGINES else None
+
+
+def clean_engine_seeds(value: Any) -> dict[str, int]:
+    """engine_seeds as read from a file: known non-OmniVoice engines with a valid seed, anything else dropped."""
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, int] = {}
+    for engine, seed in value.items():
+        key = seed_engine_key(engine)
+        if key is None or key == 'omnivoice' or isinstance(seed, bool) or not isinstance(seed, int):
+            continue
+        if 0 <= seed <= MAX_SEED:
+            cleaned[key] = seed
+    return cleaned
+
+
 def _parse_iso(value: Any) -> datetime | None:
     if not value:
         return None
@@ -88,8 +117,33 @@ class VoiceProfileRecord:
     filename: str | None = None
     ref_text: str | None = None
     consent: bool = False
-    # Seed used when a request for this voice sends none (the WER-benchmarked seed of a shipped preset).
+    # Seed used when a request for this voice sends none (the WER-benchmarked seed of a shipped preset). This is
+    # the OmniVoice seed; a seed only fits the engine it was benchmarked on.
     seed: int | None = None
+    # The best seeds for the other engines (ming, phonon), same meaning as seed.
+    engine_seeds: dict[str, int] = field(default_factory=dict)
+
+    def seed_for_engine(self, engine: str | None) -> int | None:
+        key = seed_engine_key(engine)
+        if key == 'omnivoice':
+            return self.seed
+        return self.engine_seeds.get(key) if key is not None else None
+
+    def set_seed_for_engine(self, engine: str, seed: int | None) -> None:
+        key = seed_engine_key(engine)
+        if key is None:
+            raise ValueError(f'Unknown engine: {engine}')
+        if key == 'omnivoice':
+            self.seed = seed
+        elif seed is None:
+            self.engine_seeds.pop(key, None)
+        else:
+            self.engine_seeds[key] = int(seed)
+
+    def all_engine_seeds(self) -> dict[str, int]:
+        """Every engine's seed in one map (OmniVoice included), in SEED_ENGINES order."""
+        seeds = {'omnivoice': self.seed, **self.engine_seeds}
+        return {engine: seeds[engine] for engine in SEED_ENGINES if seeds.get(engine) is not None}
 
 
 @dataclass
@@ -163,6 +217,9 @@ class JobRecord:
     # text that was actually split and spoken. request.input always stays the raw input.
     text_optimization: dict[str, Any] | None = None
     spoken_text: str | None = None
+    # True when the client sent no seed, so request.seed is the voice profile's seed for the engine of the submit
+    # (or None): an engine switch that holds the job resolves it again for the new engine (EngineSwitcher._requeue).
+    seed_from_profile: bool = False
 
     def preview(self, length: int = 80) -> str:
         text = (self.request.input or '').strip()
@@ -543,6 +600,8 @@ class InMemoryStore:
                             ref_text=item.get("ref_text"),
                             consent=item.get("consent", False),
                             seed=item.get("seed"),
+                            # Profiles saved before per-engine seeds have none.
+                            engine_seeds=clean_engine_seeds(item.get("engine_seeds")),
                         )
 
     def save_voices(self, data_dir: Path) -> None:
@@ -566,6 +625,7 @@ class InMemoryStore:
                     "ref_text": record.ref_text,
                     "consent": record.consent,
                     "seed": record.seed,
+                    "engine_seeds": dict(record.engine_seeds),
                 }
             _json_dump(voices_path, payload)
 

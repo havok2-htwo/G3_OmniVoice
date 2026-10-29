@@ -182,13 +182,17 @@ class VoiceProfileListItem(BaseModel):
     ref_text: str | None = None
     filename: str | None = None
     has_audio: bool = False
+    # The OmniVoice seed (kept for older clients); engine_seeds holds every engine's seed, OmniVoice included.
     seed: int | None = None
+    engine_seeds: dict[str, int] = Field(default_factory=dict)
 
 
 class VoiceProfilePatchRequest(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     # The seed a request for this voice uses when it sends none (the benchmarked best seed). null clears it.
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    # The engine the seed belongs to (omnivoice, ming, phonon); omitted means omnivoice.
+    engine: str | None = Field(default=None, max_length=32)
 
 
 class VoiceCatalogResponse(BaseModel):
@@ -709,6 +713,10 @@ class WerBenchmarkRunResponse(BaseModel):
     sentence_cache_key: str | None = None
     exclusive: bool
     voice: str | None = None
+    # The voice profile id the run renders with (voice, else the default voice at the start); None without one.
+    resolved_voice: str | None = None
+    # The engine the run renders on (the active one at its start); a switch during the run stops it.
+    engine: str = 'omnivoice'
     summary: WerBenchmarkSummary
     seed_leaderboard: list[WerBenchmarkSeedSummary] = Field(default_factory=list)
     # The run list leaves the per-sample results out (a 16 x 1000 run is 16 000 items); fetch deviations separately.

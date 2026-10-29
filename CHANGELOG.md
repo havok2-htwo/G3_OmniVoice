@@ -4,6 +4,26 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - best seed per engine
+
+- A voice profile stores one best seed per engine: `seed` stays the OmniVoice seed (older profiles, presets and PATCH
+  clients unchanged), `engine_seeds` holds the Ming and Phonon seeds. A request or WER run without a seed uses the
+  seed of the engine that is active at that moment, so Ming no longer gets the OmniVoice-benchmarked seed. A queued
+  job held through an engine switch is given the new engine's seed (a seed the client sent stays).
+- `PATCH /api/admin/voices/{id}` takes an optional `engine` (`omnivoice` default, `ming`, `phonon`; unknown is 400);
+  voice lists return `engine_seeds` next to `seed`.
+- `voice_presets/presets.json` may carry `engine_seeds`; existing installs get each engine's value once in a preset
+  voice without a seed for that engine (`data/voice_presets_engine_seeds.json` remembers it, operator values and
+  cleared slots win).
+- WER runs report the `engine` they render on and the voice profile they render with (`resolved_voice`, fixed at the
+  start); an engine switch while a run still renders stops it with an error message instead of mixing two engines
+  in one leaderboard.
+- Admin panel: one seed field per engine on every voice, the WER voice list shows the active engine's seed, each run
+  shows its engine, and every seed leaderboard row has a button that saves that seed for the run's voice and engine.
+- Tests: a Ming GPU test renders two voice prompts, German and English and four seeds in one batch and compares
+  every row bit-exactly with its solo render; a queue test shows jobs with different voices and seeds share one
+  concurrent dispatch.
+
 ### Added - Ming-3.0-tts engine, live engine switch
 
 - `runtime_backend=ming` serves inclusionAI Ming-3.0-tts 0.5B next to OmniVoice and Phonon, through the same

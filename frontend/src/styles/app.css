@@ -557,6 +557,11 @@ input[type="checkbox"] {
   overflow-wrap: anywhere;
 }
 
+.voice-seed-list {
+  display: grid;
+  gap: 8px;
+}
+
 .voice-card-buttons {
   display: flex;
   align-items: center;

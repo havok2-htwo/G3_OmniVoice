@@ -157,9 +157,10 @@ their saved values, which take precedence over these defaults.
   seed 9301) and `Sonja` (14.4 s) clone profiles ship with the server (`backend/src/omnivoice_tts_server/voice_presets/`) and are added to the
   voice store on start when missing; requests without a voice use `SonjaV2`, and
   `Auto Voice` still renders as AutoVoice. A deleted preset is not re-added
-  (`data/voice_presets_seeded.json`). A voice profile can carry a `seed` that applies
-  to requests for that voice without their own seed (the shipped value comes from the
-  WER seed benchmark; `null` means random).
+  (`data/voice_presets_seeded.json`). A voice profile can carry a best seed per engine
+  that applies to requests for that voice without their own seed: `seed` for OmniVoice
+  (the shipped values come from the OmniVoice WER seed benchmark), `engine_seeds` for
+  Ming and Phonon; the active engine picks its own, `null` means random.
 - `bfloat16`, `sdpa` attention with cuDNN first (`sdpa_prefer_cudnn`), packed CFG rows
   (`packed_cfg`), `torch.compile` on, CUDA cache trim once the queue runs empty
   (`cuda_memory_trim_after_batch`), warmup on start

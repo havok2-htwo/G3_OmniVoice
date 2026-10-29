@@ -616,6 +616,10 @@ class EngineSwitcher:
                 if job is None or job.status in _TERMINAL_JOB:
                     continue
                 job.request = map_speech_request(settings, job.request)
+                # A seed taken from the voice profile belongs to the old engine: resolve it for the new one.
+                reapply_seed = getattr(queue, 'reapply_voice_seed', None)
+                if callable(reapply_seed):
+                    reapply_seed(job)
                 request_state = store.request_states.get(job_id)
                 group_key = getattr(queue, '_group_key_for_request', None)
                 if request_state is not None and callable(group_key):

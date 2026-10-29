@@ -198,6 +198,35 @@ Ming's German intelligibility is on par with OmniVoice: equal or better with raw
 - **Clients that send digits:** they should keep the server's `deterministic` text optimization on; `text_optimization_default` is an admin setting.
 - **What the WER does not measure:** voice similarity and prosody. Nobody listened to the samples systematically.
 
+### 4a. Seed search (2026-10-29): no gain for Ming
+
+Same method as the OmniVoice seed search: the server's own WER benchmark (`POST /api/admin/wer-benchmarks/runs`),
+vLLM sentences, G3_Whisper on 192.168.20.146:7861, tolerance 2, text optimization `off` (always off for WER jobs),
+preset "Ming 32GB VRAM", voices SonjaV2 and SonjaV3. Ming's default seed is 0.
+
+| Run | Sentences | Seeds | SonjaV2 exact (best / seed 0 / worst) | SonjaV3 exact (best / seed 0 / worst) |
+| --- | --- | --- | --- | --- |
+| Sweep | 200 everyday sentences | 0–9 | 199 (seeds 1, 3, 6, 9) / 198 / 197 | 200 (seeds 2, 5, 9) / 199 / 198 |
+| Check | 200 fresh, with prices, times, dates | 5 per voice | 171 (seed 1) / 167 / 167 (seed 9) | 175 (seed 7) / 174 / 170 (seed 9) |
+
+- **The ranking does not carry over:** seeds 2, 5 and 9 were the best SonjaV3 seeds in the sweep but tied with or
+  fell below seed 0 on fresh sentences, and seed 7 went from last place to first. The spread is 1–5 sentences out of
+  200 in every run, which is noise.
+- **Most errors happen with every seed:** 28 of the 38 (SonjaV2) and 23 of the 35 (SonjaV3) deviating check
+  sentences deviate for all five seeds. They are number formats ("14 Uhr 35" transcribed as "14:35 Uhr",
+  "24 Euro und 50 Cent" as "24,50 €"; scoring artifacts that hit every engine) and raw dates and large numbers
+  (`30.04.2023`, `1250 Euro`), which the `deterministic` text optimization handles in production.
+- **Why Ming differs from OmniVoice:** Ming's LLM picks each next latent greedily (temperature 0); the seed only
+  drives the flow head's noise (sigma 0.25) per 80 ms latent. Content and pronunciation are decided by the
+  deterministic part, so the seed changes the sound slightly but rarely the words. OmniVoice diffuses the whole
+  utterance from seeded noise, so a seed can decide whether a word comes out right.
+- **Decision:** no Ming seeds in `presets.json`; Ming keeps seed 0. Per-engine voice seeds (`engine_seeds`) stay
+  available for voices where a sweep does show a stable winner.
+- **First sweep discarded:** the first sweep (25 seeds) and its check ran on sentence pools that partly came from the
+  ASCII-folded template pool and prompts (`fuer`, `naechsten`), which Ming reads literally. That was fixed
+  (CHANGELOG "WER test sentences with real umlauts") before the runs above. It showed the same picture: 21 of 25
+  SonjaV2 seeds tied at 198/200.
+
 ## 5. RTX 3090 / shared-card simulation (`bench_ming_vram_cap.py`, in-process)
 
 Under each cap, every slot rendered a 5-sentence German text at once (about 29 s of audio per row, several fragments per row).

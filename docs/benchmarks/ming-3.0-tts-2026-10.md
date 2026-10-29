@@ -222,6 +222,35 @@ preset "Ming 32GB VRAM", voices SonjaV2 and SonjaV3. Ming's default seed is 0.
   utterance from seeded noise, so a seed can decide whether a word comes out right.
 - **Decision:** no Ming seeds in `presets.json`; Ming keeps seed 0. Per-engine voice seeds (`engine_seeds`) stay
   available for voices where a sweep does show a stable winner.
+
+**Second search, 100 seeds then top 10 on 1000 sentences (2026-10-29).** This is the OmniVoice method, and it ran
+after the scorer counts spoken formats as equal (CHANGELOG "WER scorer: one form for spoken times, prices, units and
+ordinals"). Stage 1 used seeds 0–99 on 100 everyday sentences. Stage 2 used the stage-1 top 10 on 1000 fresh sentences
+with prices, times and dates. Voices: SonjaV2, SonjaV3, JarvisV2, Genesis3.
+
+| Voice | Stage 1: seeds at 100/100 | Stage 2 best seed: exact / WER | Seed 0: exact / WER | Best vs seed 0 (sentences better / worse, sign test) |
+| --- | --- | --- | --- | --- |
+| SonjaV2 | almost all | 0: 973 / 0.36 % | 973 / 0.36 % | seed 0 is the best |
+| SonjaV3 | almost all | 7: 979 / 0.29 % | 973 / 0.38 % | 14 / 4, p = 0.03 |
+| JarvisV2 | almost all (seed 0: 99/100) | 1: 978 / 0.34 % | 972 / 0.36 % | 13 / 7, p = 0.26 |
+| Genesis3 | almost all | 8: 974 / 0.35 % | 951* / 0.47 % | 19 / 13, p = 0.38 |
+
+\* 16 of seed 0's Genesis3 jobs and 16 of seed 12's JarvisV2 jobs failed with no result and do not count as exact.
+WER averages cover the successful jobs only.
+
+- **Stage 1 cannot rank Ming:** 99.6–99.95 % of all stage-1 sentences came out exact. The "top 10" are the lowest
+  seed numbers among the ties, and their stage-1 rank does not predict stage 2. Seed 0 ranked first on stage 1 for
+  SonjaV3 and seventh on stage 2. Seed 3 ranked second on stage 1 and last on stage 2.
+- **Stage 2 does not show a stable winner either:** best and worst seed differ by 6–15 sentences out of 1000. Only
+  SonjaV3 seed 7 against seed 0 reaches p < 0.05, and it was picked as the best of 10, so that value says little.
+  The likely explanation is selection noise; a fresh sentence pool would be needed to confirm seed 7.
+- **What stays wrong does not depend on the seed:** 14–20 sentences per voice deviate for 8 or more of the 10 seeds.
+  Most of them have raw multi-digit amounts that Ming misreads: 1250 Euro becomes "1055"/"1075", 195 Euro is
+  garbled, 1299 becomes "1029", and "29 Euro 50" becomes "29 Euro 55". WER jobs run with text optimization off. In
+  production, the `deterministic` optimizer spells these numbers out first. The rest are scorer leftovers ("3 mal"
+  against "dreimal", "Gigabyte" against "GB", "RE 10" against "RE10").
+- **Decision unchanged:** Ming keeps seed 0. The best seeds above (SonjaV3 7, JarvisV2 1, Genesis3 8) are not worse,
+  so setting them as `engine_seeds` costs nothing. The gain is within noise.
 - **First sweep discarded:** the first sweep (25 seeds) and its check ran on sentence pools that partly came from the
   ASCII-folded template pool and prompts (`fuer`, `naechsten`), which Ming reads literally. That was fixed
   (CHANGELOG "WER test sentences with real umlauts") before the runs above. It showed the same picture: 21 of 25

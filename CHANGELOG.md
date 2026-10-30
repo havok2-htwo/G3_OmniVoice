@@ -4,6 +4,22 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - Quick Synthesis on phones: no sound, Stop stuck
+
+- On iOS (every iOS browser, Chrome included), the admin panel's Quick Synthesis generated audio on the GPU but
+  played nothing. The button stayed on "Stoppen" and Stop did nothing. The audio context was created and resumed in
+  the chunk handler, after the tap had passed. WebKit leaves such a context suspended and its `resume()` never settles,
+  so the stream waited forever on the first chunk and the abort never got through.
+- The context is now created and unlocked inside the tap, at the active engine's output rate (Ming's
+  `ming_output_sample_rate`). A context that is no longer running, such as an iOS context "interrupted" by a call, is
+  rebuilt on the next tap. iOS 17+ plays through the ringer switch (`navigator.audioSession`). Chunks are only
+  scheduled and never awaited.
+- Stop resets the button at once, silences queued audio and keeps the stopped run from overwriting a newer one.
+  `streamNdjson` stops reading once aborted.
+- If the browser still blocks live playback, the run finishes normally and the Quick Synthesis card shows the MP3
+  player with a note. Quick Synthesis errors also appear in the card, because on a phone the page banners are out of
+  view.
+
 ### Added - Ming delivery controls for cloned voices
 
 - Synthesis requests take `emotion` (`happy`, `sad`, `angry`, `fearful`, `disgusted`, `surprised`, `neutral`),

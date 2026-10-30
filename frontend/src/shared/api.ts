@@ -613,6 +613,10 @@ export async function streamNdjson(
       if (line) {
         await options.onEvent(JSON.parse(line) as SynthStreamEvent);
       }
+      if (options.signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new DOMException("The stream was aborted.", "AbortError");
+      }
       newlineIndex = buffer.indexOf("\n");
     }
   }

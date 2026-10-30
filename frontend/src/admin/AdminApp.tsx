@@ -490,6 +490,8 @@ export function AdminApp() {
   const [quickTextOptimization, setQuickTextOptimization] = useState<"" | TextOptimizationMode>("");
   const [quickOptimizePreview, setQuickOptimizePreview] = useState<TextOptimizeResponse | null>(null);
   const [quickMetrics, setQuickMetrics] = useState<JobMetrics | null>(null);
+  // Shown inside the Quick Synthesis card: on a phone the page banners sit far above it.
+  const [quickNote, setQuickNote] = useState<{ error: boolean; text: string } | null>(null);
   const [quickAudioUrl, setQuickAudioUrl] = useState("");
   const [quickAudioDownloadName, setQuickAudioDownloadName] = useState("omnivoice-admin-quick.mp3");
   const [quickRunning, setQuickRunning] = useState(false);
@@ -549,6 +551,9 @@ export function AdminApp() {
   const [voiceTranscribing, setVoiceTranscribing] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextPlaybackTimeRef = useRef(0);
+  const quickSourcesRef = useRef(new Set<AudioBufferSourceNode>());
+  // The rate the live context was asked for; a fallback context runs at the hardware rate instead.
+  const audioContextRequestedRateRef = useRef(0);
   const quickAbortRef = useRef<AbortController | null>(null);
   const jobAudioUrlsRef = useRef<Record<string, string>>({});
   const voiceAudioUrlsRef = useRef<Record<string, string>>({});
@@ -1044,30 +1049,73 @@ export function AdminApp() {
     }
   }
 
-  async function ensureAudioContext(nextSampleRate: number) {
+  // Mobile browsers (every iOS browser, Chrome included) only let an AudioContext start inside the tap that asked for
+  // it; a resume() requested later never settles there. So the context is created and resumed synchronously in the
+  // click handler, and chunk playback only schedules onto it without ever waiting for it.
+  function unlockAudioPlayback(sampleRate: number) {
     const AudioContextImpl = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextImpl) throw new Error("Web Audio ist nicht verfuegbar.");
-    if (audioContextRef.current && audioContextRef.current.sampleRate !== nextSampleRate) {
-      await audioContextRef.current.close().catch(() => undefined);
+    if (!AudioContextImpl) return;
+    // iOS 17+: play through the ringer switch instead of staying silent.
+    const audioSession = (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+    if (audioSession) {
+      try {
+        audioSession.type = "playback";
+      } catch {
+        // optional
+      }
+    }
+    // A context that is not running (iOS "interrupted" after a call, or never unlocked) is rebuilt while the tap
+    // still allows it, rather than trusting a resume() that may never take effect.
+    const current = audioContextRef.current;
+    if (current && (current.state !== "running" || audioContextRequestedRateRef.current !== sampleRate)) {
+      if (current.state !== "closed") void current.close().catch(() => undefined);
       audioContextRef.current = null;
-      nextPlaybackTimeRef.current = 0;
     }
     if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContextImpl({ sampleRate: nextSampleRate });
-      nextPlaybackTimeRef.current = 0;
+      audioContextRequestedRateRef.current = sampleRate;
+      try {
+        audioContextRef.current = new AudioContextImpl({ sampleRate });
+      } catch {
+        // Some browsers reject a rate the hardware cannot run; their default rate resamples the chunks instead.
+        try {
+          audioContextRef.current = new AudioContextImpl();
+        } catch {
+          return;
+        }
+      }
     }
-    if (audioContextRef.current.state === "suspended") await audioContextRef.current.resume();
-    return audioContextRef.current;
+    const context = audioContextRef.current;
+    if (context.state !== "running") void context.resume().catch(() => undefined);
+    // Older iOS only unlocks once something was started within the gesture.
+    const silence = context.createBufferSource();
+    silence.buffer = context.createBuffer(1, 1, context.sampleRate);
+    silence.connect(context.destination);
+    silence.start();
   }
 
-  async function queuePlayback(float32: Float32Array, nextSampleRate: number) {
-    const context = await ensureAudioContext(nextSampleRate);
-    const buffer = context.createBuffer(1, float32.length, nextSampleRate);
+  function stopQuickPlayback() {
+    for (const source of quickSourcesRef.current) {
+      try {
+        source.stop();
+      } catch {
+        // already ended
+      }
+    }
+    quickSourcesRef.current.clear();
+    nextPlaybackTimeRef.current = 0;
+  }
+
+  function queuePlayback(float32: Float32Array, chunkSampleRate: number) {
+    const context = audioContextRef.current;
+    if (!context || context.state === "closed") return;
+    const buffer = context.createBuffer(1, float32.length, chunkSampleRate);
     buffer.getChannelData(0).set(float32);
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(context.destination);
     const startAt = Math.max(context.currentTime + 0.06, nextPlaybackTimeRef.current);
+    source.onended = () => quickSourcesRef.current.delete(source);
+    quickSourcesRef.current.add(source);
     source.start(startAt);
     nextPlaybackTimeRef.current = startAt + buffer.duration;
   }
@@ -1094,19 +1142,27 @@ export function AdminApp() {
 
   async function handleQuickRun() {
     if (quickRunning) {
+      // Stop must work at once, whatever the run is waiting on: the aborted run only cleans up after itself.
       quickAbortRef.current?.abort();
+      quickAbortRef.current = null;
+      stopQuickPlayback();
+      setQuickRunning(false);
+      setQuickNote(null);
+      setMessage("Quick-Synthesis gestoppt.");
       return;
     }
     if (!quickModel || (quickTaskType !== "VoiceDesign" && !quickVoice)) return;
+    let sampleRate = (mingEngineActive ? snapshot?.settings.ming_output_sample_rate : undefined) ?? snapshot?.settings.sample_rate ?? 24000;
+    stopQuickPlayback();
+    unlockAudioPlayback(sampleRate);
     if (quickAudioUrl) URL.revokeObjectURL(quickAudioUrl);
     setQuickAudioUrl("");
     setQuickAudioDownloadName("omnivoice-admin-quick.mp3");
     setQuickMetrics(null);
+    setQuickNote(null);
     setQuickRunning(true);
     setError("");
-    nextPlaybackTimeRef.current = 0;
     const controller = new AbortController();
-    let sampleRate = snapshot?.settings.sample_rate ?? 24000;
     const chunks: Int16Array[] = [];
     let completedJobId = "";
     quickAbortRef.current = controller;
@@ -1129,7 +1185,8 @@ export function AdminApp() {
           text_optimization: quickTextOptimization || null,
           ...(quickMingActive ? mingDeliveryFields(quickMingDelivery) : {}),
         },
-        onEvent: async (event: SynthStreamEvent) => {
+        onEvent: (event: SynthStreamEvent) => {
+          if (controller.signal.aborted) return;
           if (event.type === "start") {
             completedJobId = event.job_id;
             const info = event.text_optimization;
@@ -1143,7 +1200,7 @@ export function AdminApp() {
             sampleRate = event.sample_rate;
             const decoded = decodePcm16Base64(event.pcm16_b64);
             chunks.push(decoded.int16);
-            await queuePlayback(decoded.float32, event.sample_rate);
+            queuePlayback(decoded.float32, event.sample_rate);
           }
           if (event.type === "done") {
             completedJobId = event.result.job_id || completedJobId;
@@ -1152,35 +1209,51 @@ export function AdminApp() {
           if (event.type === "error") throw new Error(event.message);
         },
       });
+      if (controller.signal.aborted) return;
+      // Blocked live playback (no tap reached the audio context) leaves the player below as the way to listen.
+      const liveBlocked = chunks.length > 0 && audioContextRef.current?.state !== "running";
+      const liveNote = liveBlocked ? " Live-Wiedergabe hat der Browser blockiert, bitte im Player abspielen." : "";
+      if (liveBlocked) setQuickNote({ error: false, text: liveNote.trim() });
       if (completedJobId) {
         try {
           const mp3Blob = await apiFetch<Blob>(
             `/api/admin/jobs/${encodeURIComponent(completedJobId)}/audio?format=mp3`,
             { adminKey, responseType: "blob" },
           );
+          if (controller.signal.aborted) return;
           setQuickAudioDownloadName(`${completedJobId}.mp3`);
           setQuickAudioUrl(URL.createObjectURL(mp3Blob));
-          setMessage("Quick-Synthesis fertig. MP3 ist bereit.");
+          setMessage(`Quick-Synthesis fertig. MP3 ist bereit.${liveNote}`);
         } catch (mp3Error) {
+          if (controller.signal.aborted) return;
           if (chunks.length) {
             setQuickAudioDownloadName(`${completedJobId || "omnivoice-admin-quick"}.wav`);
             setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
           }
-          setError(mp3Error instanceof Error ? `MP3-Export fehlgeschlagen: ${mp3Error.message}` : "MP3-Export fehlgeschlagen.");
-          setMessage("Quick-Synthesis fertig. WAV-Fallback ist bereit.");
+          const mp3Message = mp3Error instanceof Error ? `MP3-Export fehlgeschlagen: ${mp3Error.message}` : "MP3-Export fehlgeschlagen.";
+          setError(mp3Message);
+          setQuickNote({ error: true, text: `${mp3Message}${liveNote}` });
+          setMessage(`Quick-Synthesis fertig. WAV-Fallback ist bereit.${liveNote}`);
         }
       } else if (chunks.length) {
         setQuickAudioDownloadName("omnivoice-admin-quick.wav");
         setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
-        setMessage("Quick-Synthesis fertig. WAV-Fallback ist bereit.");
+        setMessage(`Quick-Synthesis fertig. WAV-Fallback ist bereit.${liveNote}`);
       } else {
         setMessage("Quick-Synthesis fertig.");
       }
     } catch (quickError) {
-      if (!controller.signal.aborted) setError(quickError instanceof Error ? quickError.message : "Quick-Synthesis fehlgeschlagen.");
+      if (!controller.signal.aborted) {
+        const quickMessage = quickError instanceof Error ? quickError.message : "Quick-Synthesis fehlgeschlagen.";
+        setError(quickMessage);
+        setQuickNote({ error: true, text: quickMessage });
+      }
     } finally {
-      if (quickAbortRef.current === controller) quickAbortRef.current = null;
-      setQuickRunning(false);
+      // A stopped run already reset the button; it must not flip a newer run back to idle.
+      if (quickAbortRef.current === controller) {
+        quickAbortRef.current = null;
+        setQuickRunning(false);
+      }
     }
   }
 
@@ -2437,6 +2510,7 @@ export function AdminApp() {
             <button className="primary-button" type="button" onClick={handleQuickRun}>{quickRunning ? "Stoppen" : "Stream starten"}</button>
             <button className="secondary-button" type="button" title={ADMIN_HELP.quickTextOptimization} onClick={() => void handleQuickOptimizePreview()}>Text-Vorschau</button>
           </div>
+          {quickNote ? <div className={`message ${quickNote.error ? "error" : "success"}`} role="status">{quickNote.text}</div> : null}
           {quickOptimizePreview ? (
             <div className="metric-list" title="Gesprochener Text nach der Textoptimierung">
               <div className="metric-row"><span>Sprache</span><strong>{quickOptimizePreview.language ?? "keine"} ({quickOptimizePreview.binding_origin})</strong></div>

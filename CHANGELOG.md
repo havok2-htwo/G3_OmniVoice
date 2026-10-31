@@ -4,6 +4,12 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - Installer leaves Phonon without its runtime
+
+- `install.bat` and the Docker image never installed `ptts`, so the admin panel showed the Phonon engine as
+  `missing_package` on every fresh install. A new backend extra `[phonon]` (`ptts>=0.5,<0.6`, locked at 0.5.0) is now
+  part of both. The installer prints how to get the gated CC-BY-NC-4.0 checkpoint and does not download it itself.
+
 ### Fixed - Quick Synthesis on phones: no sound, Stop stuck
 
 - On iOS (every iOS browser, Chrome included), the admin panel's Quick Synthesis generated audio on the GPU but

@@ -208,7 +208,10 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   keeps the 24 kHz output contract. Install its dependencies with `pip install -e backend[ming]`
   (done by `install.bat`) and its weights with `install.bat -DownloadMing` (into
   `models/Ming-3.0-tts-0.5b`). Ming presets: `Ming 32GB VRAM`, `Ming 24GB VRAM` (RTX 4090/3090),
-  `Ming 24+8 VRAM`, `Ming best performance`.
+  `Ming 24+8 VRAM`, `Ming best performance`. Phonon needs `pip install -e backend[phonon]` (the
+  `ptts` runtime, done by `install.bat`) and its checkpoint in `models/phonon-40m-multilingual`. The
+  checkpoint is gated and CC-BY-NC-4.0 (non-commercial), so it is a manual download, see
+  `docs/RUNTIME_VERSIONS.md`.
 - **Ming delivery controls** - cloned voices on Ming take `emotion`, `speaking_rate`, `pitch`,
   `volume` and `reference_mode` (English values or German aliases such as `fröhlich`, `langsam`,
   `laut`), or a free-form `instructions` text. Inline tags like `[Laughter]` or `[Cough]` are

@@ -95,10 +95,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # [ming] adds the Ming-3.0-tts engine's dependencies (onnxruntime CPU for the CAM++
 # speaker encoder, soxr). Its weights are not in the image: put them into the models volume
 # (models/Ming-3.0-tts-0.5b) or download them from the admin UI after switching to Ming.
+# [phonon] adds ptts, the Gradium Phonon runtime. Its checkpoint is gated and CC-BY-NC-4.0, so
+# it is never in the image either: put it into the models volume (models/phonon-40m-multilingual).
 COPY backend/ ./backend/
 COPY requirements-lock.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e "./backend[ming]" \
+    pip install -e "./backend[ming,phonon]" \
         -c requirements-lock.txt \
         --extra-index-url https://download.pytorch.org/whl/cu130
 

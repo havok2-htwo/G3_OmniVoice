@@ -59,6 +59,27 @@ With Ming active, the admin "Model Control" panel can download them as well. Pre
 "Ming best performance" set `runtime_backend=ming` and the `ming_*` keys (32 / 16 / 16 / 64 slots, measured
 in docs/benchmarks/ming-3.0-tts-2026-10.md).
 
+## Gradium Phonon engine
+
+`runtime_backend=phonon` serves Gradium Phonon 40M on the CPU through the `ptts` Rust runtime
+(MIT OR Apache-2.0). The backend extra `[phonon]` installs it (`install.ps1` installs
+`backend[dev,ming,phonon]`, the Dockerfile `backend[ming,phonon]`):
+
+| Package | Version | Used for |
+| --- | --- | --- |
+| ptts | 0.5.0 | Phonon inference, the version in docs/benchmarks/tts-engine-comparison-2026-10.md |
+
+The extra allows `>=0.5,<0.6`; 0.6.0 exists but is untested here.
+
+The checkpoint is not installed automatically: `gradium/phonon-40m-multilingual` is gated on
+Hugging Face and its weights, tokenizer and voices are CC-BY-NC-4.0 (non-commercial). Accept the
+terms on the model page, then:
+
+```powershell
+& .\.conda-env\Scripts\hf.exe auth login
+& .\.conda-env\Scripts\hf.exe download gradium/phonon-40m-multilingual --local-dir models\phonon-40m-multilingual
+```
+
 ## omnivoice pin
 
 `backend/pyproject.toml` installs upstream `k2-fsa/OmniVoice` master at commit

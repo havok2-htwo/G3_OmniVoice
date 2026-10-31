@@ -35,6 +35,9 @@ dev = ["pytest>=8.0"]
 # Ming-3.0-tts 0.5B engine (omnivoice_tts_server.ming): CAM++ speaker embedding on the CPU, local safetensors weights,
 # streaming 44.1 -> 24 kHz resampling. torch/torchaudio/transformers come with omnivoice.
 ming = ["onnxruntime>=1.20", "safetensors>=0.4", "soxr>=0.5"]
+# Gradium Phonon engine (omnivoice_tts_server.phonon_runtime): the ptts Rust runtime, CPU only. Capped at the
+# minor version the engine was measured with.
+phonon = ["ptts>=0.5,<0.6"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -151,8 +151,8 @@ Invoke-External -Label 'Installing optional Triton for torch.compile' -FilePath 
 )
 
 # [ming] adds the Ming-3.0-tts engine's runtime dependencies (onnxruntime for the CAM++ speaker encoder,
-# soxr for the 44.1 -> 24 kHz stream resampler).
-Invoke-External -Label 'Installing OmniVoice backend package (+ Ming engine extra)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming]")
+# soxr for the 44.1 -> 24 kHz stream resampler). [phonon] adds ptts, the Gradium Phonon runtime.
+Invoke-External -Label 'Installing OmniVoice backend package (+ Ming and Phonon engine extras)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming,phonon]")
 
 $MingDir = Join-Path $ModelsDir 'Ming-3.0-tts-0.5b'
 if ($DownloadMing) {
@@ -195,5 +195,11 @@ Write-Host ''
 Write-Host 'Note: the first OmniVoice startup downloads k2-fsa/OmniVoice (~3 GB) into models\; set OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=false to stay offline.'
 if (-not (Test-Path (Join-Path $MingDir 'config.json'))) {
     Write-Host 'Ming engine: weights not downloaded. Run .\install.bat -DownloadMing, or the admin UI (Engine -> Ming, Model Control -> Download).'
+}
+$PhononDir = Join-Path $ModelsDir 'phonon-40m-multilingual'
+if (-not (Test-Path (Join-Path $PhononDir 'config.json'))) {
+    Write-Host 'Phonon engine: weights not downloaded. They are gated and CC-BY-NC-4.0 (non-commercial): accept the terms at https://huggingface.co/gradium/phonon-40m-multilingual, then:'
+    Write-Host "  .\.conda-env\Scripts\hf.exe auth login"
+    Write-Host "  .\.conda-env\Scripts\hf.exe download gradium/phonon-40m-multilingual --local-dir `"$PhononDir`""
 }
 Write-Host 'Switch the TTS engine (OmniVoice / Ming / Phonon) live in the admin UI; the choice is saved in data\runtime_settings.json.'

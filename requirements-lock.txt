@@ -31,10 +31,13 @@
 #   flashinfer-python==0.6.15.post1 flashinfer-jit-cache==0.6.15.post1+cu130
 #   --extra-index-url https://flashinfer.ai/whl/cu130/
 #
-# Ming-3.0-tts engine (backend extra [ming], install.ps1 installs ".[dev,ming]"):
+# Ming-3.0-tts engine (backend extra [ming], install.ps1 installs ".[dev,ming,phonon]"):
 # onnxruntime (CPU, CAM++ speaker encoder) and soxr (44.1 -> 24 kHz stream resampler) are
 # pinned below (the vendored model code needs no einops/x-transformers/diffusers). Ming's model code is vendored in omnivoice_tts_server/ming (MIT, upstream
 # github.com/inclusionAI/Ming-3.0-tts commit 9332fb9); its weights live in models/Ming-3.0-tts-0.5b.
+#
+# Gradium Phonon engine (backend extra [phonon]): ptts is pinned below; its checkpoint lives in
+# models/phonon-40m-multilingual (gated, CC-BY-NC-4.0, downloaded by hand).
 #
 # Known drift (2026-10-28): the machine's .conda-env still runs omnivoice 0.1.5 and
 # transformers 5.9.0 (the pins below are the 0.2.1 / 5.10.2 stack the Dockerfile uses).
@@ -97,6 +100,7 @@ pluggy==1.6.0
 pooch==1.9.0
 protobuf==7.35.0
 psutil==7.2.2
+ptts==0.5.0
 pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.14.1

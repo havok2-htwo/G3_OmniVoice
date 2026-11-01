@@ -14,11 +14,13 @@ picks preferred_device by matching the detected CUDA cards' total memory (machin
 number their cards differently), see resolve_presets. Single-card tiers never set it.
 
 Engine tiers ("Ming 32GB VRAM", "Ming 24GB VRAM", "Ming 24+8 VRAM", "Ming best
-performance") also set runtime_backend='ming' and the ming_* keys; saving such a preset
-switches the engine live. The OmniVoice tiers deliberately do NOT carry runtime_backend:
-their values stay byte-identical (and the first-start tier never pins an engine), so
-applying one only tunes the OmniVoice keys. Switch back to OmniVoice with the engine
-selector (or POST /api/admin/runtime/backend), then apply the OmniVoice tier.
+performance") also set runtime_backend='ming' and the ming_* keys. There runtime_backend
+names the engine the preset belongs to (preset_engine): the admin lists it under that
+engine and loading or saving a preset never switches the engine. The OmniVoice tiers
+deliberately do NOT carry runtime_backend: their values stay byte-identical (and the
+first-start tier never pins an engine), so applying one only tunes the OmniVoice keys.
+Change the engine with the engine selector (or POST /api/admin/runtime/backend), then
+apply a tier of that engine.
 
 Saved presets live in <data_dir>/settings_presets.json ({name: {name, values,
 created_at}}); they cannot reuse a built-in name, and their values are filtered to

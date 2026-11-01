@@ -555,11 +555,12 @@ Response shape:
 | `speed` | yes | no (see `speaking_rate`) | no |
 | `seed` | yes | yes | yes |
 | `language` | yes | yes | no |
-| `instructions` | no while Base is selected | yes | no |
+| `instructions` | no with Base or a `local/...` selected | yes | no |
 | `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
 
-`instructions` on OmniVoice applies to a request that names the AutoVoice or VoiceDesign alias, so the flag follows the
-selection: a Base clone does not read it, a selected `local/...` checkpoint does.
+On OmniVoice each request's task type decides, so `instructions` here means "honored for clone requests": a clone does
+not read it, also not on a selected `local/...` checkpoint. Built-in voices and requests naming the AutoVoice or
+VoiceDesign alias still read `instructions`, whatever the flag says. A saved alias that is still the selection reports `true`.
 
 During a live switch the route answers at once and reports the engine new requests will go to, with `loaded: false`.
 
@@ -1018,8 +1019,9 @@ Response:
 weights when it loads), `downloading`, `missing_package` (install `backend[ming]` / `ptts`) or
 `missing_model` (`detail` says how to get the weights). `available` means a switch can start now;
 a missing Ming model cannot be switched to. `downloadable` means
-`POST /api/admin/models/download` can fetch the weights: OmniVoice with downloads allowed, Ming
-while its model is missing, never Phonon (gated repository, CC-BY-NC-4.0, a manual download).
+`POST /api/admin/models/download` can fetch the weights: OmniVoice with downloads allowed or while
+its weights are missing, Ming while its model is missing, never Phonon (gated repository,
+CC-BY-NC-4.0, a manual download).
 A running download sets `downloadable` and `available` to `false`, a failed one shows in `detail`.
 `loaded` is read from the engine and only ever `true` on the active one.
 `settings_fields` lists the `PUT /api/admin/settings` fields that engine reads,
@@ -1046,10 +1048,12 @@ Sequence:
 4. the settings the old engine rewrote (model list, default model, built-in voices) get their
    OmniVoice values back, the old engine's per-engine values go to its profile and the new engine's
    are applied, the new engine is built and bound to the queue. Without a profile yet Ming starts
-   from all values of the `Ming 24GB VRAM` tier, the others keep the current values; the startup does
-   the same for the engine that is saved or pinned by `OMNIVOICE_TTS_RUNTIME_BACKEND` (keys the
-   environment sets explicitly keep their env value). A top-level `preferred_device` edited in the
-   file wins over the profile of the engine the file was saved under.
+   from the values of the `Ming 24GB VRAM` tier except `ming_output_sample_rate`, which keeps its
+   current value, so clients of a 44100 host get the same rate; the others keep the current values.
+   The startup does the same for the engine that is saved or pinned by
+   `OMNIVOICE_TTS_RUNTIME_BACKEND` (keys the environment sets explicitly keep their env value). A
+   top-level `preferred_device` edited in the file wins over the profile of the engine the
+   file was saved under; when it differs from that profile, the other engines' profiles take it too.
 5. the held jobs go back to the front of the queue, the worker restarts and the new engine
    loads its model (`switch.message` "Modell wird geladen.")
 

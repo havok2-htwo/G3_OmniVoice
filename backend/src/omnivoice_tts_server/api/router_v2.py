@@ -1248,7 +1248,8 @@ async def list_settings_presets(request: Request, engine: str | None = None) -> 
     return SettingsPresetListResponse(presets=[SettingsPresetItem(**item) for item in items])
 
 
-@admin.put('/settings/presets/{name}', response_model=SettingsPresetItem)
+# :path because a preset name may hold a slash: the server decodes %2F before it routes.
+@admin.put('/settings/presets/{name:path}', response_model=SettingsPresetItem)
 async def save_settings_preset(request: Request, name: str, payload: SettingsPresetSaveRequest) -> SettingsPresetItem:
     data_dir = request.app.state.settings.data_dir
     try:
@@ -1258,7 +1259,7 @@ async def save_settings_preset(request: Request, name: str, payload: SettingsPre
     return SettingsPresetItem(**entry)
 
 
-@admin.delete('/settings/presets/{name}')
+@admin.delete('/settings/presets/{name:path}')
 async def delete_settings_preset(request: Request, name: str) -> dict[str, bool]:
     try:
         deleted = _delete_preset(request.app.state.settings.data_dir, name)
@@ -1730,8 +1731,10 @@ def _capabilities(request: Request) -> CapabilitiesResponse:
     else:
         sample_rate = getattr(synthesizer, 'sample_rate', settings.sample_rate)
     options = {name: name in spec.client_options for name in CapabilityOptions.model_fields}
-    if backend == 'omnivoice' and model.endswith('Base'):
-        # A clone's generate() takes no instruct; only the client aliases AutoVoice and VoiceDesign read instructions.
+    if backend == 'omnivoice' and (model.endswith('Base') or model.startswith('local/')):
+        # Each request's task type decides, so the flag means "honored for clone requests": a clone's generate() takes
+        # no instruct, also on a selected local/... that a Base request runs on. Built-in voices and the AutoVoice and
+        # VoiceDesign aliases still read instructions.
         options['instructions'] = False
     return CapabilitiesResponse(
         engine=backend,

@@ -197,6 +197,21 @@ def test_empty_long_or_keyless_presets_are_rejected(tmp_path) -> None:
         presets.save_preset(tmp_path, 'only unknown keys', {'nonsense': 1, 'theme': 'onyx'}, now_iso=NOW)
 
 
+def test_preset_name_with_slash_saves_and_deletes(monkeypatch) -> None:
+    # The admin encodes the name, the server decodes %2F before routing: the name must still reach the route.
+    _cards(monkeypatch, 24576, 8192)
+    client = make_client()
+    try:
+        response = client.put('/api/admin/settings/presets/lab%2Fnight', json={'values': {'max_batch_size': 3}})
+        assert response.status_code == 200, response.text
+        assert response.json()['name'] == 'lab/night'
+        assert 'lab/night' in [preset['name'] for preset in client.get('/api/admin/settings/presets').json()['presets']]
+        assert client.delete('/api/admin/settings/presets/lab%2Fnight').status_code == 200
+    finally:
+        client.__exit__(None, None, None)
+        client._temp_data_dir.cleanup()
+
+
 def test_admin_preset_routes(monkeypatch) -> None:
     _cards(monkeypatch, 24576, 8192)
     client = make_client()

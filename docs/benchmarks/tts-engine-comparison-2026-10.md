@@ -13,8 +13,8 @@ tuned first (section 3) and then measured with the same method.
 - **Ming 32 / Ming 64**: `ming_max_slots` = `max_parallel_requests` = 32 or 64, `batch_wait_ms` 0, CUDA graphs, bf16.
 - **Phonon** (best config from section 3): `phonon_quant` q4k, `phonon_workers` 8, `phonon_threads` 0
   (= 1 Rust thread per engine on 16 logical CPUs), `max_batch_size` = `max_parallel_requests` = 16, `batch_wait_ms` 30.
-  The three `phonon_*` values are not runtime settings; they were set with `OMNIVOICE_TTS_PHONON_QUANT`,
-  `OMNIVOICE_TTS_PHONON_WORKERS` and `OMNIVOICE_TTS_PHONON_THREADS`.
+  The three `phonon_*` values are persisted runtime settings: for a benchmark run pass them with
+  `--set phonon_quant=q4k --set phonon_workers=8 --set phonon_threads=0`.
 - All engines: `max_queue_size` 256, language `de`. Voice `SonjaV2` for OmniVoice and Ming, `default` for Phonon
   (the only voice Phonon mode has).
 

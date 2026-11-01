@@ -163,6 +163,10 @@ assert set(ENGINE_TUNED_FIELDS) <= set(ServerSettingsUpdateRequest.model_fields)
 CLIENT_ONLY_ALIAS_SUFFIXES = ('-AutoVoice', '-VoiceDesign')
 # The built-in tier an engine starts from while it has no profile yet.
 ENGINE_DEFAULT_TIERS = {'ming': 'Ming 24GB VRAM'}
+# Tier keys a start or switch without a profile leaves alone. The sample rate is what clients of this host get, not
+# tuning: a saved 44100 stays, and nothing saved gives the code default, which equals the tier's value. Applying a tier
+# as a preset still sets it, because the PUT sends it.
+TIER_KEYS_NOT_STARTED_WITH = ('runtime_backend', 'ming_output_sample_rate')
 
 
 def engine_spec(backend: str | None) -> EngineSpec | None:
@@ -228,8 +232,14 @@ def engine_info(spec: EngineSpec, settings: Settings, synthesizer: Any = None) -
         model_id = 'k2-fsa/OmniVoice'
         model_dir = str(Path(settings.models_root_dir) / 'OmniVoice')
         model_present = _omnivoice_model_present(settings)
-        fetched_at_load = downloadable = bool(settings.allow_model_downloads)
-        hint = 'Download beim ersten Laden (allow_model_downloads).'
+        fetched_at_load = bool(settings.allow_model_downloads)
+        # The download route turns allow_model_downloads on itself: with the flag off and no weights it is the only way
+        # back from another engine.
+        downloadable = fetched_at_load or not model_present
+        hint = (
+            'Download beim ersten Laden (allow_model_downloads).' if fetched_at_load
+            else 'Download hier im Admin (schaltet allow_model_downloads ein).'
+        )
     elif spec.id == 'ming':
         model_id = settings.ming_model_id
         model_dir = str(settings.ming_model_dir)
@@ -328,7 +338,7 @@ def default_tier_values(backend: str) -> dict[str, Any]:
         return {}
     from .presets import BUILTIN_PRESETS
 
-    return {key: value for key, value in BUILTIN_PRESETS[name]['values'].items() if key != 'runtime_backend'}
+    return {key: value for key, value in BUILTIN_PRESETS[name]['values'].items() if key not in TIER_KEYS_NOT_STARTED_WITH}
 
 
 def engine_start_values(settings: Settings, backend: str) -> dict[str, Any]:

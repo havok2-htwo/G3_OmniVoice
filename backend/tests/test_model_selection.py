@@ -615,6 +615,68 @@ def test_start_with_a_saved_ming_and_no_profile_gives_a_tuned_ming_server(tmp_pa
     assert settings.engine_profiles['ming']['max_parallel_requests'] == 16
 
 
+@pytest.mark.parametrize('environ', [None, {'OMNIVOICE_TTS_RUNTIME_BACKEND': 'ming'}])
+def test_start_without_a_profile_keeps_the_saved_ming_sample_rate(tmp_path, environ) -> None:
+    _write_saved(tmp_path, runtime_backend='ming', ming_output_sample_rate=44100, ming_max_slots=8)
+    settings = _started(tmp_path, environ)
+    assert settings.ming_output_sample_rate == 44100, 'clients of this host keep their rate'
+    assert (settings.ming_max_slots, settings.max_parallel_requests) == (16, 16), 'the rest of the tier applies'
+
+
+def test_start_without_a_saved_ming_sample_rate_gives_the_tiers_rate(tmp_path) -> None:
+    _write_saved(tmp_path, runtime_backend='ming')
+    assert _started(tmp_path).ming_output_sample_rate == MING_TIER['ming_output_sample_rate']
+
+
+class RateFollowingMing(FakeMingSynthesizer):
+    """The real engine takes its rate from the settings (ming_runtime.py); FakeMingSynthesizer stays at 24000."""
+
+    def __init__(self, settings, store) -> None:
+        super().__init__(settings, store)
+        self.sample_rate = int(settings.ming_output_sample_rate)
+
+
+def _assert_ming_rate(client, rate: int) -> None:
+    assert client.app.state.settings.ming_output_sample_rate == rate
+    assert _saved(client)['ming_output_sample_rate'] == rate
+    assert client.get('/api/v1/capabilities').json()['sample_rate'] == rate
+
+
+@pytest.mark.parametrize('rate', [24000, 44100])
+def test_a_live_switch_keeps_the_ming_sample_rate_of_the_host(fake_ming, monkeypatch, rate) -> None:
+    monkeypatch.setattr(sys.modules['omnivoice_tts_server.ming_runtime'], 'MingSynthesizer', RateFollowingMing)
+    client = make_client(ming_model_dir=fake_ming, ming_output_sample_rate=rate)
+    try:
+        _switch(client, 'ming')
+        assert client.app.state.settings.ming_max_slots == MING_TIER['ming_max_slots'], 'the rest of the tier applies'
+        _assert_ming_rate(client, rate)
+    finally:
+        _close(client)
+
+
+def test_a_settings_put_that_switches_keeps_the_ming_sample_rate(fake_ming, monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules['omnivoice_tts_server.ming_runtime'], 'MingSynthesizer', RateFollowingMing)
+    client = make_client(ming_model_dir=fake_ming, ming_output_sample_rate=44100)
+    try:
+        assert client.put('/api/admin/settings', json={'runtime_backend': 'ming', 'ming_max_slots': 12}).status_code == 200
+        assert _wait_switch(client)['switch']['state'] == 'ready'
+        _assert_ming_rate(client, 44100)
+    finally:
+        _close(client)
+
+
+def test_a_sent_ming_sample_rate_still_wins_a_switch(fake_ming, monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules['omnivoice_tts_server.ming_runtime'], 'MingSynthesizer', RateFollowingMing)
+    client = make_client(ming_model_dir=fake_ming, ming_output_sample_rate=44100)
+    try:
+        response = client.put('/api/admin/settings', json={'runtime_backend': 'ming', 'ming_output_sample_rate': 24000})
+        assert response.status_code == 200
+        assert _wait_switch(client)['switch']['state'] == 'ready'
+        _assert_ming_rate(client, 24000)
+    finally:
+        _close(client)
+
+
 def test_an_env_pin_of_ming_starts_the_same_way(tmp_path) -> None:
     _write_saved(tmp_path, runtime_backend='omnivoice', max_parallel_requests=4, batch_wait_ms=30)
     settings = _started(tmp_path, {'OMNIVOICE_TTS_RUNTIME_BACKEND': 'ming'})
@@ -740,6 +802,40 @@ def test_provisioning_a_copied_file_keeps_the_new_gpu(tmp_path) -> None:
     assert settings.engine_profiles['omnivoice']['preferred_device'] == 'cuda:0'
 
 
+def test_provisioning_also_moves_the_other_engines_off_the_old_gpu(tmp_path) -> None:
+    _write_saved(
+        tmp_path, runtime_backend='omnivoice', preferred_device='cuda:0', max_parallel_requests=4,
+        engine_profiles={
+            'omnivoice': {'preferred_device': 'cuda:1', 'max_parallel_requests': 4},
+            'ming': {'preferred_device': 'cuda:1', 'max_parallel_requests': 32},
+            'phonon': {'max_parallel_requests': 2},
+        },
+    )
+    settings = _started(tmp_path)
+    assert settings.engine_profiles['ming'] == {'preferred_device': 'cuda:0', 'max_parallel_requests': 32}
+    assert settings.engine_profiles['phonon'] == {'max_parallel_requests': 2}, 'no device, nothing old to replace'
+
+    pinned = _started(tmp_path, {'OMNIVOICE_TTS_RUNTIME_BACKEND': 'ming'})
+    assert (pinned.runtime_backend, pinned.preferred_device, pinned.max_parallel_requests) == ('ming', 'cuda:0', 32)
+
+
+def test_a_file_the_server_saved_keeps_each_engines_gpu(tmp_path) -> None:
+    profiles = {'omnivoice': {'preferred_device': 'cuda:1'}, 'ming': {'preferred_device': 'cuda:0'}}
+    _write_saved(tmp_path, runtime_backend='omnivoice', preferred_device='cuda:1', engine_profiles=profiles)
+    settings = _started(tmp_path)
+    assert settings.engine_profiles['ming']['preferred_device'] == 'cuda:0'
+
+
+def test_a_saved_profile_without_a_device_says_nothing_about_a_rewrite(tmp_path) -> None:
+    _write_saved(
+        tmp_path, runtime_backend='omnivoice', preferred_device='cuda:1',
+        engine_profiles={'omnivoice': {'max_parallel_requests': 4}, 'ming': {'preferred_device': 'cuda:0'}},
+    )
+    settings = _started(tmp_path)
+    assert settings.engine_profiles['omnivoice']['preferred_device'] == 'cuda:1'
+    assert settings.engine_profiles['ming']['preferred_device'] == 'cuda:0'
+
+
 # --- B5: presets per engine -------------------------------------------------------------------------------------------
 
 
@@ -799,7 +895,9 @@ def test_downloadable_and_available_keep_their_meanings(monkeypatch, tmp_path) -
     assert by_id['ming'].downloadable is True and by_id['ming'].available is False and by_id['ming'].status == 'missing_model'
     assert by_id['phonon'].downloadable is False and by_id['phonon'].available is False
     assert 'CC-BY-NC-4.0' in by_id['phonon'].detail and 'gated' in by_id['phonon'].detail
-    assert by_id['omnivoice'].downloadable is False and by_id['omnivoice'].available is False
+    assert by_id['omnivoice'].downloadable is True, 'the download turns the flag on itself'
+    assert by_id['omnivoice'].available is False and by_id['omnivoice'].status == 'missing_model'
+    assert 'schaltet allow_model_downloads ein' in by_id['omnivoice'].detail
     settings.allow_model_downloads = True
     info = engines.engine_info(engines.ENGINES['omnivoice'], settings)
     assert info.downloadable is True and info.available is True
@@ -808,6 +906,37 @@ def test_downloadable_and_available_keep_their_meanings(monkeypatch, tmp_path) -
     (tmp_path / 'missing' / 'config.json').write_text('{}', encoding='utf-8')
     (tmp_path / 'missing' / 'model.safetensors').write_bytes(b'')
     assert engines.engine_info(engines.ENGINES['ming'], settings).downloadable is False
+
+
+def test_omnivoice_present_with_the_flag_off_offers_no_download(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(engines, '_module_installed', lambda name: True)
+    (tmp_path / 'OmniVoice').mkdir()
+    (tmp_path / 'OmniVoice' / 'config.json').write_text('{}', encoding='utf-8')
+    settings = Settings(runtime_backend='mock', models_root_dir=tmp_path, allow_model_downloads=False)
+    info = engines.engine_info(engines.ENGINES['omnivoice'], settings)
+    assert info.downloadable is False and info.available is True
+
+
+def test_omnivoice_weights_can_be_fetched_with_the_flag_off_from_another_engine(monkeypatch, tmp_path, fake_ming) -> None:  # noqa: F811
+    calls = _fake_hub(monkeypatch, lambda: None)
+    client = make_client(ming_model_dir=fake_ming, allow_model_downloads=False)
+    try:
+        client.app.state.settings.models_root_dir = tmp_path / 'no-weights-here'
+        _switch(client, 'ming')
+
+        def omnivoice() -> dict:
+            return next(item for item in client.get('/api/admin/runtime/engines').json()['engines'] if item['id'] == 'omnivoice')
+
+        assert (omnivoice()['downloadable'], omnivoice()['available']) == (True, False)
+        response = client.post('/api/admin/models/download', json={'engine': 'omnivoice'})
+        assert response.status_code == 200, response.text
+        deadline = time.time() + 5
+        while time.time() < deadline and not calls:
+            time.sleep(0.01)
+        assert calls and calls[0][0] == 'k2-fsa/OmniVoice'
+        assert client.get('/api/admin/settings').json()['allow_model_downloads'] is True
+    finally:
+        _close(client)
 
 
 def _fake_hub(monkeypatch, handler) -> list[tuple]:
@@ -950,14 +1079,26 @@ def test_capabilities_of_omnivoice_base() -> None:
         _close(client)
 
 
-def test_capabilities_of_a_finetuned_selection_read_instructions() -> None:
+def test_capabilities_of_a_finetuned_selection_promise_clones_no_instructions() -> None:
     client = _base_client(active_model=LOCAL, supported_models=[*ALL_ALIASES, LOCAL])
     try:
         client.app.state.settings.runtime_backend = 'omnivoice'
         client.app.state.synthesizer._loaded_model_id = None
         body = _capabilities_of(client)
         assert body['model'] == LOCAL and body['loaded'] is False
-        assert body['options']['instructions'] is True, 'its default task is not a clone'
+        assert body['options']['instructions'] is False, "a Base request clones on it, each request's task type decides"
+        client.app.state.settings.runtime_backend = 'mock'
+    finally:
+        _close(client)
+
+
+@pytest.mark.parametrize('alias', [OMNIVOICE_AUTO_ALIAS, OMNIVOICE_DESIGN_ALIAS])
+def test_capabilities_of_a_saved_alias_selection_read_instructions(alias) -> None:
+    client = _base_client(active_model=alias)
+    try:
+        client.app.state.settings.runtime_backend = 'omnivoice'
+        client.app.state.synthesizer._loaded_model_id = None
+        assert _capabilities_of(client)['options']['instructions'] is True, 'nothing migrates a saved alias'
         client.app.state.settings.runtime_backend = 'mock'
     finally:
         _close(client)

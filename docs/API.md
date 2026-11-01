@@ -277,11 +277,12 @@ No API key, like the other GET routes. What the admin's selection offers right n
 | `speed` | yes | no (see `speaking_rate`) | no |
 | `seed` | yes | yes | yes |
 | `language` | yes | yes | no |
-| `instructions` | no while Base is selected | yes | no |
+| `instructions` | no with Base or a `local/...` selected | yes | no |
 | `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
 
-`instructions` on OmniVoice applies to a request that names the AutoVoice or VoiceDesign alias, so the flag follows the
-selection: a Base clone does not read it, a selected `local/...` checkpoint does.
+On OmniVoice each request's task type decides, so `instructions` here means "honored for clone requests": a clone does
+not read it, also not on a selected `local/...` checkpoint. Built-in voices and requests naming the AutoVoice or
+VoiceDesign alias still read `instructions`, whatever the flag says. A saved alias that is still the selection reports `true`.
 
 During a live switch the route answers at once and reports the engine new requests will go to, with `loaded: false`.
 

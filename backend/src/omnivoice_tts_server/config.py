@@ -295,10 +295,17 @@ def load_runtime_settings(settings: Settings, environ: Mapping[str, str] | None 
         if field_name == 'engine_profiles':
             value = clean_engine_profiles(value)
             # Provisioning rewrites the flat preferred_device of a copied file (LinuxHeadless provision.sh). For the
-            # engine the file was saved under that key wins, or the start would go back to the old machine's GPU.
+            # engine the file was saved under that key wins, or the start would go back to the old machine's GPU. A saved
+            # file keeps the key and that profile equal, so a difference is such a rewrite: the other engines' devices
+            # are the old machine's as well.
             saved_profile = value.get(str(payload.get('runtime_backend') or '').strip().lower())
             if saved_profile is not None and 'preferred_device' in payload:
-                saved_profile['preferred_device'] = payload['preferred_device']
+                device = payload['preferred_device']
+                if saved_profile.get('preferred_device', device) != device:
+                    for profile in value.values():
+                        if 'preferred_device' in profile:
+                            profile['preferred_device'] = device
+                saved_profile['preferred_device'] = device
         setattr(settings, field_name, value)
 
 

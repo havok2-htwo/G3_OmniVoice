@@ -532,6 +532,18 @@ function buildHeaders(_adminKey?: string, headers: HeadersInit = {}) {
   return new Headers(headers);
 }
 
+/** The readable part of an error body: a plain detail, or FastAPI's validation list as "field: reason". */
+function errorDetail(payload: unknown): string | null {
+  const detail = (payload as { detail?: unknown } | null | undefined)?.detail;
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return null;
+  const lines = detail.flatMap((item: { loc?: unknown[]; msg?: unknown }) => {
+    if (typeof item?.msg !== "string") return [];
+    return [item.loc?.length ? `${String(item.loc[item.loc.length - 1])}: ${item.msg}` : item.msg];
+  });
+  return lines.length ? lines.join("; ") : null;
+}
+
 export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"> & { adminKey?: string; responseType?: "json" | "blob" | "text"; body?: unknown } = {}): Promise<T> {
   const { adminKey, responseType = "json", headers = {}, body, ...rest } = options;
   const nextHeaders = buildHeaders(adminKey, headers);
@@ -555,9 +567,7 @@ export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"
     let message = text || `Request failed with ${response.status}`;
     try {
       payload = text ? JSON.parse(text) : undefined;
-      if (typeof (payload as { detail?: unknown })?.detail === "string") {
-        message = (payload as { detail: string }).detail;
-      }
+      message = errorDetail(payload) ?? message;
     } catch {
       // keep raw text
     }
@@ -597,10 +607,7 @@ export async function streamNdjson(
     const text = await response.text();
     let message = text || "Streaming request failed";
     try {
-      const payload = text ? JSON.parse(text) : undefined;
-      if (typeof (payload as { detail?: unknown })?.detail === "string") {
-        message = (payload as { detail: string }).detail;
-      }
+      message = errorDetail(text ? JSON.parse(text) : undefined) ?? message;
     } catch {
       // keep raw text
     }

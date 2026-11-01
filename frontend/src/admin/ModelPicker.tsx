@@ -43,7 +43,7 @@ export function ModelPicker({ list, target, switchRunning, downloadingId, onSele
           <button className="secondary-button" type="button" onClick={onRefresh} disabled={switchRunning}>Status aktualisieren</button>
         </div>
       </div>
-      {switchRunning || status.state !== "idle" ? (
+      {status.state !== "idle" ? (
         <div className={`message ${status.state === "failed" ? "error" : ""}`}>
           {status.from_backend ?? "-"} -&gt; {status.to_backend ?? "-"}: {status.state}
           {status.message ? ` - ${status.message}` : ""}

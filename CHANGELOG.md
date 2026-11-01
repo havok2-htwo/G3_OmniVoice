@@ -4,6 +4,13 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - Admin details found by clicking through the panel
+
+- A preset name with a slash saves and deletes; it used to end in "Method Not Allowed".
+- A rejected settings value shows `field: reason` instead of the raw JSON error body.
+- A failed engine switch no longer leaves "started" next to the error, and no error of the old engine stays in the
+  Active Model panel or in Quick Synthesis after a switch. The empty "- -> -: idle" line at the start of a switch is gone.
+
 ### Changed - OmniVoice default is 25 steps
 
 - `num_step` is 25 instead of 20 in the server default and in the OmniVoice tiers `32GB VRAM`, `24GB VRAM` and `24+8 VRAM`.
@@ -34,13 +41,16 @@ All notable changes to G3_OmniVoice are recorded here.
 - `phonon_lang`, `phonon_quant`, `phonon_workers` and `phonon_threads` are now runtime settings (GET and PUT
   `/api/admin/settings`, preset keys). Once saved, the file beats `OMNIVOICE_TTS_PHONON_*`, like every other field.
 - `POST /api/admin/models/download` takes an optional `engine`, so Ming's weights can be fetched before it is selected.
-  Phonon stays a manual download (gated, CC-BY-NC-4.0), and the engine list now says so.
+  Phonon stays a manual download (gated, CC-BY-NC-4.0), and the engine list now says so. OmniVoice is `downloadable`
+  whenever its weights are missing, also with `allow_model_downloads` off, because the download turns that flag on.
 
 ### Added - `GET /api/v1/capabilities` and `GET /v1/capabilities`
 
 - A client can read the engine, the admin's selection, whether it is loaded, the sample rate, streaming type, languages
   and which request fields the engine really honors (`speed` only on OmniVoice, `language` not on Phonon, delivery
   controls only on Ming). No API key, and it does not wait during an engine switch.
+  On OmniVoice `options.instructions` means "honored for clone requests": `false` with Base or a `local/...` selected.
+  Built-in voices and the AutoVoice and VoiceDesign aliases still read `instructions`.
 
 ### Fixed - Clients could change the admin's model selection
 
@@ -60,9 +70,13 @@ All notable changes to G3_OmniVoice are recorded here.
 - A Ming tier's `max_parallel_requests: 16` and `batch_wait_ms: 0` stayed on OmniVoice after switching back. The fields
   that depend on the engine now live per engine in `engine_profiles` in `runtime_settings.json` and move with a switch.
   A settings PUT that also switches the engine stores the tuned values it sends for the target engine. A server that
-  starts on Ming without a profile, saved or pinned by env, gets the `Ming 24GB VRAM` tier. Files without
-  `engine_profiles` load as before. `bench_engine_streaming.py --spawn` writes `--preset` and `--set` into the engine's
-  profile, so the start keeps them.
+  starts on Ming without a profile, saved or pinned by env, gets the `Ming 24GB VRAM` tier. That start and a live switch
+  to Ming without a profile keep the saved `ming_output_sample_rate`, so clients of a 44100 host get the same rate;
+  applying a Ming tier as a preset still sets 24000. Files without `engine_profiles` load as
+  before. `bench_engine_streaming.py --spawn` writes `--preset` and `--set` into the engine's profile, so the start
+  keeps them.
+- A provisioned `preferred_device` that differs from the saved engine's profile now also replaces the device in the
+  other engines' profiles, so a switch does not go back to the old machine's GPU.
 
 ### Fixed - Installer leaves Phonon without its runtime
 

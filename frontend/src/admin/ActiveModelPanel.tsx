@@ -70,7 +70,9 @@ export function ActiveModelPanel({ engine, snapshot, selectedModel, download, de
   const attention = settings.attention_backend ?? (hasCompile ? settings.attention_implementation : null);
   const downloadStatus = download?.status || "missing";
   const actionBusy = busy || downloadingId === selectedModel;
-  const failedJob = snapshot.jobs[0]?.status === "failed" ? snapshot.jobs[0].error_message : null;
+  // A failure of the engine before a switch says nothing about this one.
+  const lastJob = snapshot.jobs[0];
+  const failedJob = lastJob?.status === "failed" && (!lastJob.model || snapshot.models.some((model) => model.model_id === lastJob.model)) ? lastJob.error_message : null;
 
   return (
     <>

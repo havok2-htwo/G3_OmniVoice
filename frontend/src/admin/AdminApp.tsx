@@ -634,6 +634,7 @@ export function AdminApp() {
     // The model list, default model, voices and presets belong to the new engine now.
     setQuickModel("");
     setPresetName("");
+    setQuickNote(null);
     try {
       await loadSnapshot(adminKey);
     } catch {
@@ -641,9 +642,12 @@ export function AdminApp() {
     }
     setEngineSwitchBusy(false);
     void loadPresets(adminKey);
+    // The "started" line must not stand next to the error.
     if (result.switch.state === "failed") {
+      setMessage("");
       setError(`Engine-Wechsel fehlgeschlagen: ${result.switch.error || "unbekannter Fehler"}`);
     } else if (result.switch.error) {
+      setMessage("");
       setError(result.switch.error);
     } else {
       setMessage(result.switch.message || `Engine ${result.active} aktiv.`);

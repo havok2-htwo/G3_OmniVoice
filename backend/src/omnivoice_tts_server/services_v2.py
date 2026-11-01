@@ -20,6 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .config import Settings
+from .engines import served_model
 from .domain.models import (
     BenchmarkCaseRequest,
     BenchmarkCaseSummary,
@@ -381,7 +382,7 @@ class QueueService:
         }
 
     def _mark_loaded_model_locked(self, model_id: str) -> None:
-        self.store.active_model = model_id
+        # What a batch ran on is no selection: active_model belongs to the admin, startup and the engine switch.
         self.store.models_loaded.clear()
         self.store.models_loaded.update(self._resident_models() or {model_id})
         self.store.models_loaded.add(model_id)
@@ -463,7 +464,9 @@ class QueueService:
             await self._publish_state()
 
             try:
-                model_used, warm_ms = await self.synthesizer.ensure_model(anchor_request.model if anchor_request else None)
+                model_used, warm_ms = await self.synthesizer.ensure_model(
+                    served_model(self.settings, anchor_request.model if anchor_request else None)
+                )
                 self.store.worker_state = 'running'
                 if self._can_use_native_streaming(batch_items):
                     await self._process_native_streaming_batch(
@@ -963,7 +966,7 @@ class QueueService:
 
             await self._publish_state()
             try:
-                model_used, warm_ms = await self.synthesizer.ensure_model(anchor_model)
+                model_used, warm_ms = await self.synthesizer.ensure_model(served_model(self.settings, anchor_model))
             except Exception as exc:
                 await self._end_concurrent_batch(batch_items, involved_job_ids, current_batch, '', {}, set(), exc)
                 continue

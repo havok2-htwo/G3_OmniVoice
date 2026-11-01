@@ -99,6 +99,10 @@ Open WebUI's model/voice dropdowns are fed by `GET /v1/audio/models`
 Selecting a saved custom voice profile automatically routes synthesis through
 the `k2-fsa/OmniVoice-Base` voice-clone alias.
 
+`k2-fsa/OmniVoice-AutoVoice` and `k2-fsa/OmniVoice-VoiceDesign` stay valid for clients and stay in
+these lists; only the admin panel hides them. A client request never changes the model the admin
+selected. `GET /api/v1/capabilities` tells a client what that selection offers.
+
 ## Frontend Dev
 
 ```powershell
@@ -171,7 +175,7 @@ their saved values, which take precedence over these defaults.
   from the arrival of the oldest request without a batch and ends early when the
   batch is full),
   VRAM budget 7000 MB, max 25000 input chars, stream prebuffer 0 ms
-- `num_step` 20, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
+- `num_step` 25, guidance 2.0, duration auto, `t_shift` 0.1, position temp 5.0,
   class temp 0.0, audio chunk 30.1 s / threshold 30 s, denoise + prompt
   preprocessing + output postprocessing on, sentence chunking on
 - WER: TTS wave 4, ASR concurrency 16, vLLM model `Qwen/Qwen3.6-35B-A3B-FP8`
@@ -199,19 +203,25 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
 ## Operator Features
 
 - **TTS engines** - `omnivoice` (default), `ming` (inclusionAI Ming-3.0-tts 0.5B, MIT) and
-  `phonon` (Gradium Phonon, CPU). The admin panel's "Engine" box shows each engine's install and
-  model state and switches it live: running jobs finish on the old engine, queued and new requests
+  `phonon` (Gradium Phonon, CPU). The admin panel shows each engine's install and model state and
+  switches it live: running jobs finish on the old engine, queued and new requests
   go to the new one, clients keep the same endpoints (`POST /api/admin/runtime/backend`, see
   `API_DOCUMENTATION.md` "Runtime backends"). The choice is saved in `data/runtime_settings.json`;
   `OMNIVOICE_TTS_RUNTIME_BACKEND` pins an engine at startup. Ming clones the saved voice profiles
   through `inclusionAI/Ming-3.0-tts-0.5B-Base`, streams every chunk as soon as it is generated and
   keeps the 24 kHz output contract. Install its dependencies with `pip install -e backend[ming]`
-  (done by `install.bat`) and its weights with `install.bat -DownloadMing` (into
-  `models/Ming-3.0-tts-0.5b`). Ming presets: `Ming 32GB VRAM`, `Ming 24GB VRAM` (RTX 4090/3090),
+  (done by `install.bat`) and its weights with `install.bat -DownloadMing` or the admin panel's
+  download button (into `models/Ming-3.0-tts-0.5b`). Ming presets: `Ming 32GB VRAM`, `Ming 24GB VRAM` (RTX 4090/3090),
   `Ming 24+8 VRAM`, `Ming best performance`. Phonon needs `pip install -e backend[phonon]` (the
   `ptts` runtime, done by `install.bat`) and its checkpoint in `models/phonon-40m-multilingual`. The
   checkpoint is gated and CC-BY-NC-4.0 (non-commercial), so it is a manual download, see
-  `docs/RUNTIME_VERSIONS.md`.
+  `docs/RUNTIME_VERSIONS.md`. Each engine keeps its own batching, parallelism and device values
+  (`engine_profiles` in `data/runtime_settings.json`), so a Ming tier no longer leaks into OmniVoice
+  after switching back. Without a profile Ming starts from the `Ming 24GB VRAM` tier.
+- **Ming reference length** - use 7-15 s. The reference counts against the 512 positions of every
+  text piece: 15 s leaves about 15 s of audio per piece, 25 s about 2 s, and 30 s no longer fits
+  (the request fails with "Ming prompt too long"). Long texts are not limited by this, they are split
+  into pieces. `ming_fragment_max_chars` (default 24) sets the piece size.
 - **Ming delivery controls** - cloned voices on Ming take `emotion`, `speaking_rate`, `pitch`,
   `volume` and `reference_mode` (English values or German aliases such as `fröhlich`, `langsam`,
   `laut`), or a free-form `instructions` text. Inline tags like `[Laughter]` or `[Cough]` are
@@ -222,7 +232,8 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   switch to Ming) plus named runtime/VRAM parameter sets you save, load into the
   settings draft, and delete from the admin panel
   (`GET/PUT/DELETE /api/admin/settings/presets`, saved ones in
-  `data/settings_presets.json`). `24+8 VRAM` picks the 24 GB card as
+  `data/settings_presets.json`). Every preset belongs to an engine (`engine` on the list,
+  `?engine=` filters). `24+8 VRAM` picks the 24 GB card as
   `preferred_device`. See `docs/API.md` "Settings Presets".
 - **First start** - a fresh install (no `data/runtime_settings.json` yet) starts
   with the `24GB VRAM` tier on top of the defaults below (batch / parallel 4,

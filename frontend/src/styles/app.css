@@ -390,20 +390,6 @@ input[type="checkbox"] {
   padding: 6px 0;
 }
 
-.voice-design-builder {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-  padding: 12px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.055);
-}
-
-.voice-design-builder label {
-  gap: 7px;
-}
-
 .tag-insert {
   display: grid;
   gap: 6px;
@@ -748,6 +734,62 @@ textarea:disabled {
   box-shadow: inset 0 0 0 1px rgba(255, 154, 70, 0.12);
 }
 
+.engine-card {
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+}
+
+.engine-card-select {
+  position: relative;
+  align-content: start;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.engine-card-select.disabled {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+/* The whole card is the radio's label; the frame shows the choice, so the dot only stays for keyboard and screen reader. */
+.engine-card-select input[type="radio"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  opacity: 0;
+}
+
+.engine-card:focus-within {
+  outline: 2px solid rgba(255, 154, 70, 0.42);
+  outline-offset: 2px;
+}
+
+.engine-card .model-bubble-head > span:first-child {
+  min-width: 0;
+}
+
+.engine-card .message {
+  margin-top: 0;
+}
+
+.engine-card-confirm {
+  margin-top: 12px;
+}
+
+.switch-lock {
+  display: grid;
+  gap: var(--gap-md);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.switch-lock:disabled {
+  opacity: 0.6;
+}
+
 .model-bubble-head {
   display: grid;
   gap: 12px;
@@ -954,10 +996,6 @@ textarea:disabled {
   .field-grid.four {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
-  .voice-design-builder {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 780px) {
@@ -1000,10 +1038,6 @@ textarea:disabled {
   }
 
   .field-grid.four {
-    grid-template-columns: 1fr;
-  }
-
-  .voice-design-builder {
     grid-template-columns: 1fr;
   }
 

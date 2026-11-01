@@ -104,11 +104,23 @@ explicit `task_type` selects request behavior:
 | `k2-fsa/OmniVoice-VoiceDesign` | `VoiceDesign` | voice design from structured `instructions` |
 | `k2-fsa/OmniVoice-Base` | `Base` | voice cloning with a saved voice profile or reference audio/text |
 
+Every alias stays valid for clients and stays listed on `/api/v1/models`, `/v1/models` and
+`/v1/audio/models`. The admin only selects Base (voice cloning) and promoted `local/...` checkpoints:
+AutoVoice and VoiceDesign are hidden there, but a saved `active_model` with one of them keeps working
+and stays listed until the admin changes it.
+
+The selection (`active_model`) belongs to the admin. Only admin actions, the startup and the engine
+switch write it; a client request never does, whatever id it names. The id still sets that request's
+task type (an explicit `task_type` wins). Any id that does not start with `local/` runs on the
+checkpoint the admin selected, so with `local/x` selected a request for `k2-fsa/OmniVoice-Base` runs on
+`local/x`, evicts nothing and answers with `model: local/x`. An explicit `local/other` loads that
+checkpoint for the request; the next request without one brings the selection back.
+
 Runtime backends (engines):
 
 | Backend | Engine | Model ids | Voices | Streaming |
 | --- | --- | --- | --- | --- |
-| `omnivoice` (default) | `k2-fsa/OmniVoice` | the three aliases above | voice profiles, `Auto Voice`, VoiceDesign | per sentence (whole sentence rendered, then sliced) |
+| `omnivoice` (default) | `k2-fsa/OmniVoice` | the three aliases above, promoted `local/...` | voice profiles, `Auto Voice`, VoiceDesign | per sentence (whole sentence rendered, then sliced) |
 | `ming` | `inclusionAI/Ming-3.0-tts-0.5B` (MIT) | `inclusionAI/Ming-3.0-tts-0.5B-Base` | voice profiles (clone), `Auto Voice` | native chunk streaming inside each sentence |
 | `phonon` | `gradium/phonon-40m-multilingual` (CPU) | `gradium/phonon-40m-multilingual` | its own catalog voices (no profiles) | native chunk streaming |
 | `mock` | sine tone | the OmniVoice aliases | as OmniVoice | per sentence |
@@ -118,8 +130,10 @@ Runtime backends (engines):
   `/api/v1/models`, `/v1/models` and `/v1/audio/models` list the active engine's model ids.
 - A request that names a model id the active engine does not serve (for example
   `k2-fsa/OmniVoice-Base` while Ming runs, or an OpenAI alias like `tts-1`) is served by the
-  active engine's default model, so existing clients need no change. OmniVoice keeps every
-  model id as given.
+  active engine's default model, so existing clients need no change. OmniVoice takes the task
+  type from every id as given and runs it on the selected checkpoint (see above).
+- Clients read what the selection offers from `GET /api/v1/capabilities` (engine, streaming,
+  languages, which request fields are honored).
 - **Ming** clones the saved voice profiles (the same `data/voice_profiles.json` as OmniVoice;
   `ref_text` is required, as for OmniVoice) through its `...-Base` alias, so the default voice,
   `voice` names and the OpenAI voice routing work unchanged. Inline `ref_audio` + `ref_text`
@@ -129,7 +143,11 @@ Runtime backends (engines):
   settings are fixed (10 flow steps, CFG 2.0, no reference trimming); `num_step`,
   `guidance_scale` and the other OmniVoice generation settings do not apply to it.
 - **Phonon** runs on the CPU with its own voice catalog; saved voice profiles are not used
-  (and cannot be edited) while it is active.
+  (and cannot be edited) while it is active, and a client that names one on `/v1/audio/speech` gets
+  `404`. `phonon_lang`, `phonon_quant`, `phonon_workers` and `phonon_threads` are runtime settings
+  (GET/PUT `/api/admin/settings`, preset keys): the saved value now beats `OMNIVOICE_TTS_PHONON_*`,
+  like every other saved field. They apply at the next Phonon load; `phonon_threads` sizes a
+  process-wide pool and needs a server restart.
 - Finetuning (data generation, training, promotion) trains OmniVoice checkpoints and returns
   `409` while another engine is active.
 - Startup order for the engine: `OMNIVOICE_TTS_RUNTIME_BACKEND` if set, else the saved
@@ -492,6 +510,58 @@ Response shape:
   ]
 }
 ```
+
+### `GET /api/v1/capabilities`, `GET /v1/capabilities`
+
+Purpose:
+
+- tells a client what the admin's selection offers; no API key, like the other GET routes
+
+Response shape:
+
+```json
+{
+  "engine": "ming",
+  "engine_label": "Ming-3.0-tts 0.5B",
+  "model": "inclusionAI/Ming-3.0-tts-0.5B-Base",
+  "loaded": true,
+  "sample_rate": 24000,
+  "voice_cloning": true,
+  "voice_profiles": true,
+  "streaming": "native",
+  "languages": ["Auto", "Deutsch", "English", "Français", "Español", "中文", "日本語", "한국어"],
+  "response_formats": ["wav", "mp3", "pcm"],
+  "options": {
+    "speed": false, "seed": true, "language": true, "instructions": true, "emotion": true,
+    "speaking_rate": true, "pitch": true, "volume": true, "reference_mode": true
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `engine`, `engine_label` | the active engine (id and name) |
+| `model` | the admin's selection, also when a request named another id |
+| `loaded` | the selection is in memory now, read from the engine (`false` until the first load and during a switch) |
+| `sample_rate` | output rate in Hz |
+| `voice_cloning`, `voice_profiles` | the engine clones a reference voice; saved voice profiles work (`false` on Phonon: a profile voice is a `404` on `/v1/audio/speech`) |
+| `streaming` | `native` sends audio as the engine produces it, `sentence` renders a whole sentence and then slices it |
+| `languages` | labels the engine has a language for; Phonon lists its one `phonon_lang` |
+| `response_formats` | `pcm` is the stream format, a non-streaming `pcm` request gets WAV; `mp3` is left out without ffmpeg |
+| `options` | request fields the engine reads; the others are accepted and ignored |
+
+| Option | `omnivoice` | `ming` | `phonon` |
+| --- | --- | --- | --- |
+| `speed` | yes | no (see `speaking_rate`) | no |
+| `seed` | yes | yes | yes |
+| `language` | yes | yes | no |
+| `instructions` | no while Base is selected | yes | no |
+| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
+
+`instructions` on OmniVoice applies to a request that names the AutoVoice or VoiceDesign alias, so the flag follows the
+selection: a Base clone does not read it, a selected `local/...` checkpoint does.
+
+During a live switch the route answers at once and reports the engine new requests will go to, with `loaded: false`.
 
 ### `GET /v1/audio/models`
 
@@ -900,6 +970,13 @@ before anything is applied. While a switch runs, the PUT returns `409`. The engi
 non-OmniVoice engine is never written to `runtime_settings.json` as `active_model`, so the next
 OmniVoice start keeps its own default model.
 
+Values that differ per engine (`max_parallel_requests`, `max_batch_size`, `batch_wait_ms`,
+`vram_budget_mb`, `stream_chunk_ms`, `stream_prebuffer_ms`, `preferred_device`) are kept per engine
+in `engine_profiles` in `data/runtime_settings.json` (not part of this API; the flat keys stay the
+active engine's values). A PUT stores them under the active engine. A PUT that also changes
+`runtime_backend` stores the ones it sends under the target engine, so they apply after the switch
+and the running engine keeps its own until then; the response still shows the running engine's.
+
 ### `GET /api/admin/runtime/engines`
 
 Purpose:
@@ -920,23 +997,34 @@ Response:
       "installed": true,
       "model_present": true,
       "available": true,
+      "downloadable": false,
+      "loaded": false,
       "status": "ready",
       "detail": null,
       "model_id": "inclusionAI/Ming-3.0-tts-0.5B",
       "model_dir": "X:\\dev\\G3_OmniVoice\\models\\Ming-3.0-tts-0.5b",
       "uses_voice_profiles": true,
       "native_streaming": true,
-      "test_only": false
+      "test_only": false,
+      "settings_fields": ["default_voice", "preferred_device", "max_parallel_requests", "ming_max_slots"]
     }
   ],
-  "switch": { "state": "idle", "drained_jobs": 0, "cancelled_jobs": 0, "requeued_jobs": 0 }
+  "switch": { "state": "idle", "drained_jobs": 0, "cancelled_jobs": 0, "requeued_jobs": 0 },
+  "server_settings_fields": ["whisper_base_url", "vllm_base_url", "queue_limit", "max_input_chars"]
 }
 ```
 
-`status` is `active`, `ready`, `downloadable` (OmniVoice with downloads allowed),
-`missing_package` (install `backend[ming]` / `ptts`) or `missing_model` (`detail` names the
-download command). `switch.state` is `idle`, `draining`, `unloading`, `loading`, `ready` or
-`failed` (`error` says why; the old engine stays active).
+`status` is `active`, `ready`, `downloadable` (OmniVoice with downloads allowed: it fetches its
+weights when it loads), `downloading`, `missing_package` (install `backend[ming]` / `ptts`) or
+`missing_model` (`detail` says how to get the weights). `available` means a switch can start now;
+a missing Ming model cannot be switched to. `downloadable` means
+`POST /api/admin/models/download` can fetch the weights: OmniVoice with downloads allowed, Ming
+while its model is missing, never Phonon (gated repository, CC-BY-NC-4.0, a manual download).
+A running download sets `downloadable` and `available` to `false`, a failed one shows in `detail`.
+`loaded` is read from the engine and only ever `true` on the active one.
+`settings_fields` lists the `PUT /api/admin/settings` fields that engine reads,
+`server_settings_fields` those of the whole service. `switch.state` is `idle`, `draining`,
+`unloading`, `loading`, `ready` or `failed` (`error` says why; the old engine stays active).
 
 ### `POST /api/admin/runtime/backend`
 
@@ -956,7 +1044,12 @@ Sequence:
 2. running jobs finish on the old engine; after `drain_timeout_s` they are cancelled
 3. the queue worker stops, the old engine unloads and CUDA memory is released
 4. the settings the old engine rewrote (model list, default model, built-in voices) get their
-   OmniVoice values back, the new engine is built and bound to the queue
+   OmniVoice values back, the old engine's per-engine values go to its profile and the new engine's
+   are applied, the new engine is built and bound to the queue. Without a profile yet Ming starts
+   from all values of the `Ming 24GB VRAM` tier, the others keep the current values; the startup does
+   the same for the engine that is saved or pinned by `OMNIVOICE_TTS_RUNTIME_BACKEND` (keys the
+   environment sets explicitly keep their env value). A top-level `preferred_device` edited in the
+   file wins over the profile of the engine the file was saved under.
 5. the held jobs go back to the front of the queue, the worker restarts and the new engine
    loads its model (`switch.message` "Modell wird geladen.")
 
@@ -983,6 +1076,10 @@ Purpose:
 
 - lists saved settings presets
 
+Query params:
+
+- `engine` (optional): only the presets of this engine
+
 Response:
 
 ```json
@@ -990,12 +1087,16 @@ Response:
   "presets": [
     {
       "name": "Fast fp8",
+      "engine": "omnivoice",
       "values": { "torch_dtype": "fp8", "num_step": 8 },
       "created_at": "2026-05-21T00:00:00Z"
     }
   ]
 }
 ```
+
+`engine` is derived, never stored: `values.runtime_backend` when set, else `ming` when a `ming_*`
+key is present, else `omnivoice`.
 
 ### `PUT /api/admin/settings/presets/{name}`
 
@@ -1041,7 +1142,7 @@ Response content includes:
 
 - overview metrics
 - runtime settings
-- model list
+- model list (`models`, every alias) and `selectable_models` (what the admin can pick)
 - voice list
 - recent jobs
 - current/recent batches
@@ -1069,6 +1170,8 @@ data: { ...snapshot... }
 Purpose:
 
 - returns local model/cache status for the selected storage root
+- lists the selectable models only: the AutoVoice and VoiceDesign aliases are hidden unless one is
+  the active model
 
 Query params:
 
@@ -1096,8 +1199,12 @@ Query params:
 
 Purpose:
 
-- enables model downloads
-- starts or resumes an OmniVoice model download job
+- starts or resumes the model download of the active engine, or of the one named in `engine`
+- `engine` (optional): `ming` fetches its weights into `ming_model_dir` before it is selected,
+  `omnivoice` works the same way while another engine runs, `phonon` answers `400` (gated repository,
+  CC-BY-NC-4.0, a manual download). Progress and errors of a download show on
+  `GET /api/admin/runtime/engines`
+- an OmniVoice download also enables `allow_model_downloads`; a Ming download leaves it alone
 
 Request:
 
@@ -1122,6 +1229,10 @@ Request:
   "storage_path": "X:\\dev\\G3_OmniVoice\\models"
 }
 ```
+
+Every OmniVoice alias shares one cache, the base weights. A promoted `local/...` checkpoint has none here and returns
+`400`; it is deleted with `DELETE /api/admin/finetune/checkpoints/{id}`, which returns `409` while it is the selected
+model.
 
 ### `POST /api/admin/models/preload`
 

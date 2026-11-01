@@ -75,11 +75,29 @@ RUNTIME_SETTINGS_FIELDS = {
     'ming_output_sample_rate',
     'ming_first_chunk_latents',
     'ming_max_chunk_latents',
+    # Read when the Phonon engines load (switch, reload or restart).
+    'phonon_lang',
+    'phonon_quant',
+    'phonon_workers',
+    'phonon_threads',
+    # {engine id: its ENGINE_TUNED_FIELDS values}. The flat keys stay the active engine's values.
+    'engine_profiles',
 }
 # Saved as str, loaded back as Path.
 PATH_SETTINGS_FIELDS = {'models_root_dir', 'ming_model_dir'}
 RUNTIME_BACKENDS = ('omnivoice', 'phonon', 'ming', 'mock')
 RUNTIME_BACKEND_ENV = 'OMNIVOICE_TTS_RUNTIME_BACKEND'
+# Fields whose good value depends on the engine (Ming wants 16 parallel requests, OmniVoice a batch window). They move
+# with the engine on a switch (engine_profiles); every other field is shared or read by one engine only.
+ENGINE_TUNED_FIELDS = (
+    'max_parallel_requests',
+    'max_batch_size',
+    'batch_wait_ms',
+    'vram_budget_mb',
+    'stream_chunk_ms',
+    'stream_prebuffer_ms',
+    'preferred_device',
+)
 
 
 class Settings(BaseSettings):
@@ -140,6 +158,11 @@ class Settings(BaseSettings):
     # Latents (80 ms each) in the first streamed chunk of a sentence (time to first audio) and in later chunks.
     ming_first_chunk_latents: int = Field(default=2, ge=1, le=8)
     ming_max_chunk_latents: int = Field(default=8, ge=1, le=32)
+    # Longest text piece Ming renders in one go (semantic length). Sentences are kept whole up to this size, so a
+    # sentence is not cut at a comma mid-way; 24 is upstream's default, which splits at most commas.
+    ming_fragment_max_chars: int = Field(default=24, ge=8, le=400)
+    # Per engine values of ENGINE_TUNED_FIELDS: a live switch stores the old engine's and applies the new one's.
+    engine_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
     allow_model_downloads: bool = True
     enable_cpu_offload: bool = False
     compile_model: bool = True
@@ -187,7 +210,7 @@ class Settings(BaseSettings):
     max_input_chars: int = 25000       # hard reject single requests above this (abuse guard)
     stream_chunk_ms: int = 140
     stream_prebuffer_ms: int = 0
-    num_step: int | None = Field(default=20, ge=1, le=256)
+    num_step: int | None = Field(default=25, ge=1, le=256)
     guidance_scale: float | None = Field(default=2.0, ge=0.0, le=20.0)
     duration: float | None = Field(default=None, ge=0.1, le=120.0)
     t_shift: float | None = Field(default=0.1, ge=0.0, le=10.0)
@@ -269,7 +292,25 @@ def load_runtime_settings(settings: Settings, environ: Mapping[str, str] | None 
                 continue
         if field_name in PATH_SETTINGS_FIELDS:
             value = Path(value).expanduser()
+        if field_name == 'engine_profiles':
+            value = clean_engine_profiles(value)
+            # Provisioning rewrites the flat preferred_device of a copied file (LinuxHeadless provision.sh). For the
+            # engine the file was saved under that key wins, or the start would go back to the old machine's GPU.
+            saved_profile = value.get(str(payload.get('runtime_backend') or '').strip().lower())
+            if saved_profile is not None and 'preferred_device' in payload:
+                saved_profile['preferred_device'] = payload['preferred_device']
         setattr(settings, field_name, value)
+
+
+def clean_engine_profiles(value: Any) -> dict[str, dict[str, Any]]:
+    """The saved engine_profiles without unknown engines and fields, whatever a hand-edited file holds."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        engine: {name: profile[name] for name in ENGINE_TUNED_FIELDS if profile.get(name) is not None}
+        for engine, profile in value.items()
+        if engine in RUNTIME_BACKENDS and isinstance(profile, dict)
+    }
 
 
 def save_runtime_settings(settings: Settings, fields: Iterable[str] | None = None) -> None:

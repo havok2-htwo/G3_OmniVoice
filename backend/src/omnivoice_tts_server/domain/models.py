@@ -437,6 +437,10 @@ class ServerSettingsResponse(BaseModel):
     ming_output_sample_rate: int = 24000
     ming_first_chunk_latents: int = 2
     ming_max_chunk_latents: int = 8
+    phonon_lang: str = 'de'
+    phonon_quant: str = 'q8'
+    phonon_workers: int = 2
+    phonon_threads: int = 0
 
 
 RuntimeBackendName = Literal['omnivoice', 'phonon', 'ming', 'mock']
@@ -502,6 +506,10 @@ class ServerSettingsUpdateRequest(BaseModel):
     ming_output_sample_rate: Literal[24000, 44100] | None = None
     ming_first_chunk_latents: int | None = Field(default=None, ge=1, le=8)
     ming_max_chunk_latents: int | None = Field(default=None, ge=1, le=32)
+    phonon_lang: str | None = None
+    phonon_quant: str | None = None
+    phonon_workers: int | None = Field(default=None, ge=1, le=16)
+    phonon_threads: int | None = Field(default=None, ge=0, le=64)
 
     @field_validator('runtime_backend', mode='before')
     @classmethod
@@ -517,8 +525,13 @@ class EngineInfo(BaseModel):
     # installed: the Python packages import; model_present: the weights are on disk.
     installed: bool = False
     model_present: bool = False
-    # available: a switch to this engine can start now (downloadable weights count).
+    # available: a switch to this engine can start now (weights OmniVoice fetches itself at load count, a missing
+    # Ming or Phonon model does not).
     available: bool = False
+    # The admin can fetch the weights from here (POST /api/admin/models/download); Phonon is a manual download.
+    downloadable: bool = False
+    # The active engine really has its model in memory (from the synthesizer, always false for the others).
+    loaded: bool = False
     status: str = 'missing'
     detail: str | None = None
     model_id: str | None = None
@@ -527,6 +540,8 @@ class EngineInfo(BaseModel):
     native_streaming: bool = False
     # The mock tone generator: listed for tests and demos only.
     test_only: bool = False
+    # PUT /api/admin/settings fields this engine reads (engines.ENGINE_SETTINGS_FIELDS).
+    settings_fields: list[str] = Field(default_factory=list)
 
 
 class EngineSwitchStatus(BaseModel):
@@ -548,6 +563,8 @@ class EngineListResponse(BaseModel):
     env_override: str | None = None
     engines: list[EngineInfo] = Field(default_factory=list)
     switch: EngineSwitchStatus = Field(default_factory=EngineSwitchStatus)
+    # PUT /api/admin/settings fields of the whole service, whichever engine runs.
+    server_settings_fields: list[str] = Field(default_factory=list)
 
 
 class EngineSwitchRequest(BaseModel):
@@ -564,9 +581,40 @@ class EngineSwitchRequest(BaseModel):
         return value.strip().lower() if isinstance(value, str) else value
 
 
+class CapabilityOptions(BaseModel):
+    """Request fields the active engine really honors; the others are accepted and ignored."""
+
+    speed: bool = False
+    seed: bool = False
+    language: bool = False
+    instructions: bool = False
+    emotion: bool = False
+    speaking_rate: bool = False
+    pitch: bool = False
+    volume: bool = False
+    reference_mode: bool = False
+
+
+class CapabilitiesResponse(BaseModel):
+    engine: str
+    engine_label: str
+    model: str
+    loaded: bool
+    sample_rate: int
+    voice_cloning: bool
+    voice_profiles: bool
+    # 'native' sends audio as the engine produces it, 'sentence' renders a whole sentence and then slices it.
+    streaming: Literal['native', 'sentence']
+    languages: list[str]
+    response_formats: list[str]
+    options: CapabilityOptions
+
+
 class SettingsPresetItem(BaseModel):
     name: str
     values: dict[str, Any] = Field(default_factory=dict)
+    # Derived for the list, never stored: the engine this preset tunes (presets.preset_engine).
+    engine: str = 'omnivoice'
     created_at: str | None = None
     # Built-in GPU tiers are read-only (saving or deleting under their name is a 400).
     built_in: bool = False
@@ -604,6 +652,8 @@ class ModelDownloadRequest(BaseModel):
     model_id: str | None = None
     model: str | None = None
     storage_path: str | None = None
+    # Fetch the weights of this engine instead of the active one's, so they are there before it is selected.
+    engine: str | None = None
 
 
 class ModelDownloadStatus(BaseModel):
@@ -872,6 +922,8 @@ class DashboardSnapshot(BaseModel):
     overview: DashboardOverview
     settings: ServerSettingsResponse
     models: list[ModelInfo] = Field(default_factory=list)
+    # What the admin can pick: models without the client-only aliases.
+    selectable_models: list[str] = Field(default_factory=list)
     voices: list[VoiceProfileListItem] = Field(default_factory=list)
     jobs: list[JobListItem] = Field(default_factory=list)
     current_batch: BatchSnapshot | None = None

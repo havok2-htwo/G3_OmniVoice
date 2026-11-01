@@ -83,6 +83,10 @@ PRESET_KEYS = (
     'ming_output_sample_rate',
     'ming_first_chunk_latents',
     'ming_max_chunk_latents',
+    'phonon_lang',
+    'phonon_quant',
+    'phonon_workers',
+    'phonon_threads',
 )
 # Every preset key is a persisted runtime setting and accepted by the settings PUT
 # under the same name (checked here so a rename cannot silently break presets).
@@ -124,7 +128,7 @@ _TIER_COMMON: dict[str, Any] = {
     'stream_first_preempt': True,
     'batch_wait_ms': 30,
     'max_input_chars': 25000,
-    'num_step': 20,
+    'num_step': 25,
     'audio_chunk_duration': 30.1,
     'audio_chunk_threshold': 30.0,
 }
@@ -226,6 +230,14 @@ BUILTIN_PRESETS.update(MING_PRESETS)
 
 def _path(data_dir: Path) -> Path:
     return data_dir / PRESETS_FILE
+
+
+def preset_engine(values: Mapping[str, Any]) -> str:
+    """The engine a preset tunes. Derived, never stored: OmniVoice tiers carry no runtime_backend on purpose."""
+    backend = values.get('runtime_backend')
+    if backend:
+        return str(backend)
+    return 'ming' if any(key.startswith('ming_') for key in values) else 'omnivoice'
 
 
 def clean_preset_name(name: str) -> str:
@@ -354,12 +366,24 @@ def list_presets(data_dir: Path) -> list[dict[str, Any]]:
                 'note': note,
                 'values': values,
                 'created_at': None,
+                'engine': preset_engine(values),
             }
         )
     saved = load_presets(data_dir)
     for name in sorted(saved, key=str.lower):
-        result.append({**saved[name], 'built_in': False, 'description': '', 'target_vram_gb': None, 'note': None})
+        result.append(_saved_item(saved[name]))
     return result
+
+
+def _saved_item(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **entry,
+        'built_in': False,
+        'description': '',
+        'target_vram_gb': None,
+        'note': None,
+        'engine': preset_engine(entry['values']),
+    }
 
 
 def save_preset(data_dir: Path, name: str, values: dict[str, Any], *, now_iso: str) -> dict[str, Any]:
@@ -378,7 +402,7 @@ def save_preset(data_dir: Path, name: str, values: dict[str, Any], *, now_iso: s
         }
         presets[clean] = entry
         _write(data_dir, presets)
-    return {**entry, 'built_in': False, 'description': '', 'target_vram_gb': None, 'note': None}
+    return _saved_item(entry)
 
 
 def delete_preset(data_dir: Path, name: str) -> bool:

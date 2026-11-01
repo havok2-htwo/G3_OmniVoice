@@ -16,6 +16,10 @@ def _ffmpeg_executable() -> str | None:
         return None
 
 
+def mp3_export_available() -> bool:
+    return _ffmpeg_executable() is not None
+
+
 def wav_to_mp3(wav_bytes: bytes, *, bitrate: str = '192k', timeout_seconds: int = 120) -> bytes:
     if not wav_bytes:
         raise RuntimeError('Cannot export empty audio as MP3.')

@@ -34,6 +34,7 @@ import numpy as np
 from .capacity import ming_capacity_profile
 from .config import Settings
 from .domain.state import InMemoryStore, VoiceProfileRecord
+from .engines import MING_BASE_ALIAS
 from .runtime_v2 import (
     LANGUAGE_LABEL_TO_CODE,
     BatchSynthesisItem,
@@ -44,9 +45,6 @@ from .runtime_v2 import (
 
 logger = logging.getLogger('omnivoice_tts_server.ming_runtime')
 
-# The clone alias the queue serves. It ends in 'Base' so task-type inference, the default voice profile and the
-# OpenAI voice routing treat it like OmniVoice-Base.
-MING_BASE_ALIAS = 'inclusionAI/Ming-3.0-tts-0.5B-Base'
 # Seed of a request that sends none (and of the voice prompt's VAE posterior sample): output is reproducible.
 MING_DEFAULT_SEED = 0
 MING_PROMPT_SEED = 0
@@ -224,6 +222,7 @@ class MingSynthesizer:
             'output_sample_rate': self.sample_rate,
             'first_chunk_latents': int(settings.ming_first_chunk_latents),
             'max_chunk_latents': int(settings.ming_max_chunk_latents),
+            'fragment_max_chars': int(settings.ming_fragment_max_chars),
         }
         if data_dir:
             # GEMM kernel plans (ming/fast.py) persist next to the server data, not inside the model folder.

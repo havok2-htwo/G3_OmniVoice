@@ -142,6 +142,10 @@ export interface ServerSettings {
   ming_output_sample_rate?: number;
   ming_first_chunk_latents?: number;
   ming_max_chunk_latents?: number;
+  phonon_lang?: string;
+  phonon_quant?: string;
+  phonon_workers?: number;
+  phonon_threads?: number;
 }
 
 export type RuntimeBackend = "omnivoice" | "ming" | "phonon" | "mock";
@@ -154,7 +158,11 @@ export interface EngineInfo {
   installed: boolean;
   model_present: boolean;
   available: boolean;
-  /** active | ready | downloadable | missing_package | missing_model */
+  /** The admin can fetch the weights from here (POST /api/admin/models/download with `engine`). */
+  downloadable: boolean;
+  /** The active engine really has its model in memory; always false for the others. */
+  loaded: boolean;
+  /** active | ready | downloadable | downloading | missing_package | missing_model */
   status: string;
   detail?: string | null;
   model_id?: string | null;
@@ -162,6 +170,8 @@ export interface EngineInfo {
   uses_voice_profiles: boolean;
   native_streaming: boolean;
   test_only: boolean;
+  /** PUT /api/admin/settings fields this engine reads. */
+  settings_fields: string[];
 }
 
 export interface EngineSwitchStatus {
@@ -183,6 +193,8 @@ export interface EngineListResponse {
   env_override?: string | null;
   engines: EngineInfo[];
   switch: EngineSwitchStatus;
+  /** PUT /api/admin/settings fields of the whole service, whichever engine runs. */
+  server_settings_fields: string[];
 }
 
 export interface DashboardSnapshot {
@@ -207,6 +219,8 @@ export interface DashboardSnapshot {
   };
   settings: ServerSettings;
   models: ModelInfo[];
+  /** What the admin can pick: `models` without the client-only aliases. */
+  selectable_models: string[];
   voices: VoiceItem[];
   jobs: JobRecord[];
   current_batch?: {

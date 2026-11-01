@@ -41,6 +41,11 @@ different request behavior:
 | `k2-fsa/OmniVoice-VoiceDesign` | `VoiceDesign` | voice design from `instructions` |
 | `k2-fsa/OmniVoice-Base` | `Base` | voice cloning with a saved voice profile or `ref_audio` plus `ref_text` |
 
+The aliases stay valid for clients and stay listed on the public model routes; only the admin hides
+AutoVoice and VoiceDesign and selects Base or a promoted `local/...` checkpoint. A client request never
+changes the admin's selection. Its id sets the task type for that request only (an explicit `task_type`
+wins), and every id that does not start with `local/` runs on the selected checkpoint.
+
 ## Speech Request
 
 Most synthesis endpoints accept this JSON body:
@@ -226,6 +231,59 @@ OpenAI/Open-WebUI-compatible aliases:
 GET /v1/models        -> { "object": "list", "data": [ { "id": "...", "object": "model", ... } ] }
 GET /v1/audio/models  -> { "models": [ { "id": "...", "object": "model", ... } ] }
 ```
+
+### Capabilities
+
+```http
+GET /api/v1/capabilities
+GET /v1/capabilities
+```
+
+No API key, like the other GET routes. What the admin's selection offers right now:
+
+```json
+{
+  "engine": "ming",
+  "engine_label": "Ming-3.0-tts 0.5B",
+  "model": "inclusionAI/Ming-3.0-tts-0.5B-Base",
+  "loaded": true,
+  "sample_rate": 24000,
+  "voice_cloning": true,
+  "voice_profiles": true,
+  "streaming": "native",
+  "languages": ["Auto", "Deutsch", "English", "Français", "Español", "中文", "日本語", "한국어"],
+  "response_formats": ["wav", "mp3", "pcm"],
+  "options": {
+    "speed": false, "seed": true, "language": true, "instructions": true, "emotion": true,
+    "speaking_rate": true, "pitch": true, "volume": true, "reference_mode": true
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `engine`, `engine_label` | the active engine (id and name) |
+| `model` | the admin's selection, also when a request named another id |
+| `loaded` | the selection is in memory now, read from the engine (`false` until the first load and during a switch) |
+| `sample_rate` | output rate in Hz |
+| `voice_cloning`, `voice_profiles` | the engine clones a reference voice; saved voice profiles work (`false` on Phonon: a profile voice is a `404` on `/v1/audio/speech`) |
+| `streaming` | `native` sends audio as the engine produces it, `sentence` renders a whole sentence and then slices it |
+| `languages` | labels the engine has a language for; Phonon lists its one `phonon_lang` |
+| `response_formats` | `pcm` is the stream format, a non-streaming `pcm` request gets WAV; `mp3` is left out without ffmpeg |
+| `options` | request fields the engine reads; the others are accepted and ignored |
+
+| Option | `omnivoice` | `ming` | `phonon` |
+| --- | --- | --- | --- |
+| `speed` | yes | no (see `speaking_rate`) | no |
+| `seed` | yes | yes | yes |
+| `language` | yes | yes | no |
+| `instructions` | no while Base is selected | yes | no |
+| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
+
+`instructions` on OmniVoice applies to a request that names the AutoVoice or VoiceDesign alias, so the flag follows the
+selection: a Base clone does not read it, a selected `local/...` checkpoint does.
+
+During a live switch the route answers at once and reports the engine new requests will go to, with `loaded: false`.
 
 ### Synthesize Metadata
 
@@ -464,10 +522,20 @@ Common fields:
 `text_optimization_default` (`off` | `deterministic`) is used by public synthesis
 requests without their own `text_optimization` field.
 
+`phonon_lang`, `phonon_quant`, `phonon_workers` (1-16) and `phonon_threads` (0-64) are read when the
+Phonon engines load; `phonon_threads` needs a server restart.
+
+`max_parallel_requests`, `max_batch_size`, `batch_wait_ms`, `vram_budget_mb`, `stream_chunk_ms`,
+`stream_prebuffer_ms` and `preferred_device` are kept per engine (`engine_profiles` in
+`runtime_settings.json`, not part of this API), so a value tuned for one engine survives a switch
+through another. A PUT that also changes `runtime_backend` stores the ones it sends for the target
+engine. Which fields belong to which engine: `settings_fields` and `server_settings_fields` of
+`GET /api/admin/runtime/engines`.
+
 ### Settings Presets
 
 ```http
-GET    /api/admin/settings/presets
+GET    /api/admin/settings/presets[?engine=ming]
 PUT    /api/admin/settings/presets/{name}
 DELETE /api/admin/settings/presets/{name}
 ```
@@ -484,7 +552,7 @@ only fills the settings draft; it takes effect through the normal
 | `24GB VRAM` | RTX 4090, all G3 services on one card (whole-card peak <= 23 GB) | 4 / 4 | 5000 | ~2.6 / ~3.8 GB |
 | `24+8 VRAM` | RTX 3090 (24 GB) + RTX 2070S (8 GB), OmniVoice on the 24 GB card | 4 / 4 | 5000 | ~2.6 / ~3.8 GB |
 
-All tiers: `batch_wait_ms` 30, `cuda_memory_trim_after_batch` on, `num_step` 20,
+All tiers: `batch_wait_ms` 30, `cuda_memory_trim_after_batch` on, `num_step` 25,
 `compile_model` on, `torch_dtype` `bfloat16`, FlashInfer off; the other preset keys
 are the code defaults. The VRAM figures were measured on the RTX 5090 with the 14.4 s
 `Sonja` prompt at batch 8 / batch 4 (the shorter `SonjaV2` default needs less).
@@ -528,6 +596,7 @@ environment sets it), so `cuda:N` is `nvidia-smi` GPU N.
   "presets": [
     {
       "name": "24+8 VRAM",
+      "engine": "omnivoice",
       "built_in": true,
       "description": "3090 (24 GB) + 2070S (8 GB), OmniVoice auf der 24-GB-Karte. Batch 4, VRAM-Budget 5000 MB: ...",
       "target_vram_gb": 24,
@@ -548,7 +617,12 @@ voices, theme, unknown keys) is dropped, and `null` values are skipped:
 `compile_model`, `compile_cudagraphs`, `cudagraph_skip_dynamic_graphs`,
 `cuda_memory_trim_after_batch`, `warmup_on_startup`, `max_parallel_requests`,
 `max_batch_size`, `batch_wait_ms`, `vram_budget_mb`, `max_input_chars`, `num_step`,
-`audio_chunk_duration`, `audio_chunk_threshold`.
+`audio_chunk_duration`, `audio_chunk_threshold`, `runtime_backend`, `ming_max_slots`,
+`ming_cuda_graphs`, `ming_output_sample_rate`, `ming_first_chunk_latents`,
+`ming_max_chunk_latents`, `phonon_lang`, `phonon_quant`, `phonon_workers`, `phonon_threads`.
+
+`engine` on a list item is derived, never stored: `values.runtime_backend` when set, else `ming` when
+a `ming_*` key is present, else `omnivoice`. `?engine=` keeps only that engine's presets.
 
 Names are trimmed (inner whitespace collapsed), at most 64 characters. Saved presets
 are written atomically to `data/settings_presets.json`.
@@ -565,7 +639,7 @@ GET /api/admin/dashboard/stream
 ```
 
 `/snapshot` returns current queue, settings, GPU, jobs, voices, models, current
-batch and recent batches.
+batch and recent batches. `models` keeps every alias, `selectable_models` is what the admin can pick.
 
 `/dashboard/stream` returns Server-Sent Events:
 
@@ -590,6 +664,8 @@ POST /api/admin/models/reload
 POST /api/admin/runtime/free-memory
 ```
 
+`GET /api/admin/models` lists the selectable models only (see Dashboard Snapshot).
+
 Download/delete body:
 
 ```json
@@ -598,6 +674,10 @@ Download/delete body:
   "storage_path": "X:\\dev\\G3_OmniVoice\\models"
 }
 ```
+
+`POST /api/admin/models/download` also takes `engine`: `{ "engine": "ming" }` fetches Ming's weights
+before it is selected. Phonon answers `400`: its repository is gated and CC-BY-NC-4.0, a manual
+download. Progress and errors show on `GET /api/admin/runtime/engines`.
 
 Preload/warmup/reload body:
 

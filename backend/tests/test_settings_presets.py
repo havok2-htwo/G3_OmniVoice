@@ -63,7 +63,7 @@ def test_builtin_tiers_carry_the_measured_values(name, batch, budget) -> None:
     assert (values['max_batch_size'], values['max_parallel_requests'], values['vram_budget_mb']) == (batch, batch, budget)
     assert values['batch_wait_ms'] == 30
     assert values['cuda_memory_trim_after_batch'] is True
-    assert (values['num_step'], values['compile_model'], values['torch_dtype']) == (20, True, 'bfloat16')
+    assert (values['num_step'], values['compile_model'], values['torch_dtype']) == (25, True, 'bfloat16')
     assert values['enable_flashinfer'] is False
     assert 'RTX 5090' in presets.BUILTIN_PRESETS[name]['description'], 'the description names where the VRAM was measured'
 

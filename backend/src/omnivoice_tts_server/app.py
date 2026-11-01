@@ -17,7 +17,13 @@ from fastapi.staticfiles import StaticFiles
 from .api.router_v2 import router as api_router
 from .capacity import capacity_summary
 from .config import Settings, get_settings, snapshot_engine_fields
-from .engines import EngineSwitcher, engine_spec, fix_active_model, uses_voice_profiles
+from .engines import (
+    EngineSwitcher,
+    apply_startup_engine_values,
+    engine_spec,
+    fix_active_model,
+    uses_voice_profiles,
+)
 from .domain.state import InMemoryStore
 from .finetune import FinetuneService, FinetuneTrainer
 from .finetune.registry import seed_supported_models
@@ -153,6 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         seed_supported_models(settings)
         # A saved active_model the list does not contain (e.g. another engine's alias) falls back to OmniVoice-Base.
         fix_active_model(settings)
+        apply_startup_engine_values(settings)
         # The OmniVoice values of the fields another engine's build_synthesizer rewrites; restored on a switch.
         engine_baseline = snapshot_engine_fields(settings)
         store.active_model = settings.active_model

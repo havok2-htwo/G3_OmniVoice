@@ -19,7 +19,8 @@ Two ways to run it:
            --work-dir C:/tmp/bench --out ming32.json
      --spawn omnivoice --preset "32GB VRAM" applies an OmniVoice tier's values from presets.py.
 
-Requires httpx + numpy (both in the backend env). The WER round trip lives in bench_wer_roundtrip.py.
+Requires httpx + numpy (both in the backend env); --spawn also imports the server package, so run it from that env.
+The WER round trip lives in bench_wer_roundtrip.py.
 """
 from __future__ import annotations
 
@@ -323,13 +324,24 @@ def prepare_data_dir(work_dir: Path, backend: str, overrides: dict[str, Any], pr
     settings: dict[str, Any] = {}
     if (src / 'runtime_settings.json').exists():
         settings = json.loads((src / 'runtime_settings.json').read_text(encoding='utf-8'))
+    sys.path.insert(0, str(REPO / 'backend' / 'src'))
+    from omnivoice_tts_server.config import ENGINE_TUNED_FIELDS, Settings  # noqa: PLC0415
+
+    # The repo's values for this engine are its saved profile, the flat keys may belong to another engine.
+    settings.update((settings.get('engine_profiles') or {}).get(backend) or {})
     if preset:
-        sys.path.insert(0, str(REPO / 'backend' / 'src'))
         from omnivoice_tts_server.presets import BUILTIN_PRESETS  # noqa: PLC0415
 
         settings.update(BUILTIN_PRESETS[preset]['values'])
     settings.update(overrides)
     settings['runtime_backend'] = backend
+    if preset or overrides:
+        # The start replaces flat tuned keys with the engine's profile, or Ming's tier (slots too) without one. A full
+        # profile keeps what was asked for. A bare --spawn writes none: it starts like any server with that file.
+        defaults = Settings()
+        settings['engine_profiles'] = {
+            backend: {name: settings.get(name, getattr(defaults, name)) for name in ENGINE_TUNED_FIELDS}
+        }
     (data / 'runtime_settings.json').write_text(json.dumps(settings, indent=2, sort_keys=True), encoding='utf-8')
     return data
 

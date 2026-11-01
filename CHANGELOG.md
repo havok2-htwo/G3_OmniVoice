@@ -4,6 +4,66 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - OmniVoice default is 25 steps
+
+- `num_step` is 25 instead of 20 in the server default and in the OmniVoice tiers `32GB VRAM`, `24GB VRAM` and `24+8 VRAM`.
+  Saved settings and saved presets keep their own value.
+- Measured over 100 fixed German sentences (voice SonjaV3, seed 9301, round trip through G3_Whisper, tolerance 2
+  letters per word): 10 steps WER 0.91 %, 15: 0.46 %, 20: 0.18 %, 25: 0.00 %, 30: 0.00 %, 35: 0.09 %, 40: 0.09 %.
+  25 and 30 had no errors, and 25 was about 8 % faster; above 30 the run time rises steeply with no gain. One voice
+  and one seed only: from 20 steps upward a single sentence decides the difference.
+
+### Added - Ming fragment limit
+
+- `ming_fragment_max_chars` (default 24, upstream's value, unchanged behaviour; settings file or
+  `OMNIVOICE_TTS_MING_FRAGMENT_MAX_CHARS`, read when Ming loads) sets the longest text piece Ming renders in one go.
+  Higher values stop a sentence being cut at a comma, at the cost of output room per piece (see the next point).
+- Measured Ming limit: a reference counts against the 512 positions of every text piece, so 15 s leaves about 15 s of
+  audio per piece, 25 s leaves about 2 s and 30 s no longer fits (requests fail with "Ming prompt too long").
+  References of 8 s and 14 s rendered at about the same speed as a 3.9 s one (single requests, no load test).
+
+### Changed - The admin picks one model, then that model's presets and settings
+
+- `GET /api/admin/models` lists only what the admin can select: Base and promoted `local/...` checkpoints, plus a saved
+  AutoVoice or VoiceDesign alias while it is the active model (nothing migrates it). The snapshot adds
+  `selectable_models`. The aliases stay valid for clients: `/v1/models`, `/api/v1/models` and `/v1/audio/models` are
+  unchanged, and they are hidden only in the admin.
+- `GET /api/admin/runtime/engines` adds `loaded` (read from the engine, not from the batch history), `downloadable`,
+  `settings_fields` per engine and `server_settings_fields`. `GET /api/admin/settings/presets` adds a derived `engine`
+  and an optional `?engine=` filter; stored presets, names, order and values are unchanged.
+- `phonon_lang`, `phonon_quant`, `phonon_workers` and `phonon_threads` are now runtime settings (GET and PUT
+  `/api/admin/settings`, preset keys). Once saved, the file beats `OMNIVOICE_TTS_PHONON_*`, like every other field.
+- `POST /api/admin/models/download` takes an optional `engine`, so Ming's weights can be fetched before it is selected.
+  Phonon stays a manual download (gated, CC-BY-NC-4.0), and the engine list now says so.
+
+### Added - `GET /api/v1/capabilities` and `GET /v1/capabilities`
+
+- A client can read the engine, the admin's selection, whether it is loaded, the sample rate, streaming type, languages
+  and which request fields the engine really honors (`speed` only on OmniVoice, `language` not on Phonon, delivery
+  controls only on Ming). No API key, and it does not wait during an engine switch.
+
+### Fixed - Clients could change the admin's model selection
+
+- A client naming `k2-fsa/OmniVoice-AutoVoice`, `tts-1` or any other id moved the active model. Later requests without
+  a model lost their default voice or failed with 400, the id reached `runtime_settings.json` with the next save, and an
+  unknown id then blocked every admin save. Finetune data generation in `auto` mode did the same. Now only admin
+  actions, the startup and the engine switch write `active_model`. The id still sets the task type of that request.
+- With a promoted `local/x` selected, a client's literal `k2-fsa/OmniVoice-Base` evicted it. Any id that does not start
+  with `local/` now runs on the selected checkpoint, as a clone when it asks for one.
+- `DELETE /api/admin/finetune/checkpoints/{id}` refuses the selected checkpoint with `409`, also while another engine
+  runs. Clients now resolve to the selection, so deleting it would fail all of them once it is evicted.
+- `POST /api/admin/models/delete` refuses `local/...` with `400`. It removed the shared base weights instead of the
+  checkpoint.
+
+### Fixed - Values tuned for one engine leaked into the next
+
+- A Ming tier's `max_parallel_requests: 16` and `batch_wait_ms: 0` stayed on OmniVoice after switching back. The fields
+  that depend on the engine now live per engine in `engine_profiles` in `runtime_settings.json` and move with a switch.
+  A settings PUT that also switches the engine stores the tuned values it sends for the target engine. A server that
+  starts on Ming without a profile, saved or pinned by env, gets the `Ming 24GB VRAM` tier. Files without
+  `engine_profiles` load as before. `bench_engine_streaming.py --spawn` writes `--preset` and `--set` into the engine's
+  profile, so the start keeps them.
+
 ### Fixed - Installer leaves Phonon without its runtime
 
 - `install.bat` and the Docker image never installed `ptts`, so the admin panel showed the Phonon engine as

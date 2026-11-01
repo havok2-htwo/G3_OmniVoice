@@ -487,7 +487,6 @@ class OmniVoiceSynthesizer:
                 resolved_source = None
             if resolved_source is not None and resolved_source == self._loaded_model_source:
                 self._loaded_model_id = target_model
-                self.settings.active_model = target_model
                 return target_model, 0
         warm_ms = await asyncio.to_thread(self._load_model_sync, target_model)
         return target_model, warm_ms
@@ -716,7 +715,6 @@ class OmniVoiceSynthesizer:
         self._model = model
         self._loaded_model_id = model_id
         self._loaded_model_source = model_source
-        self.settings.active_model = model_id
         self.sample_rate = int(getattr(model, 'sampling_rate', self.settings.sample_rate) or self.settings.sample_rate)
 
         if getattr(self.settings, 'warmup_on_startup', True):
@@ -1090,7 +1088,10 @@ class OmniVoiceSynthesizer:
         if any(not text for text in texts):
             raise RuntimeError('Missing input text')
 
-        task_type = items[0].request.task_type or self._task_type_from_model(self._loaded_model_id or self.settings.active_model)
+        # The request's id first: on a finetuned checkpoint the admin selected, a Base request is still a clone.
+        task_type = items[0].request.task_type or self._task_type_from_model(
+            items[0].request.model or self._loaded_model_id or self.settings.active_model
+        )
         languages = [self._normalize_language(item.request.language) for item in items]
         kwargs = self._generation_kwargs(items)
 

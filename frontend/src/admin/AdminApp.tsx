@@ -22,6 +22,7 @@ import {
   type BenchmarkRunResponse,
   type CreatedApiKey,
   type DashboardSnapshot,
+  type EngineInfo,
   type EngineListResponse,
   type JobMetrics,
   type MemoryCleanupResponse,
@@ -41,13 +42,6 @@ import {
   type WerBenchmarkDeviationsResponse,
   type WerBenchmarkRunResponse,
 } from "../shared/api";
-import {
-  DEFAULT_VOICE_DESIGN_INSTRUCT,
-  VOICE_DESIGN_GROUPS,
-  setVoiceDesignValue,
-  voiceDesignInstructOrDefault,
-  voiceDesignValueForGroup,
-} from "../shared/voiceDesign";
 import { SYNTH_LANGUAGE_OPTIONS } from "../shared/languages";
 import {
   EMPTY_MING_DELIVERY,
@@ -62,7 +56,10 @@ import {
   mingDeliveryFields,
   type MingDeliveryDraft,
 } from "../shared/mingDelivery";
+import { ActiveModelPanel } from "./ActiveModelPanel";
 import { DataGenerationPanel } from "./DataGenerationPanel";
+import { SettingsFields, pickFields } from "./EngineSettingsFields";
+import { ModelPicker } from "./ModelPicker";
 import { TrainingPanel } from "./TrainingPanel";
 
 type AdminTab = "overview" | "finetune_data" | "finetune_train";
@@ -82,6 +79,8 @@ function isRunActive(status: string | undefined): boolean {
 type SettingsPreset = {
   name: string;
   values: Partial<ServerSettings>;
+  /** The engine this preset tunes; the admin lists the active engine's presets only. */
+  engine: string;
   created_at?: string | null;
   built_in?: boolean;
   description?: string;
@@ -89,25 +88,14 @@ type SettingsPreset = {
   note?: string | null;
 };
 
-// Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
-// Batch seconds count generated audio plus each item's clone prompt (SonjaV2 8.2 s).
-const VRAM_BASE_MB = 2700;
-const VRAM_MB_PER_AUDIO_S = 15.5;
-const VRAM_EST_S_PER_CHAR = 0.07;
-const VRAM_MB_PER_SEQUENCE_S = 42;
-const VRAM_CHUNK_PROMPT_ALLOWANCE_S = 15;
-const VRAM_TYPICAL_ITEM_S = 110 * VRAM_EST_S_PER_CHAR + 8.2; // ~110-char sentence with SonjaV2
-function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number; items: number } | null {
-  if (!budgetMb || budgetMb <= 0) return null;
-  const budgetS = Math.max(15, (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_AUDIO_S);
-  const sequenceS = (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_SEQUENCE_S - VRAM_CHUNK_PROMPT_ALLOWANCE_S;
-  const chars = Math.max(240, Math.floor(sequenceS / VRAM_EST_S_PER_CHAR));
-  const items = Math.max(1, Math.floor(budgetS / VRAM_TYPICAL_ITEM_S));
-  return { peakGb: ((VRAM_BASE_MB + budgetS * VRAM_MB_PER_AUDIO_S) / 1024).toFixed(1), budgetS: Math.round(budgetS), chars, items };
+/** The engine changes only through the model picker: neither a stale draft nor a loaded preset may carry it along. */
+function withoutEngine<T extends Partial<ServerSettings>>(values: T): Omit<T, "runtime_backend"> {
+  const { runtime_backend: _engine, ...rest } = values;
+  return rest;
 }
 
 const OMNIVOICE_DEFAULTS = {
-  num_step: 20,
+  num_step: 25,
   guidance_scale: 2.0,
   t_shift: 0.1,
   denoise: true,
@@ -177,24 +165,11 @@ function parseWerSeedInput(value: string): { randomSeed: number | null; seedValu
 
 const ADMIN_HELP = {
   adminSession: "Admin-Zugang laeuft ueber Login und httpOnly Session-Cookie.",
-  modelOpsModel: "Zielmodell fuer Download, Preload, Warmup, Reload und Default-Speicherung.",
-  allowDownloads: "Erlaubt dem Backend, k2-fsa/OmniVoice aus Hugging Face in das lokale models-Verzeichnis zu laden.",
-  downloadPreload: "Schaltet Downloads frei, laedt fehlende Modelldateien und haelt das Modell im Speicher.",
-  preload: "Laedt das gewaehlte Modell ohne extra Benchmark-Run in den Speicher.",
-  warmup: "Fuehrt eine kurze Testgenerierung aus, damit CUDA/Triton/Kernels und Caches vorbereitet sind.",
-  reload: "Entlaedt und laedt das gewaehlte Modell neu. Noetig nach dtype/compile/graph-Aenderungen.",
-  unload: "Entfernt das Modell aus dem Speicher und leert CUDA Cache soweit moeglich.",
-  freeMemory: "Leert Python-GC, Prompt-Cache und PyTorch CUDA Cache, ohne das geladene Modell zu entladen.",
-  saveDefault: "Speichert das gewaehlte Modell als Default fuer neue Requests und Startups.",
-  modelDownloads: "Lokaler OmniVoice-Modellcache im Stil des TADA3B Panels: Status, Pfad und Download-Aktionen.",
-  refreshDownloads: "Liest den lokalen Modellcache im aktuell eingetragenen Model directory neu ein.",
-  downloadModel: "Startet einen Hugging-Face-Download im Hintergrund. Danach das Modell mit Preload/Warmup in den Speicher laden.",
-  deleteModel: "Loescht den lokalen Cache fuer OmniVoice im gewaehlten Model directory.",
-  quickModel: "Modell fuer die schnelle Admin-Synthese. AutoVoice, VoiceDesign und Base haben unterschiedliche Voice-Regeln.",
-  quickVoice: "Stimme fuer Quick Synthesis. Custom Voices laufen mit OmniVoice-Base, VoiceDesign braucht keine feste Stimme.",
+  quickModel: "Modell fuer die schnelle Admin-Synthese.",
+  quickVoice: "Stimme fuer Quick Synthesis. Custom Voices laufen mit dem Base-Modell.",
   quickText: "Text fuer den Streaming-Test. Der erste Satz bekommt einen Fast-Path, danach werden kompatible Saetze wieder gebatcht.",
   quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
-  quickInstructions: "VoiceDesign akzeptiert nur feste Tags aus den Dropdowns. Freitext wird von OmniVoice abgelehnt.",
+  quickInstructions: "Optionale Anweisung, die mit dem Request an die Engine geht.",
   quickMingInstruction: "Ming: freie Anweisung zur Sprechweise (z.B. \"spricht ruhig und warm, leicht laechelnd\"). Nicht mit Emotion/Tempo/Tonhoehe/Lautstaerke kombinierbar; solange eines davon gesetzt ist, wird sie nicht gesendet.",
   mingEmotion: "Ming: Emotion der Ausgabe. Geht zusammen mit Tempo/Tonhoehe/Lautstaerke als eine strukturierte Anweisung an das Modell.",
   mingRate: "Ming: Sprechtempo. Ist einer von Tempo/Tonhoehe/Lautstaerke gesetzt, fuellt der Server die anderen mit 'mittel'.",
@@ -204,53 +179,8 @@ const ADMIN_HELP = {
   mingTags: "Ming: fuegt einen Geraeusch-Tag an der Cursorposition im Text ein. Tags werden nicht vorgelesen; eine Engine ohne diesen Tag entfernt ihn.",
   quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
   quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese (bei 'off' den Originaltext). Sprache Auto: Deutsch/Englisch wird an Schreibweise (24.09.2026, 14:30 Uhr, 3:30 PM) oder an typischen Woertern erkannt; andere Sprachen bleiben unveraendert.",
-  textOptimizationDefault: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus. Wirkt nur, wenn der Request de/en angibt oder der Text bei Auto/ohne Sprache als Deutsch/Englisch erkannt wird (Schreibweise oder typische Woerter); andere Sprachen bleiben unveraendert. Benchmarks, WER und Finetune bleiben immer aus.",
-  defaultModel: "Default-Modell fuer neue Jobs, Model Ops und den naechsten Serverstart.",
-  defaultVoice: "Default-Stimme passend zum Default-Modell. Base braucht eine gespeicherte Custom Voice.",
-  queueLimit: "Maximale Anzahl wartender Jobs, bevor neue Requests mit 429 abgelehnt werden.",
-  activeRequests: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.",
-  batchSize: "Maximale Anzahl kompatibler Saetze/Requests pro echtem OmniVoice generate(text=[...]) Batch.",
-  batchWait: "Wartezeit, um kompatible Queue-Items fuer einen groesseren Batch zu sammeln.",
-  vramBudget: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). Obergrenze fuer den VRAM dieses Prozesses. Default: 7000 (Batch 8 passt; gemessen ~5 GB Peak mit Sonja, SonjaV2 braucht weniger); 5000 fuer Batch 4 auf geteilten 24-GB-Karten. Ab Batch 4 steigt der Durchsatz mit Klon-Stimmen kaum noch (~35x Echtzeit).",
-  maxInputChars: "Harte Obergrenze fuer die Zeichenzahl eines einzelnen Requests. Darueber kommt 413. 0 = aus.",
-  vramEstimate: "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel (gemessen auf der RTX 5090): ~2,7 GB Modell + ~15,5 MB pro Sekunde Audio im Batch, wobei jeder Batch-Eintrag sein erzeugtes Audio plus den Referenz-Prompt der Stimme mitbringt (SonjaV2 8,2 s, Sonja 14,4 s). \"Saetze\" = Batch-Eintraege mit ~110 Zeichen und SonjaV2.",
-  streamPrebuffer: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.",
-  modelDirectory: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache.",
-  whisperUrl: "Einzige Whisper URL. Host/Port reicht, z.B. http://127.0.0.1:7861 (Default, G3_WHISPER auf demselben Rechner); ein voller Endpoint wie /transcribe/ geht auch.",
-  vllmBaseUrl: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.",
-  vllmModel: "vLLM Modell fuer WER-Saetze. Default: Qwen/Qwen3.6-35B-A3B-FP8. Leer lassen nutzt das erste Modell aus /v1/models.",
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
-  preferredDevice: "CUDA-Geraet fuer die aktive Engine (OmniVoice und Ming; Phonon laeuft auf der CPU). Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv.",
-  engineSelect: "TTS-Engine des Servers. Der Wechsel laeuft ohne Neustart: laufende Jobs werden fertig, wartende und neue Anfragen gehen an die neue Engine. Clients nutzen dieselben Endpunkte weiter.",
-  mingSlots: "Ming: Zeilen, die gleichzeitig decodiert werden (kontinuierliches Batching, neue Anfragen steigen am naechsten Schritt ein). Mehr Slots = mehr Durchsatz und VRAM. Aktiv beim naechsten Laden von Ming.",
-  mingFirstChunk: "Ming: Latents (je 80 ms) im ersten Stream-Chunk eines Satzes. Klein = schnelle erste Audiodaten (TTFA).",
-  mingMaxChunk: "Ming: Latents (je 80 ms) in den folgenden Stream-Chunks. Groesser = weniger Overhead, etwas spaetere Lieferung.",
-  mingSampleRate: "Ming-Ausgaberate. 24000 haelt den Client-Vertrag (Raw-PCM von /v1/audio/speech ist 24 kHz); 44100 ist die native Rate.",
-  mingCudaGraphs: "Ming: CUDA Graphs fuer die Schritt-Schleife (die eager-Schleife ist launch-gebunden). Nur zum Debuggen abschalten.",
-  mingModelDir: "Ordner mit den Ming-3.0-tts-0.5B Gewichten (hf download inclusionAI/Ming-3.0-tts-0.5B --local-dir ...).",
   refreshRuntimeDevices: "Liest CPU/CUDA-Geraete neu ein.",
-  werConcurrency: "TTS-Wellengroesse fuer WER-Benchmarks. Eine Welle wird zusammen in die Queue gelegt, damit OmniVoice echte Batches sieht.",
-  werTranscriptionConcurrency: "Whisper-Parallelitaet nach der Audio-Erzeugung. Auf demselben GPU-System meist 1 lassen, damit ASR die TTS-Batches nicht ausbremst.",
-  dtype: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig. fp8 = experimentell (RTX 50xx fp8-Tensor-Cores, weniger VRAM); faellt bei Fehler automatisch auf bf16 zurueck. Erst nach Reload aktiv; Audioqualitaet unbedingt per WER-Benchmark pruefen.",
-  numStep: "OmniVoice Diffusion-/Sampling-Schritte. Mehr kann Qualitaet verbessern, kostet Zeit. Default: 18.",
-  guidance: "Guidance Scale fuer die Steuerstaerke. Hoeher folgt Prompts staerker, kann aber Artefakte erzeugen. Default: 2.0.",
-  duration: "Optionale Ziel-Dauer in Sekunden. Leer lassen fuer OmniVoice-Automatik. Default: auto.",
-  tShift: "OmniVoice Zeitverschiebungsparameter. Nur aendern, wenn du gezielt Sampling-Verhalten testest. Default: 0.1.",
-  positionTemperature: "Temperatur fuer die Positionsauswahl beim Token-Unmasking. Default: 5.0.",
-  classTemperature: "Temperatur fuer die Token-Klassenwahl. 0 bedeutet greedy. Default: 0.0.",
-  audioChunkDuration: "Interne OmniVoice-Ziellaenge fuer lange Audio-Chunks in Sekunden. Default: 30.1.",
-  audioChunkThreshold: "Ab welcher geschaetzten Dauer (Sek.) OmniVoice intern in Stuecke schneidet. Fuer Hoerbuecher hoch setzen (z.B. 1800), damit der Text als EINE durchgehende Sequenz mit Betonung erzeugt wird. Grenze ist der VRAM (~7-9 min am Stueck). Default: 30.",
-  sentenceChunking: "Zerlegt lange Texte in Saetze. Das macht Streaming frueher hoerbar und erlaubt Satz-Batching.",
-  compileModel: "Aktiviert torch.compile fuer das LLM im OmniVoice-Modell. Erst nach Reload/Restart wirksam.",
-  streamPreempt: "Kommt eine Streaming-Anfrage, waehrend ein Batch rechnet, wird ihr erster Satz am naechsten Diffusionsschritt solo dazwischengeschoben statt nach dem Batch. Erstes Audio deutlich frueher, der laufende Batch bleibt bitgleich und pausiert nur kurz.",
-  packedCfg: "Rechnet pro Item eine Zeile [mit Stimme | ohne Stimme] statt zwei aufgefuellter Zeilen, spart die Fuell-Tokens der CFG. Auf der RTX 5090 etwa 20-33 % schneller, Audio numerisch minimal anders. Erst nach Reload/Restart wirksam.",
-  sdpaCudnn: "Setzt cuDNN an die erste Stelle der SDPA-Kernelwahl (sonst mem-efficient). Auf der RTX 5090 etwa 15-22 % schneller, Audio numerisch minimal anders. Erst nach Reload/Restart wirksam.",
-  cudagraphSkip: "Laesst Inductor dynamische CUDAGraph-Shapes ueberspringen und unterdrueckt viele Shape-Warnungen.",
-  autoVramTrim: "Leert den PyTorch CUDA Cache, sobald die Queue nach einem Batch leer ist (nicht mehr nach jedem Batch, das kostete 8-11 ms pro Batch). Gibt VRAM nach einer Lastphase an die anderen Dienste zurueck.",
-  warmupStartup: "Fuehrt beim Start automatisch Warmup aus. Gut fuer erste Latenz, verlaengert Startup.",
-  denoise: "Fuegt den OmniVoice-Denoise-Token in die Generierung ein. Default: an.",
-  preprocessPrompt: "Bereitet Referenzprompt und Clone-Audio vor dem Generieren auf. Default: an.",
-  postprocessOutput: "Entfernt/saeubert Stille und fuegt kleine Fades/Pads an. Default: an.",
   voiceName: "Name fuer die gespeicherte Clone-Stimme im Voice-Katalog.",
   voiceRefText: "Exakter gesprochener Text des Samples. OmniVoice-Base braucht ihn fuer Voice Clone Prompts.",
   voiceSample: "Audio-Sample der Stimme. Backend normalisiert es nach 24 kHz WAV.",
@@ -299,11 +229,8 @@ function voiceEngineSeed(voice: VoiceItem, engine?: string | null): number | nul
   return voice.engine_seeds?.[key] ?? (key === "omnivoice" ? voice.seed ?? null : null);
 }
 
-function preferredBaseModel(models: DashboardSnapshot["models"]) {
-  return (
-    models.find((model) => model.model_id.endsWith("OmniVoice-Base"))?.model_id ||
-    ""
-  );
+function preferredBaseModel(models: string[]) {
+  return models.find((model) => model.endsWith("OmniVoice-Base")) || "";
 }
 
 function voiceOptionsForTask(voices: DashboardSnapshot["voices"], taskType: TaskType) {
@@ -375,33 +302,9 @@ function formatGraphValue(value: number | undefined, label: string, suffix: stri
   return `${Math.round(numeric)}${suffix}`;
 }
 
-function formatModelSize(model: ModelDownloadStatus) {
-  const diskSize = Number(model.size_on_disk_gb);
-  if (Number.isFinite(diskSize) && diskSize > 0) {
-    return `${diskSize.toFixed(diskSize >= 10 ? 1 : 2)} GB`;
-  }
-  const approxSize = Number(model.approx_size_gb);
-  if (Number.isFinite(approxSize) && approxSize > 0) {
-    return `~${approxSize.toFixed(approxSize >= 10 ? 1 : 2)} GB`;
-  }
-  return "-";
-}
-
-function formatModelStatus(status: string) {
-  if (status === "ready") return "Ready";
-  if (status === "downloading") return "Downloading";
-  if (status === "partial") return "Partial";
-  if (status === "error") return "Error";
-  return "Missing";
-}
-
 function formatPercent(value?: number | null) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return `${(Number(value) * 100).toFixed(Number(value) >= 0.1 ? 1 : 2)}%`;
-}
-
-function resolveModelPath(model: ModelDownloadStatus) {
-  return model.local_path || model.cache_path || model.storage_root || "-";
 }
 
 function fallbackRuntimeDevice(deviceId: string): RuntimeDeviceInfo {
@@ -471,15 +374,13 @@ export function AdminApp() {
   const [settingsDraft, setSettingsDraft] = useState<ServerSettings | null>(null);
   const [presets, setPresets] = useState<SettingsPreset[]>([]);
   const [presetName, setPresetName] = useState("");
-  const builtInPresets = presets.filter((preset) => preset.built_in);
-  const savedPresets = presets.filter((preset) => !preset.built_in);
-  const selectedPreset = presets.find((preset) => preset.name === presetName.trim()) ?? null;
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [quickModel, setQuickModel] = useState("");
   const [quickVoice, setQuickVoice] = useState("");
-  const [modelOpsModel, setModelOpsModel] = useState("");
+  // True once the admin picked another model: only then a settings save may send default_model.
+  const [defaultModelPicked, setDefaultModelPicked] = useState(false);
   const [adminTab, setAdminTab] = useState<AdminTab>("overview");
   const [quickText, setQuickText] = useState("Das neue Adminpanel nutzt dieselbe Streaming-Pipeline wie die offene Demo.");
   const [quickLanguage, setQuickLanguage] = useState("Auto");
@@ -626,14 +527,15 @@ export function AdminApp() {
     const data = await apiFetch<DashboardSnapshot>("/api/admin/snapshot", { adminKey: key });
     setSnapshot(data);
     setSettingsDraft(applyOmniVoiceDefaults(data.settings));
+    setDefaultModelPicked(false);
     setQuickModel((current) => current || data.settings.default_model);
-    setModelOpsModel((current) => current || data.settings.default_model);
     setOverviewHistory((current) => [...current.slice(-119), { ...data.overview, recorded_at: new Date().toISOString() }]);
     void loadBenchmarks(key);
     void loadWerBenchmarks(key);
     void loadModelDownloads(key, data.settings.model_directory);
     void loadRuntimeDevices(key);
     void loadVllmModels(key, data.settings.vllm_base_url);
+    void loadEngines(key);
   }
 
   async function loadBenchmarks(key = adminKey) {
@@ -707,8 +609,7 @@ export function AdminApp() {
     }
   }
 
-  async function handleEngineSwitch() {
-    const target = engineTarget;
+  async function handleEngineSwitch(target: string) {
     if (!adminKey || !target || !engineList || target === engineList.active) return;
     setError("");
     setEngineSwitchBusy(true);
@@ -727,16 +628,18 @@ export function AdminApp() {
   }
 
   async function finishEngineSwitch(result: EngineListResponse) {
-    setEngineSwitchBusy(false);
+    // Stays locked until the new engine's draft is in: the old one must not be edited or saved any more.
+    setEngineSwitchBusy(true);
     setEngineTarget(result.active);
-    // The model list, default model and voices belong to the new engine now.
+    // The model list, default model, voices and presets belong to the new engine now.
     setQuickModel("");
-    setModelOpsModel("");
+    setPresetName("");
     try {
       await loadSnapshot(adminKey);
     } catch {
-      // The snapshot stream refreshes it shortly anyway.
+      // The stale-draft effect below retries.
     }
+    setEngineSwitchBusy(false);
     void loadPresets(adminKey);
     if (result.switch.state === "failed") {
       setError(`Engine-Wechsel fehlgeschlagen: ${result.switch.error || "unbekannter Fehler"}`);
@@ -805,7 +708,7 @@ export function AdminApp() {
     void loadEngines(adminKey);
   }, [adminKey, mustChange]);
 
-  // A live engine switch (started here, by a preset save or elsewhere): poll its progress until it is done.
+  // A live engine switch (started here or elsewhere): poll its progress until it is done.
   const engineSwitchRunning =
     engineSwitchBusy || ["draining", "unloading", "loading"].includes(engineList?.switch.state ?? "") || Boolean(snapshot?.settings.runtime_backend_pending);
   useEffect(() => {
@@ -821,6 +724,24 @@ export function AdminApp() {
     }, 700);
     return () => window.clearInterval(timer);
   }, [adminKey, mustChange, engineSwitchRunning]);
+
+  // Another tab or an API call switched the engine and this tab missed the progress: the draft holds the old engine's
+  // values, and the stream never replaces an existing draft.
+  const draftEngineStale = Boolean(settingsDraft && snapshot && settingsDraft.runtime_backend !== snapshot.settings.runtime_backend);
+  useEffect(() => {
+    if (!adminKey || mustChange || engineSwitchRunning || !draftEngineStale) return;
+    void (async () => {
+      const payload = await loadEngines(adminKey);
+      if (payload) await finishEngineSwitch(payload);
+    })();
+  }, [adminKey, mustChange, engineSwitchRunning, draftEngineStale]);
+
+  // The stream does not carry the engine list, and a request can load a model on its own (Phonon does so on the first).
+  const residentModels = snapshot?.models.filter((model) => model.loaded).map((model) => model.model_id).join();
+  useEffect(() => {
+    if (!adminKey || mustChange || residentModels === undefined) return;
+    void loadEngines(adminKey);
+  }, [adminKey, mustChange, residentModels]);
 
   // Poll the benchmark endpoints ONLY while a run is actually in progress, and at the
   // configured poll interval. Previously this polled both list endpoints (which return
@@ -842,13 +763,20 @@ export function AdminApp() {
     return () => window.clearInterval(timer);
   }, [adminKey, mustChange, benchmarkBusy, werBenchmarkBusy, benchmarks, werBenchmarks, snapshot?.settings.poll_interval_ms]);
 
+  const modelDownloadRunning =
+    modelDownloads.some((model) => model.status === "downloading") || Boolean(engineList?.engines.some((engine) => engine.status === "downloading"));
   useEffect(() => {
-    if (!adminKey || mustChange || !modelDownloads.some((model) => model.status === "downloading")) return;
+    if (!adminKey || mustChange || !modelDownloadRunning) return;
     const timer = window.setInterval(() => {
       void loadModelDownloads(adminKey, settingsDraft?.model_directory || "");
+      void loadEngines(adminKey);
     }, 2000);
-    return () => window.clearInterval(timer);
-  }, [adminKey, mustChange, modelDownloads, settingsDraft?.model_directory]);
+    return () => {
+      window.clearInterval(timer);
+      // The last poll can predate the end of the download: the cards must not keep showing it as running.
+      void loadEngines(adminKey);
+    };
+  }, [adminKey, mustChange, modelDownloadRunning, settingsDraft?.model_directory]);
 
   useEffect(() => {
     if (!adminKey || mustChange || !settingsDraft?.vllm_base_url) return;
@@ -858,8 +786,13 @@ export function AdminApp() {
     return () => window.clearTimeout(timer);
   }, [adminKey, mustChange, settingsDraft?.vllm_base_url]);
 
-  const models = snapshot?.models ?? [];
   const voices = snapshot?.voices ?? [];
+  const selectableModels = snapshot?.selectable_models ?? [];
+  // A running server older than this bundle (dist is served from disk, a build needs no restart) sends no field lists:
+  // treat its engine as not known yet instead of crashing the whole page on them.
+  const activeEngine = engineList?.engines.find((engine) => engine.active && engine.settings_fields) ?? null;
+  const enginePresets = presets.filter((preset) => preset.engine === activeEngine?.id);
+  const selectedPreset = enginePresets.find((preset) => preset.name === presetName.trim()) ?? null;
   const quickTaskType = useMemo(() => inferTaskType(quickModel || snapshot?.settings.default_model || ""), [quickModel, snapshot]);
   const quickVoices = useMemo(() => voiceOptionsForTask(voices, quickTaskType), [quickTaskType, voices]);
   const defaultTaskType = useMemo(() => inferTaskType(settingsDraft?.default_model || ""), [settingsDraft?.default_model]);
@@ -878,37 +811,21 @@ export function AdminApp() {
   const selectedRuntimeDeviceLabel = useMemo(() => {
     return runtimeDeviceOptions.find((device) => device.id === settingsDraft?.preferred_device)?.label || settingsDraft?.preferred_device || "-";
   }, [runtimeDeviceOptions, settingsDraft?.preferred_device]);
-  const selectedDefaultVoice = useMemo(() => {
-    const match = defaultVoiceOptions.find((voice) => voiceMatchesValue(voice, settingsDraft?.default_voice || ""));
-    if (!match) return "";
-    return match.source === "custom" ? match.voice_id : match.name;
-  }, [defaultVoiceOptions, settingsDraft?.default_voice]);
   const customVoices = useMemo(() => voices.filter((voice) => voice.source === "custom"), [voices]);
   // The engine whose voice seeds apply right now (requests and WER runs without a seed of their own).
-  const activeSeedEngine = seedEngineKey(engineList?.active ?? snapshot?.settings.runtime_backend);
+  const activeEngineId = engineList?.active ?? snapshot?.settings.runtime_backend;
+  const activeSeedEngine = seedEngineKey(activeEngineId);
   // Ming reads delivery controls and a free-form instruction; the other engines ignore them.
-  const mingEngineActive = (engineList?.active ?? snapshot?.settings.runtime_backend) === "ming";
-  const quickMingActive = mingEngineActive && quickTaskType !== "VoiceDesign";
-  const quickMingStructured = quickMingActive && hasStructuredMingControl(quickMingDelivery);
+  const mingEngineActive = activeEngineId === "ming";
+  const quickMingStructured = mingEngineActive && hasStructuredMingControl(quickMingDelivery);
+  // Same rule as finetune_supported in the backend's engines.py; no engine list carries it.
+  const finetuneSupported = activeEngineId === "omnivoice" || activeEngineId === "mock";
   const libraryVoices = customVoices;
-  const resolvedModelOpsModel = modelOpsModel || settingsDraft?.default_model || "";
-  const modelControlCards = useMemo(
-    () =>
-      models.map((model) => ({
-        model,
-        download: modelDownloads.find((download) => download.id === model.model_id),
-        selected: model.model_id === resolvedModelOpsModel,
-        isDefault: model.model_id === settingsDraft?.default_model,
-      })),
-    [modelDownloads, models, resolvedModelOpsModel, settingsDraft?.default_model],
-  );
+  const settingsFieldContext = { voiceOptions: defaultVoiceOptions, devices: runtimeDeviceOptions, vllmModels, vllmLoading: vllmModelsLoading };
 
   useEffect(() => {
     if (!quickVoices.length) {
       setQuickVoice("");
-      if (quickTaskType === "VoiceDesign") {
-        setQuickInstructions((current) => voiceDesignInstructOrDefault(current));
-      }
       return;
     }
     setQuickVoice((current) =>
@@ -919,47 +836,30 @@ export function AdminApp() {
   }, [quickTaskType, quickVoices, voices]);
 
   useEffect(() => {
-    if (quickTaskType === "VoiceDesign") {
-      setQuickInstructions((current) => voiceDesignInstructOrDefault(current));
-    }
-  }, [quickTaskType]);
+    const models = snapshot?.selectable_models;
+    const defaultModel = snapshot?.settings.default_model;
+    if (!models?.length || !defaultModel) return;
+    // With a single model the select is hidden, so nothing else could correct a model that is gone.
+    setQuickModel((current) => (models.includes(current) ? current : defaultModel));
+  }, [snapshot?.selectable_models, snapshot?.settings.default_model]);
 
   useEffect(() => {
-    if (!settingsDraft) return;
-    if (defaultTaskType === "VoiceDesign") {
-      if (settingsDraft.default_voice) {
-        setSettingsDraft({ ...settingsDraft, default_voice: "" });
-      }
-      return;
-    }
-    if (!defaultVoiceOptions.length) return;
-    if (!defaultVoiceOptions.some((voice) => voiceMatchesValue(voice, settingsDraft.default_voice))) {
-      setSettingsDraft({ ...settingsDraft, default_voice: firstVoiceValueForTask(voices, defaultTaskType) });
-    }
-  }, [defaultTaskType, defaultVoiceOptions, settingsDraft, voices]);
+    if (activeEngineId && !finetuneSupported) setAdminTab("overview");
+  }, [activeEngineId, finetuneSupported]);
 
-  useEffect(() => {
-    if (!models.length) return;
-    setModelOpsModel((current) => (current && models.some((model) => model.model_id === current) ? current : models[0].model_id));
-  }, [models]);
+  function patchDraft(patch: Partial<ServerSettings>) {
+    setSettingsDraft((current) => (current ? { ...current, ...patch } : current));
+  }
 
   function patchDefaultModel(modelId: string) {
-    const nextTaskType = inferTaskType(modelId);
-    setSettingsDraft((current) =>
-      current
-        ? {
-            ...current,
-            default_model: modelId,
-            default_voice: firstVoiceValueForTask(voices, nextTaskType),
-          }
-        : current,
-    );
+    setDefaultModelPicked(true);
+    patchDraft({ default_model: modelId });
   }
 
   function handleQuickVoiceChange(voiceId: string) {
     const voice = voices.find((item) => item.voice_id === voiceId || item.name === voiceId);
     if (voice?.source === "custom" && quickTaskType !== "Base") {
-      const baseModel = preferredBaseModel(models);
+      const baseModel = preferredBaseModel(selectableModels);
       if (baseModel) setQuickModel(baseModel);
     }
     setQuickVoice(voiceId);
@@ -1151,7 +1051,10 @@ export function AdminApp() {
       setMessage("Quick-Synthesis gestoppt.");
       return;
     }
-    if (!quickModel || (quickTaskType !== "VoiceDesign" && !quickVoice)) return;
+    if (!quickModel || !quickVoice) {
+      setQuickNote({ error: true, text: "Keine passende Stimme fuer dieses Modell." });
+      return;
+    }
     let sampleRate = (mingEngineActive ? snapshot?.settings.ming_output_sample_rate : undefined) ?? snapshot?.settings.sample_rate ?? 24000;
     stopQuickPlayback();
     unlockAudioPlayback(sampleRate);
@@ -1174,16 +1077,16 @@ export function AdminApp() {
         body: {
           input: quickText,
           model: quickModel,
-          voice: quickTaskType === "VoiceDesign" ? null : quickVoice,
+          voice: quickVoice,
           task_type: quickTaskType,
           // On Ming a structured control replaces the free instruction (the server rejects both together).
-          instructions: quickTaskType === "VoiceDesign" ? voiceDesignInstructOrDefault(quickInstructions) : quickMingStructured ? "" : quickInstructions,
+          instructions: quickMingStructured ? "" : quickInstructions,
           language: quickLanguage,
           stream: true,
           response_format: "pcm",
           seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
           text_optimization: quickTextOptimization || null,
-          ...(quickMingActive ? mingDeliveryFields(quickMingDelivery) : {}),
+          ...(mingEngineActive ? mingDeliveryFields(quickMingDelivery) : {}),
         },
         onEvent: (event: SynthStreamEvent) => {
           if (controller.signal.aborted) return;
@@ -1271,20 +1174,22 @@ export function AdminApp() {
     const preset = presets.find((item) => item.name === name);
     if (!preset || !settingsDraft) return;
     // Load preset values into the draft only; the user reviews and clicks Save to apply.
-    setSettingsDraft(applyOmniVoiceDefaults({ ...settingsDraft, ...preset.values } as ServerSettings));
+    setSettingsDraft(applyOmniVoiceDefaults({ ...settingsDraft, ...withoutEngine(preset.values) } as ServerSettings));
     const note = preset.note ? ` Hinweis: ${preset.note}` : "";
-    const engine =
-      preset.values.runtime_backend && preset.values.runtime_backend !== snapshot?.settings.runtime_backend
-        ? ` Speichern wechselt die Engine auf ${preset.values.runtime_backend}.`
-        : "";
-    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.${engine}${note}`);
+    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.${note}`);
   }
 
   async function handleSavePreset() {
     const name = presetName.trim();
-    if (!adminKey || !settingsDraft || !name) return;
+    if (!adminKey || !settingsDraft || !activeEngine || !name) return;
     if (presets.some((preset) => preset.built_in && preset.name === name)) {
       setError(`"${name}" ist ein eingebautes Preset; bitte unter einem anderen Namen speichern.`);
+      return;
+    }
+    // The list shows the active engine only, so a same-named preset of another engine would be overwritten unseen.
+    const foreign = presets.find((preset) => preset.name === name && preset.engine !== activeEngine.id);
+    if (foreign) {
+      setError(`"${name}" gehoert zu ${foreign.engine}; bitte unter einem anderen Namen speichern.`);
       return;
     }
     setError("");
@@ -1292,7 +1197,7 @@ export function AdminApp() {
       await apiFetch<SettingsPreset>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, {
         method: "PUT",
         adminKey,
-        body: { values: settingsDraft },
+        body: { values: { ...pickFields(settingsDraft, activeEngine.settings_fields), runtime_backend: activeEngine.id } },
       });
       await loadPresets(adminKey);
       setMessage(`Preset "${name}" gespeichert.`);
@@ -1318,18 +1223,17 @@ export function AdminApp() {
   async function handleSaveSettings() {
     if (!adminKey || !settingsDraft) return;
     const previousDevice = snapshot?.settings.preferred_device;
-    const previousBackend = snapshot?.settings.runtime_backend;
+    const { default_model: defaultModel, ...values } = withoutEngine(settingsDraft);
+    setError("");
     try {
-      const updated = await apiFetch<ServerSettings>("/api/admin/settings", { method: "PUT", adminKey, body: settingsDraft });
+      const updated = await apiFetch<ServerSettings>("/api/admin/settings", {
+        method: "PUT",
+        adminKey,
+        body: defaultModelPicked ? { ...values, default_model: defaultModel } : values,
+      });
       setSettingsDraft(applyOmniVoiceDefaults(updated));
       await loadSnapshot(adminKey);
       await loadModelDownloads(adminKey, updated.model_directory);
-      if (updated.runtime_backend_pending) {
-        setEngineSwitchBusy(true);
-        void loadEngines(adminKey);
-        setMessage(`Settings gespeichert. Engine-Wechsel ${previousBackend || ""} -> ${updated.runtime_backend_pending} laeuft.`);
-        return;
-      }
       setMessage(
         previousDevice && previousDevice !== updated.preferred_device
           ? "Settings gespeichert. GPU-Wechsel wird nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv."
@@ -1340,34 +1244,25 @@ export function AdminApp() {
     }
   }
 
-  async function handleSetOpsModelAsDefault(modelId = resolvedModelOpsModel) {
-    if (!adminKey || !settingsDraft || !modelId) return;
-    const nextTaskType = inferTaskType(modelId);
-    const nextSettings = {
-      ...settingsDraft,
-      default_model: modelId,
-      default_voice: firstVoiceValueForTask(voices, nextTaskType),
-    };
+  async function handleSetOpsModelAsDefault(modelId: string) {
+    if (!adminKey || !modelId) return;
+    setError("");
     try {
-      const updated = await apiFetch<ServerSettings>("/api/admin/settings", { method: "PUT", adminKey, body: nextSettings });
-      setSettingsDraft(applyOmniVoiceDefaults(updated));
-      await loadSnapshot(adminKey);
+      const updated = await apiFetch<ServerSettings>("/api/admin/settings", { method: "PUT", adminKey, body: { default_model: modelId } });
+      // Only the model was saved: other unsaved edits stay in the draft.
+      setDefaultModelPicked(false);
+      patchDraft({ default_model: updated.default_model });
       setMessage("Default-Modell gespeichert.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Default-Modell konnte nicht gespeichert werden.");
     }
   }
 
-  async function handleModelOperation(kind: "preload" | "warmup" | "unload" | "reload", modelId = resolvedModelOpsModel) {
+  async function handleModelOperation(kind: "preload" | "warmup" | "unload" | "reload") {
     if (!adminKey || !settingsDraft) return;
-    const targetModel = modelId || settingsDraft.default_model;
+    const targetModel = settingsDraft.default_model;
     const targetTaskType = inferTaskType(targetModel);
-    const warmupVoice =
-      targetTaskType === "VoiceDesign"
-        ? null
-        : targetTaskType === "Base"
-          ? customVoices[0]?.voice_id || settingsDraft.default_voice || null
-          : settingsDraft.default_voice || null;
+    const warmupVoice = (targetTaskType === "Base" ? customVoices[0]?.voice_id : undefined) || settingsDraft.default_voice || null;
     setModelOpsBusy(true);
     setError("");
     try {
@@ -1378,7 +1273,7 @@ export function AdminApp() {
           model: targetModel,
           task_type: targetTaskType,
           voice: warmupVoice,
-          instructions: kind === "warmup" && targetTaskType === "VoiceDesign" ? DEFAULT_VOICE_DESIGN_INSTRUCT : "",
+          instructions: "",
           language: "Auto",
         },
       });
@@ -1403,21 +1298,23 @@ export function AdminApp() {
     }
   }
 
-  async function handleModelDownload(modelId: string) {
+  /** `label` names the download in the UI; `target` is a model id, or an engine that is not active yet. */
+  async function startModelDownload(label: string, target: { model_id: string } | { engine: string }) {
     if (!adminKey || !settingsDraft) return;
-    setModelDownloadAction({ kind: "download", modelId });
+    setModelDownloadAction({ kind: "download", modelId: label });
     setError("");
     try {
       const payload = await apiFetch<ModelDownloadListResponse>("/api/admin/models/download", {
         method: "POST",
         adminKey,
         body: {
-          model_id: modelId,
+          ...target,
           storage_path: settingsDraft.model_directory,
         },
       });
       setModelDownloads(payload.models || []);
-      setMessage(`Download fuer ${modelId} gestartet.`);
+      await loadEngines(adminKey);
+      setMessage(`Download fuer ${label} gestartet.`);
     } catch (downloadError) {
       setError(downloadError instanceof Error ? downloadError.message : "Model-Download fehlgeschlagen.");
     } finally {
@@ -1496,10 +1393,10 @@ export function AdminApp() {
               label: settingsDraft.default_model,
               request: {
                 model: settingsDraft.default_model,
-                voice: taskType === "VoiceDesign" ? null : settingsDraft.default_voice,
+                voice: settingsDraft.default_voice,
                 task_type: taskType,
                 language: "Auto",
-                instructions: benchmarkInstructions(taskType),
+                instructions: benchmarkInstructions(),
                 response_format: "wav",
               },
             },
@@ -1516,9 +1413,8 @@ export function AdminApp() {
   }
 
   // Benchmark and WER runs measure the plain voice. On Ming the quick-synthesis textarea is the free-form
-  // instruction (a caption the engine applies), so it is not sent with them; VoiceDesign keeps its design tags.
-  function benchmarkInstructions(taskType: TaskType): string {
-    if (taskType === "VoiceDesign") return voiceDesignInstructOrDefault(quickInstructions);
+  // instruction (a caption the engine applies), so it is not sent with them.
+  function benchmarkInstructions(): string {
     return mingEngineActive ? "" : quickInstructions;
   }
 
@@ -1557,10 +1453,10 @@ export function AdminApp() {
           exclusive: true,
           request: {
             model: settingsDraft.default_model,
-            voice: taskType === "VoiceDesign" ? null : (werVoice || settingsDraft.default_voice),
+            voice: werVoice || settingsDraft.default_voice,
             task_type: taskType,
             language: "Auto",
-            instructions: benchmarkInstructions(taskType),
+            instructions: benchmarkInstructions(),
             response_format: "wav",
           },
         },
@@ -1905,8 +1801,12 @@ export function AdminApp() {
 
       <nav className="ft-tab-rail">
         <button type="button" className={`ft-tab ${adminTab === "overview" ? "active" : ""}`} onClick={() => setAdminTab("overview")}>Overview</button>
-        <button type="button" className={`ft-tab ${adminTab === "finetune_data" ? "active" : ""}`} onClick={() => setAdminTab("finetune_data")}>Data Generation</button>
-        <button type="button" className={`ft-tab ${adminTab === "finetune_train" ? "active" : ""}`} onClick={() => setAdminTab("finetune_train")}>Training</button>
+        {finetuneSupported ? (
+          <>
+            <button type="button" className={`ft-tab ${adminTab === "finetune_data" ? "active" : ""}`} onClick={() => setAdminTab("finetune_data")}>Data Generation</button>
+            <button type="button" className={`ft-tab ${adminTab === "finetune_train" ? "active" : ""}`} onClick={() => setAdminTab("finetune_train")}>Training</button>
+          </>
+        ) : null}
       </nav>
 
       {message ? <div className="message success">{message}</div> : null}
@@ -1953,266 +1853,107 @@ export function AdminApp() {
         </section>
 
         <section className="widget span-12">
-          <div className="widget-header">
-            <h2>Engine</h2>
-            <div className="button-row compact">
-              <button className="secondary-button" type="button" onClick={() => void loadEngines(adminKey)} disabled={engineSwitchRunning}>Status aktualisieren</button>
-            </div>
-          </div>
           {engineList ? (
-            <>
-              <div className="field-grid four">
-                <label className="with-help" title={ADMIN_HELP.engineSelect}>TTS-Engine<select value={engineTarget || engineList.active} onChange={(event) => setEngineTarget(event.target.value)} disabled={engineSwitchRunning}>
-                  {engineList.engines
-                    .filter((engine) => !engine.test_only || engine.active)
-                    .map((engine) => (
-                      <option key={engine.id} value={engine.id} disabled={!engine.available && !engine.active}>
-                        {engine.label}{engine.active ? " (aktiv)" : engine.available ? "" : " (nicht verfuegbar)"}
-                      </option>
-                    ))}
-                </select></label>
-                <div className="button-row compact" style={{ alignItems: "flex-end" }}>
-                  <button className="primary-button" type="button" onClick={() => void handleEngineSwitch()} disabled={engineSwitchRunning || !engineTarget || engineTarget === engineList.active} title={ADMIN_HELP.engineSelect}>
-                    {engineSwitchRunning ? "Wechsel laeuft..." : "Engine wechseln"}
-                  </button>
-                </div>
-              </div>
-              {engineSwitchRunning || engineList.switch.state !== "idle" ? (
-                <div className={`message ${engineList.switch.state === "failed" ? "error" : ""}`}>
-                  {engineList.switch.from_backend ?? "-"} -&gt; {engineList.switch.to_backend ?? "-"}: {engineList.switch.state}
-                  {engineList.switch.message ? ` - ${engineList.switch.message}` : ""}
-                  {engineList.switch.drained_jobs || engineList.switch.cancelled_jobs || engineList.switch.requeued_jobs
-                    ? ` (fertiggestellt ${engineList.switch.drained_jobs}, abgebrochen ${engineList.switch.cancelled_jobs}, neu eingereiht ${engineList.switch.requeued_jobs})`
-                    : ""}
-                  {engineList.switch.error ? ` - ${engineList.switch.error}` : ""}
-                </div>
-              ) : null}
-              {engineList.env_override ? (
-                <div className="message">OMNIVOICE_TTS_RUNTIME_BACKEND={engineList.env_override} ist gesetzt: ein Wechsel gilt bis zum naechsten Neustart, danach startet wieder diese Engine.</div>
-              ) : null}
-              <div className="model-bubble-grid">
-                {engineList.engines
-                  .filter((engine) => !engine.test_only || engine.active)
-                  .map((engine) => (
-                    <article key={engine.id} className={`model-bubble ${engine.active ? "active" : ""} ${engineTarget === engine.id ? "selected" : ""}`}>
-                      <div className="model-bubble-head">
-                        <div>
-                          <strong>{engine.label}</strong>
-                          <span className="mono">{engine.model_id || engine.id}</span>
-                        </div>
-                        <div className="inline-pills">
-                          <span className={`pill ${engine.active ? "active" : ""}`}>{engine.active ? "aktiv" : engine.status}</span>
-                          <span className={`pill ${engine.installed ? "active" : ""}`}>{engine.installed ? "installiert" : "Pakete fehlen"}</span>
-                          <span className={`pill ${engine.model_present ? "active" : ""}`}>{engine.model_present ? "Modell da" : "Modell fehlt"}</span>
-                        </div>
-                      </div>
-                      <p>{engine.description}</p>
-                      <div className="metric-list compact">
-                        <div className="metric-row"><span>Streaming</span><strong>{engine.native_streaming ? "Chunk-Streaming" : "satzweise"}</strong></div>
-                        <div className="metric-row"><span>Stimmprofile</span><strong>{engine.uses_voice_profiles ? "ja" : "nein (Katalog)"}</strong></div>
-                        <div className="metric-row"><span>Pfad</span><strong className="mono path-cell">{engine.model_dir || "-"}</strong></div>
-                      </div>
-                      {engine.detail ? <p className="model-error">{engine.detail}</p> : null}
-                    </article>
-                  ))}
-              </div>
-            </>
+            <ModelPicker
+              list={engineList}
+              target={engineTarget || engineList.active}
+              switchRunning={engineSwitchRunning}
+              downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
+              onSelect={setEngineTarget}
+              onLoad={(engineId) => void handleEngineSwitch(engineId)}
+              onDownload={(engine: EngineInfo) => void startModelDownload(engine.id, { engine: engine.id })}
+              onRefresh={() => void loadEngines(adminKey)}
+            />
           ) : (
-            <p>Engine-Status wird geladen...</p>
+            <>
+              <div className="widget-header"><h2>1. Modell</h2></div>
+              <p>Engine-Status wird geladen...</p>
+            </>
           )}
+          {activeEngine ? (
+            <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+              <ActiveModelPanel
+                engine={activeEngine}
+                snapshot={snapshot}
+                selectedModel={settingsDraft.default_model}
+                download={modelDownloads.find((download) => download.id === settingsDraft.default_model)}
+                deviceLabel={selectedRuntimeDeviceLabel}
+                busy={modelOpsBusy || modelDownloadAction?.kind === "delete"}
+                memoryBusy={memoryCleanupBusy}
+                cacheRefreshing={modelDownloadAction?.kind === "refresh"}
+                downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
+                onPickModel={patchDefaultModel}
+                onSetDefault={(modelId) => void handleSetOpsModelAsDefault(modelId)}
+                onOperation={(kind) => void handleModelOperation(kind)}
+                onDownload={(modelId) => void startModelDownload(modelId, { model_id: modelId })}
+                onDelete={(modelId) => void handleModelDelete(modelId)}
+                onRefreshCache={() => void handleModelDownloadRefresh()}
+                onFreeMemory={() => void handleFreeMemory()}
+              />
+            </fieldset>
+          ) : null}
         </section>
 
         <section className="widget span-12">
-          <div className="widget-header">
-            <h2>Model Control</h2>
-            <div className="button-row compact">
-              <button className="secondary-button" type="button" onClick={() => void handleModelDownloadRefresh()} disabled={modelDownloadAction?.kind === "refresh"} title={ADMIN_HELP.refreshDownloads}>{modelDownloadAction?.kind === "refresh" ? "Refreshing..." : "Refresh Cache"}</button>
-              <button className="secondary-button" type="button" onClick={() => void handleFreeMemory()} disabled={memoryCleanupBusy || modelOpsBusy} title={ADMIN_HELP.freeMemory}>Free VRAM</button>
+          <div className="widget-header"><h2>2. Presets{activeEngine ? ` fuer ${activeEngine.label}` : ""}</h2></div>
+          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+            <div className="button-row" style={{ flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
+              <select
+                value={selectedPreset ? selectedPreset.name : ""}
+                onChange={(event) => setPresetName(event.target.value)}
+                title={selectedPreset?.description || "Preset auswaehlen"}
+                style={{ maxWidth: "280px" }}
+              >
+                <option value="">{enginePresets.length ? "— Preset waehlen —" : "— Keine Presets fuer dieses Modell —"}</option>
+                {enginePresets.map((preset) => <option key={preset.name} value={preset.name} title={preset.description}>{preset.name}{preset.built_in ? " (eingebaut)" : ""}</option>)}
+              </select>
+              <button className="link-chip" type="button" onClick={() => selectedPreset && handleApplyPreset(selectedPreset.name)} disabled={!selectedPreset} title="Werte in den Entwurf uebernehmen; angewendet wird erst mit Settings speichern">In Entwurf laden</button>
+              <input
+                value={presetName}
+                onChange={(event) => setPresetName(event.target.value)}
+                placeholder="Preset-Name"
+                style={{ maxWidth: "170px" }}
+              />
+              <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim() || Boolean(selectedPreset?.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets sind schreibgeschuetzt" : "Werte dieses Modells aus dem Entwurf als Preset speichern"}>Als Preset speichern</button>
+              <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || Boolean(selectedPreset.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets koennen nicht geloescht werden" : "Gespeichertes Preset loeschen"}>Preset loeschen</button>
+              {selectedPreset?.built_in ? <span className="pill" title={selectedPreset.description}>eingebaut</span> : null}
+              {selectedPreset?.note ? <span className="pill" title={selectedPreset.note}>keine passende GPU</span> : null}
             </div>
-          </div>
-          <div className="metric-list compact model-control-summary">
-            <div className="metric-row"><span>Storage</span><strong className="mono path-cell">{settingsDraft.model_directory || "-"}</strong></div>
-            <div className="metric-row"><span>Runtime</span><strong title={selectedRuntimeDeviceLabel}>{settingsDraft.runtime_backend} / {settingsDraft.preferred_device} / {settingsDraft.torch_dtype}</strong></div>
-            <div className="metric-row"><span>Attention</span><strong title={settingsDraft.attention_backend_note ?? ""}>{settingsDraft.attention_backend ?? settingsDraft.attention_implementation}{settingsDraft.attention_backend_note ? " (Fallback)" : ""}</strong></div>
-            <div className="metric-row"><span>VRAM</span><strong>{snapshot.overview.gpu_memory_used_mb} / {snapshot.overview.gpu_memory_total_mb} MB</strong></div>
-            <div className="metric-row"><span>Compile</span><strong>{settingsDraft.compile_model ? "llm on" : "llm off"}</strong></div>
-          </div>
-          <label className="checkbox-row with-help" title={ADMIN_HELP.allowDownloads}><input type="checkbox" checked={settingsDraft.allow_model_downloads} onChange={(event) => setSettingsDraft({ ...settingsDraft, allow_model_downloads: event.target.checked })} />HF-Downloads erlauben</label>
-          {snapshot.jobs[0]?.status === "failed" && snapshot.jobs[0]?.error_message ? (
-            <div className="message error">{snapshot.jobs[0].error_message}</div>
-          ) : null}
-          <div className="model-bubble-grid">
-            {modelControlCards.map(({ model, download, selected, isDefault }) => {
-              const downloadStatus = download?.status || "missing";
-              const actionBusy = modelOpsBusy || modelDownloadAction?.modelId === model.model_id;
-              return (
-                <article key={model.model_id} className={`model-bubble ${model.active ? "active" : ""} ${selected ? "selected" : ""}`}>
-                  <div className="model-bubble-head">
-                    <div>
-                      <strong>{download?.label || model.model_id.split("/").pop() || model.model_id}</strong>
-                      <span className="mono">{model.model_id}</span>
-                    </div>
-                    <div className="inline-pills">
-                      <span className={`pill ${model.active ? "active" : ""}`}>{model.active ? "active" : "idle"}</span>
-                      <span className={`pill ${model.loaded ? "active" : ""}`}>{model.loaded ? "loaded" : "cold"}</span>
-                      <span className={`pill ${downloadStatus === "ready" ? "active" : ""}`}>{formatModelStatus(downloadStatus)}</span>
-                    </div>
-                  </div>
-                  <div className="metric-list compact">
-                    <div className="metric-row"><span>Default</span><strong>{isDefault ? "yes" : "no"}</strong></div>
-                    <div className="metric-row"><span>Type</span><strong>{download?.kind || model.task_types.join(", ")}</strong></div>
-                    <div className="metric-row"><span>Size</span><strong>{download ? formatModelSize(download) : "-"}</strong></div>
-                    <div className="metric-row"><span>Path</span><strong className="mono path-cell">{download ? resolveModelPath(download) : settingsDraft.model_directory}</strong></div>
-                  </div>
-                  {download?.error ? <p className="model-error">{download.error}</p> : null}
-                  <div className="button-row compact model-bubble-actions">
-                    <button className="secondary-button" type="button" onClick={() => setModelOpsModel(model.model_id)} title={ADMIN_HELP.modelOpsModel}>Select</button>
-                    <button className="secondary-button" type="button" onClick={() => void handleModelDownload(model.model_id)} disabled={downloadStatus === "downloading" || actionBusy} title={ADMIN_HELP.downloadModel}>
-                      {downloadStatus === "downloading" ? "Downloading..." : modelDownloadAction?.kind === "download" && modelDownloadAction.modelId === model.model_id ? "Starting..." : downloadStatus === "ready" ? "Download Again" : "Download"}
-                    </button>
-                    <button className="secondary-button" type="button" onClick={() => void handleModelOperation("preload", model.model_id)} disabled={actionBusy} title={ADMIN_HELP.preload}>Preload</button>
-                    <button className="primary-button" type="button" onClick={() => void handleModelOperation("warmup", model.model_id)} disabled={actionBusy} title={ADMIN_HELP.warmup}>Warmup</button>
-                    <button className="secondary-button" type="button" onClick={() => void handleModelOperation("reload", model.model_id)} disabled={actionBusy} title={ADMIN_HELP.reload}>Reload</button>
-                    <button className="ghost-button" type="button" onClick={() => void handleModelOperation("unload", model.model_id)} disabled={actionBusy} title={ADMIN_HELP.unload}>Unload</button>
-                    <button className="secondary-button" type="button" onClick={() => void handleSetOpsModelAsDefault(model.model_id)} disabled={actionBusy || isDefault} title={ADMIN_HELP.saveDefault}>Default</button>
-                    <button className="ghost-button" type="button" onClick={() => void handleModelDelete(model.model_id)} disabled={!download?.cache_path || downloadStatus === "downloading" || actionBusy} title={ADMIN_HELP.deleteModel}>Delete Cache</button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
+            {selectedPreset?.description || selectedPreset?.note ? (
+              <p className="muted" style={{ margin: "4px 0 0" }}>{[selectedPreset.description, selectedPreset.note].filter(Boolean).join(" ")}</p>
+            ) : null}
+          </fieldset>
         </section>
 
-        <section className="widget span-12"><div className="widget-header"><h2>Runtime Settings</h2></div>
-          <div className="field-grid four">
-            <label className="with-help" title={ADMIN_HELP.defaultModel}>Default model<select value={settingsDraft.default_model} onChange={(event) => patchDefaultModel(event.target.value)}>{models.map((model) => <option key={model.model_id} value={model.model_id}>{model.model_id}</option>)}</select></label>
-            <label className="with-help" title={ADMIN_HELP.defaultVoice}>Default voice<select value={selectedDefaultVoice} onChange={(event) => setSettingsDraft({ ...settingsDraft, default_voice: event.target.value })} disabled={defaultTaskType === "VoiceDesign" || !defaultVoiceOptions.length}>
-              {defaultTaskType === "VoiceDesign" ? <option value="">Prompt-defined voice</option> : null}
-              {defaultTaskType !== "VoiceDesign" && !defaultVoiceOptions.length ? <option value="">Keine passende Stimme</option> : null}
-              {defaultVoiceOptions.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name}</option>)}
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.preferredDevice}>GPU<select value={settingsDraft.preferred_device} onChange={(event) => setSettingsDraft({ ...settingsDraft, preferred_device: event.target.value })}>
-              {runtimeDeviceOptions.map((device) => <option key={device.id} value={device.id}>{device.label}{device.available ? "" : " (nicht verfuegbar)"}</option>)}
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.modelDirectory}>Model directory<input value={settingsDraft.model_directory} onChange={(event) => setSettingsDraft({ ...settingsDraft, model_directory: event.target.value })} /></label>
-            <label className="with-help" title={ADMIN_HELP.whisperUrl}>Whisper URL<input value={settingsDraft.whisper_base_url || ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, whisper_base_url: event.target.value, whisper_path: "" })} placeholder="http://127.0.0.1:7861" /></label>
-            <label className="with-help" title={ADMIN_HELP.vllmBaseUrl}>vLLM Base URL<input value={settingsDraft.vllm_base_url} onChange={(event) => setSettingsDraft({ ...settingsDraft, vllm_base_url: event.target.value })} placeholder="http://192.168.20.126:8000" /></label>
-            <label className="with-help" title={ADMIN_HELP.vllmModel}>vLLM Model
-              {vllmModels.length > 1 ? (
-                <select value={settingsDraft.vllm_model || vllmModels[0]} onChange={(event) => setSettingsDraft({ ...settingsDraft, vllm_model: event.target.value })}>
-                  {vllmModels.map((model) => <option key={model} value={model}>{model}</option>)}
-                </select>
-              ) : (
-                <input value={settingsDraft.vllm_model || vllmModels[0] || ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, vllm_model: event.target.value })} placeholder={vllmModelsLoading ? "lade Modelle..." : "auto aus /v1/models"} />
-              )}
-            </label>
-            <label className="with-help" title={ADMIN_HELP.werConcurrency}>WER TTS wave<input type="number" min="1" max="64" value={settingsDraft.wer_concurrency} onChange={(event) => setSettingsDraft({ ...settingsDraft, wer_concurrency: Number(event.target.value) || 1 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.werTranscriptionConcurrency}>WER ASR concurrency<input type="number" min="1" max="64" value={settingsDraft.wer_transcription_concurrency} onChange={(event) => setSettingsDraft({ ...settingsDraft, wer_transcription_concurrency: Number(event.target.value) || 1 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.queueLimit}>Queue limit<input type="number" value={settingsDraft.queue_limit} onChange={(event) => setSettingsDraft({ ...settingsDraft, queue_limit: Number(event.target.value) || 1 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.activeRequests}>Active requests<input type="number" value={settingsDraft.max_parallel_requests} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_parallel_requests: Number(event.target.value) || 1 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.batchSize}>Batch size<input type="number" value={settingsDraft.max_batch_size} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_batch_size: Number(event.target.value) || 1 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.batchWait}>Batch wait ms<input type="number" value={settingsDraft.batch_wait_ms} onChange={(event) => setSettingsDraft({ ...settingsDraft, batch_wait_ms: Number(event.target.value) || 0 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.vramBudget}>VRAM budget MB<input type="number" min="0" step="1000" value={settingsDraft.vram_budget_mb ?? 0} onChange={(event) => setSettingsDraft({ ...settingsDraft, vram_budget_mb: Number(event.target.value) || 0 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.maxInputChars}>Max input chars<input type="number" min="0" step="1000" value={settingsDraft.max_input_chars ?? 0} onChange={(event) => setSettingsDraft({ ...settingsDraft, max_input_chars: Number(event.target.value) || 0 })} /></label>
-            {(() => {
-              const est = vramEstimate(settingsDraft.vram_budget_mb ?? 0);
-              return (
-                <label className="with-help" title={ADMIN_HELP.vramEstimate}>Est. VRAM peak<input type="text" readOnly value={est ? `~${est.peakGb} GB · ${est.budgetS}s/Batch (~${est.items} Saetze) · ${est.chars} Zeichen/Chunk` : "Budget aus (unbegrenzt)"} /></label>
-              );
-            })()}
-            <label className="with-help" title={ADMIN_HELP.streamPrebuffer}>Stream prebuffer ms<input type="number" value={settingsDraft.stream_prebuffer_ms} onChange={(event) => setSettingsDraft({ ...settingsDraft, stream_prebuffer_ms: Number(event.target.value) || 0 })} /></label>
-            <label className="with-help" title={ADMIN_HELP.dtype}>Dtype<select value={settingsDraft.torch_dtype} onChange={(event) => setSettingsDraft({ ...settingsDraft, torch_dtype: event.target.value })}>
-              <option value="float16">fp16</option>
-              <option value="bfloat16">bf16</option>
-              <option value="float32">fp32</option>
-              <option value="fp8">fp8 (experimentell)</option>
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.numStep}>Num step<input type="number" value={settingsDraft.num_step ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, num_step: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.guidance}>Guidance<input type="number" step="0.1" value={settingsDraft.guidance_scale ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, guidance_scale: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.duration}>Duration<input type="number" step="0.1" value={settingsDraft.duration ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, duration: event.target.value ? Number(event.target.value) : null })} placeholder="auto" /></label>
-            <label className="with-help" title={ADMIN_HELP.tShift}>T shift<input type="number" step="0.1" value={settingsDraft.t_shift ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, t_shift: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.positionTemperature}>Position temp<input type="number" step="0.1" value={settingsDraft.position_temperature ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, position_temperature: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.classTemperature}>Class temp<input type="number" step="0.1" value={settingsDraft.class_temperature ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, class_temperature: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.textOptimizationDefault}>Textoptimierung (Default)<select value={settingsDraft.text_optimization_default ?? "off"} onChange={(event) => setSettingsDraft({ ...settingsDraft, text_optimization_default: event.target.value as TextOptimizationMode })}>
-              <option value="off">off</option>
-              <option value="deterministic">deterministic (de/en)</option>
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.audioChunkDuration}>Audio chunk sec<input type="number" step="0.1" value={settingsDraft.audio_chunk_duration ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, audio_chunk_duration: event.target.value ? Number(event.target.value) : null })} /></label>
-            <label className="with-help" title={ADMIN_HELP.audioChunkThreshold}>Chunk threshold sec<input type="number" step="0.1" value={settingsDraft.audio_chunk_threshold ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, audio_chunk_threshold: event.target.value ? Number(event.target.value) : null })} /></label>
-          </div>
-          <h3 title="Gilt, wenn Ming geladen wird (Engine-Wechsel, Reload oder Neustart). Qualitaetsparameter (flow steps 10, CFG 2.0) sind fest.">Ming-Engine{settingsDraft.runtime_backend === "ming" ? " (aktiv)" : ""}</h3>
-          <div className="field-grid four">
-            <label className="with-help" title={ADMIN_HELP.mingSlots}>Ming slots<input type="number" min="1" max="64" value={settingsDraft.ming_max_slots ?? 16} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_max_slots: Math.min(64, Math.max(1, Number(event.target.value) || 1)) })} /></label>
-            <label className="with-help" title={ADMIN_HELP.mingFirstChunk}>Erster Chunk (Latents)<input type="number" min="1" max="8" value={settingsDraft.ming_first_chunk_latents ?? 2} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_first_chunk_latents: Math.min(8, Math.max(1, Number(event.target.value) || 1)) })} /></label>
-            <label className="with-help" title={ADMIN_HELP.mingMaxChunk}>Folge-Chunks (Latents)<input type="number" min="1" max="32" value={settingsDraft.ming_max_chunk_latents ?? 8} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_max_chunk_latents: Math.min(32, Math.max(1, Number(event.target.value) || 1)) })} /></label>
-            <label className="with-help" title={ADMIN_HELP.mingSampleRate}>Ming Ausgaberate<select value={settingsDraft.ming_output_sample_rate ?? 24000} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_output_sample_rate: Number(event.target.value) })}>
-              <option value={24000}>24000 Hz (Client-Vertrag)</option>
-              <option value={44100}>44100 Hz (nativ)</option>
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.mingModelDir}>Ming model dir<input value={settingsDraft.ming_model_dir ?? ""} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_model_dir: event.target.value })} /></label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.mingCudaGraphs}><input type="checkbox" checked={settingsDraft.ming_cuda_graphs ?? true} onChange={(event) => setSettingsDraft({ ...settingsDraft, ming_cuda_graphs: event.target.checked })} />Ming CUDA Graphs</label>
-          </div>
-          <div className="inline-pills">
-            <button className="link-chip" type="button" title={ADMIN_HELP.refreshRuntimeDevices} onClick={() => void loadRuntimeDevices(adminKey)}>GPU-Liste aktualisieren</button>
-            <span className={`pill ${runtimeDeviceOptions.some((device) => device.id === settingsDraft.preferred_device && device.available) ? "active" : ""}`}>{selectedRuntimeDeviceLabel}</span>
-            <button className="link-chip" type="button" title={ADMIN_HELP.refreshVllmModels} onClick={() => void loadVllmModels(adminKey, settingsDraft.vllm_base_url)} disabled={vllmModelsLoading}>{vllmModelsLoading ? "vLLM laedt..." : "vLLM Modelle aktualisieren"}</button>
-            <span className={`pill ${vllmModels.length ? "active" : ""}`}>{vllmModels.length ? `${vllmModels.length} vLLM Modelle` : "keine vLLM Modelle"}</span>
-            {vllmModelsError ? <span className="pill">{vllmModelsError}</span> : null}
-          </div>
-          <div className="field-grid two runtime-toggle-grid">
-            <label className="checkbox-row with-help" title={ADMIN_HELP.sentenceChunking}><input type="checkbox" checked={settingsDraft.sentence_chunking} onChange={(event) => setSettingsDraft({ ...settingsDraft, sentence_chunking: event.target.checked })} />Sentence chunking aktiv</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.allowDownloads}><input type="checkbox" checked={settingsDraft.allow_model_downloads} onChange={(event) => setSettingsDraft({ ...settingsDraft, allow_model_downloads: event.target.checked })} />Model-Downloads erlauben</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.compileModel}><input type="checkbox" checked={settingsDraft.compile_model} onChange={(event) => setSettingsDraft({ ...settingsDraft, compile_model: event.target.checked })} />torch.compile fuer llm</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.sdpaCudnn}><input type="checkbox" checked={settingsDraft.sdpa_prefer_cudnn ?? true} onChange={(event) => setSettingsDraft({ ...settingsDraft, sdpa_prefer_cudnn: event.target.checked })} />cuDNN-Attention bevorzugen</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.packedCfg}><input type="checkbox" checked={settingsDraft.packed_cfg ?? true} onChange={(event) => setSettingsDraft({ ...settingsDraft, packed_cfg: event.target.checked })} />CFG gepackt (ohne Padding)</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.streamPreempt}><input type="checkbox" checked={settingsDraft.stream_first_preempt ?? true} onChange={(event) => setSettingsDraft({ ...settingsDraft, stream_first_preempt: event.target.checked })} />Stream-Start vorziehen (Aufspringen)</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.cudagraphSkip}><input type="checkbox" checked={settingsDraft.cudagraph_skip_dynamic_graphs} onChange={(event) => setSettingsDraft({ ...settingsDraft, cudagraph_skip_dynamic_graphs: event.target.checked })} />CUDAGraph dynamic shapes skippen</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.autoVramTrim}><input type="checkbox" checked={settingsDraft.cuda_memory_trim_after_batch} onChange={(event) => setSettingsDraft({ ...settingsDraft, cuda_memory_trim_after_batch: event.target.checked })} />Auto VRAM trim wenn Queue leer</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.warmupStartup}><input type="checkbox" checked={settingsDraft.warmup_on_startup} onChange={(event) => setSettingsDraft({ ...settingsDraft, warmup_on_startup: event.target.checked })} />Warmup beim Start</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.denoise}><input type="checkbox" checked={Boolean(settingsDraft.denoise)} onChange={(event) => setSettingsDraft({ ...settingsDraft, denoise: event.target.checked })} />Denoise</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.preprocessPrompt}><input type="checkbox" checked={Boolean(settingsDraft.preprocess_prompt)} onChange={(event) => setSettingsDraft({ ...settingsDraft, preprocess_prompt: event.target.checked })} />Preprocess prompt</label>
-            <label className="checkbox-row with-help" title={ADMIN_HELP.postprocessOutput}><input type="checkbox" checked={Boolean(settingsDraft.postprocess_output)} onChange={(event) => setSettingsDraft({ ...settingsDraft, postprocess_output: event.target.checked })} />Postprocess output</label>
-          </div>
-          <div className="button-row" style={{ flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
-            <button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button>
-            <span className="pill" title="Benannte Parametersaetze: auswaehlen, in den Entwurf laden, speichern, loeschen. GPU-Stufen sind eingebaut und schreibgeschuetzt.">Presets</span>
-            <select
-              value={selectedPreset ? selectedPreset.name : ""}
-              onChange={(event) => setPresetName(event.target.value)}
-              title={selectedPreset?.description || "Preset auswaehlen"}
-            >
-              <option value="">— Preset waehlen —</option>
-              {builtInPresets.length ? (
-                <optgroup label="GPU-Stufen OmniVoice (eingebaut)">
-                  {builtInPresets.filter((preset) => !preset.values.runtime_backend).map((preset) => <option key={preset.name} value={preset.name} title={preset.description}>{preset.name}</option>)}
-                </optgroup>
-              ) : null}
-              {builtInPresets.some((preset) => preset.values.runtime_backend) ? (
-                <optgroup label="Engine-Stufen (eingebaut, wechseln die Engine)">
-                  {builtInPresets.filter((preset) => preset.values.runtime_backend).map((preset) => <option key={preset.name} value={preset.name} title={preset.description}>{preset.name}</option>)}
-                </optgroup>
-              ) : null}
-              {savedPresets.length ? (
-                <optgroup label="Gespeichert">
-                  {savedPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
-                </optgroup>
-              ) : null}
-            </select>
-            <button className="link-chip" type="button" onClick={() => selectedPreset && handleApplyPreset(selectedPreset.name)} disabled={!selectedPreset} title="Werte in den Entwurf uebernehmen; angewendet wird erst mit Settings speichern">In Entwurf laden</button>
-            <input
-              value={presetName}
-              onChange={(event) => setPresetName(event.target.value)}
-              placeholder="Preset-Name"
-              style={{ maxWidth: "170px" }}
-            />
-            <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim() || Boolean(selectedPreset?.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets sind schreibgeschuetzt" : "Runtime-/VRAM-Werte des Entwurfs als Preset speichern"}>Als Preset speichern</button>
-            <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || Boolean(selectedPreset.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets koennen nicht geloescht werden" : "Gespeichertes Preset loeschen"}>Preset loeschen</button>
-            {selectedPreset?.built_in ? <span className="pill" title={selectedPreset.description}>eingebaut</span> : null}
-            {selectedPreset?.note ? <span className="pill" title={selectedPreset.note}>keine passende GPU</span> : null}
-          </div>
-          {selectedPreset?.description || selectedPreset?.note ? (
-            <p className="muted" style={{ margin: "4px 0 0" }}>{[selectedPreset.description, selectedPreset.note].filter(Boolean).join(" ")}</p>
-          ) : null}
+        <section className="widget span-12">
+          <div className="widget-header"><h2>3. Einstellungen{activeEngine ? ` fuer ${activeEngine.label}` : ""}</h2></div>
+          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+            {activeEngine ? (
+              <SettingsFields fields={activeEngine.settings_fields} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
+            ) : (
+              <p>Engine-Status wird geladen...</p>
+            )}
+            {activeEngine?.settings_fields.includes("preferred_device") ? (
+              <div className="inline-pills">
+                <button className="link-chip" type="button" title={ADMIN_HELP.refreshRuntimeDevices} onClick={() => void loadRuntimeDevices(adminKey)}>GPU-Liste aktualisieren</button>
+                <span className={`pill ${runtimeDeviceOptions.some((device) => device.id === settingsDraft.preferred_device && device.available) ? "active" : ""}`}>{selectedRuntimeDeviceLabel}</span>
+              </div>
+            ) : null}
+            <div className="button-row"><button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button></div>
+          </fieldset>
+        </section>
+
+        <section className="widget span-12">
+          <div className="widget-header"><h2>Serverweite Einstellungen</h2></div>
+          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+            <SettingsFields fields={engineList?.server_settings_fields ?? []} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
+            <div className="inline-pills">
+              <button className="link-chip" type="button" title={ADMIN_HELP.refreshVllmModels} onClick={() => void loadVllmModels(adminKey, settingsDraft.vllm_base_url)} disabled={vllmModelsLoading}>{vllmModelsLoading ? "vLLM laedt..." : "vLLM Modelle aktualisieren"}</button>
+              <span className={`pill ${vllmModels.length ? "active" : ""}`}>{vllmModels.length ? `${vllmModels.length} vLLM Modelle` : "keine vLLM Modelle"}</span>
+              {vllmModelsError ? <span className="pill">{vllmModelsError}</span> : null}
+            </div>
+            <div className="button-row"><button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button></div>
+          </fieldset>
         </section>
 
         <section className="widget span-6"><div className="widget-header"><h2>Benchmark</h2></div>
@@ -2400,13 +2141,15 @@ export function AdminApp() {
 
         <section className="widget span-6 audio-card"><div className="widget-header"><h2>Quick Synthesis</h2></div>
           <div className="field-grid two">
-            <label className="with-help" title={ADMIN_HELP.quickModel}>Modell<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{models.map((model) => <option key={model.model_id} value={model.model_id}>{model.model_id}</option>)}</select></label>
-            <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)} disabled={quickTaskType === "VoiceDesign"}>{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
+            {selectableModels.length > 1 ? (
+              <label className="with-help" title={ADMIN_HELP.quickModel}>Modell<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{selectableModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            ) : null}
+            <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)}>{!quickVoices.length ? <option value="">Keine passende Stimme</option> : null}{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
             <label className="with-help" title={ADMIN_HELP.quickLanguage}>Sprache<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
             <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
           </div>
           <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea ref={quickTextRef} value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
-          {quickMingActive ? (
+          {mingEngineActive ? (
             <div className="tag-insert" title={ADMIN_HELP.mingTags}>
               <div className="tag-insert-row">
                 <span className="tag-insert-label">Geraeusch einfuegen</span>
@@ -2424,7 +2167,7 @@ export function AdminApp() {
               </details>
             </div>
           ) : null}
-          {quickMingActive ? (
+          {mingEngineActive ? (
             <>
               <fieldset className="ming-delivery">
                 <legend>Ming-Ausdruck</legend>
@@ -2481,26 +2224,8 @@ export function AdminApp() {
               </fieldset>
             </>
           ) : (
-            <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} readOnly={quickTaskType === "VoiceDesign"} /></label>
+            <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} /></label>
           )}
-          {quickTaskType === "VoiceDesign" ? (
-            <div className="voice-design-builder" title={ADMIN_HELP.quickInstructions}>
-              {VOICE_DESIGN_GROUPS.map((group) => (
-                <label key={group.id} className="with-help" title={ADMIN_HELP.quickInstructions}>
-                  {group.label}
-                  <select
-                    value={voiceDesignValueForGroup(quickInstructions, group.id)}
-                    onChange={(event) => setQuickInstructions(setVoiceDesignValue(quickInstructions, group.id, event.target.value))}
-                  >
-                    <option value="">Auto</option>
-                    {group.options.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
-            </div>
-          ) : null}
           <label className="with-help" title={ADMIN_HELP.quickTextOptimization}>Textoptimierung<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
             <option value="">Server-Default ({snapshot?.settings.text_optimization_default ?? "off"})</option>
             <option value="off">off</option>
@@ -2532,18 +2257,20 @@ export function AdminApp() {
         </section>
 
         <section className="widget span-6"><div className="widget-header"><h2>Voice Library</h2></div>
-          <div className="field-grid">
-            <label className="with-help" title={ADMIN_HELP.voiceName}>Name<input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} /></label>
-            <label className="with-help" title={ADMIN_HELP.voiceRefText}>Referenztext<textarea value={voiceRefText} onChange={(event) => setVoiceRefText(event.target.value)} /></label>
-            <label className="with-help" title={ADMIN_HELP.voiceSample}>Sample<input type="file" accept="audio/*" onChange={(event) => handleVoiceFileChange(event.target.files?.[0] ?? null)} /></label>
-            <div className="voice-consent-preview">
-              <label className="checkbox-row with-help" title={ADMIN_HELP.voiceConsent}><input type="checkbox" checked={voiceConsent} onChange={(event) => setVoiceConsent(event.target.checked)} />Zustimmung bestaetigt</label>
-              {voiceUploadPreviewUrl ? <audio className="inline-audio" controls src={voiceUploadPreviewUrl} /> : null}
+          {activeEngine?.uses_voice_profiles ? (
+            <div className="field-grid">
+              <label className="with-help" title={ADMIN_HELP.voiceName}>Name<input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} /></label>
+              <label className="with-help" title={ADMIN_HELP.voiceRefText}>Referenztext<textarea value={voiceRefText} onChange={(event) => setVoiceRefText(event.target.value)} /></label>
+              <label className="with-help" title={ADMIN_HELP.voiceSample}>Sample<input type="file" accept="audio/*" onChange={(event) => handleVoiceFileChange(event.target.files?.[0] ?? null)} /></label>
+              <div className="voice-consent-preview">
+                <label className="checkbox-row with-help" title={ADMIN_HELP.voiceConsent}><input type="checkbox" checked={voiceConsent} onChange={(event) => setVoiceConsent(event.target.checked)} />Zustimmung bestaetigt</label>
+                {voiceUploadPreviewUrl ? <audio className="inline-audio" controls src={voiceUploadPreviewUrl} /> : null}
+              </div>
+              <div className="button-row"><button className="secondary-button" type="button" onClick={() => void handleTranscribeVoice()} disabled={!voiceFile || voiceTranscribing} title={ADMIN_HELP.transcribeSample}>{voiceTranscribing ? "Transkribiere..." : "Mit Whisper transkribieren"}</button><button className="primary-button" type="button" onClick={handleUploadVoice}>Voice speichern</button></div>
             </div>
-            <div className="button-row"><button className="secondary-button" type="button" onClick={() => void handleTranscribeVoice()} disabled={!voiceFile || voiceTranscribing} title={ADMIN_HELP.transcribeSample}>{voiceTranscribing ? "Transkribiere..." : "Mit Whisper transkribieren"}</button><button className="primary-button" type="button" onClick={handleUploadVoice}>Voice speichern</button></div>
-          </div>
+          ) : null}
           <div className="voice-list">
-            {libraryVoices.length === 0 ? <p className="widget-copy">Noch keine Custom Voices gespeichert.</p> : null}
+            {libraryVoices.length === 0 ? <p className="widget-copy">{activeEngine && !activeEngine.uses_voice_profiles ? "Dieses Modell nutzt keine Stimmprofile." : "Noch keine Custom Voices gespeichert."}</p> : null}
             {libraryVoices.map((voice) => (
               <article key={voice.voice_id} className="voice-card">
                 <div className="voice-card-head">
@@ -2567,11 +2294,11 @@ export function AdminApp() {
                   <p>{voice.ref_text || "-"}</p>
                 </div>
                 <div className="voice-seed-list">
-                  {SEED_ENGINES.map((engine) => {
+                  {SEED_ENGINES.filter((engine) => engine.id === activeSeedEngine).map((engine) => {
                     const editKey = `${voice.voice_id}:${engine.id}`;
                     return (
                       <div key={engine.id} className="voice-seed-row">
-                        <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed {engine.label}{activeSeedEngine === engine.id ? " (aktiv)" : ""}
+                        <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed {engine.label}
                           <input
                             type="number"
                             min="0"

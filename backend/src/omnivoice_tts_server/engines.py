@@ -7,8 +7,9 @@ this module lists the engines with their install state and swaps the running one
 1. new public requests wait (`EngineSwitcher.wait_ready`), queued jobs are held back from the old engine;
 2. jobs already running finish on the old engine (up to `drain_timeout_s`, then they are cancelled);
 3. the queue worker stops, the old synthesizer unloads and CUDA memory is released;
-4. the settings the old engine rewrote (model list, active model, ...) get their OmniVoice values back,
-   the new synthesizer is built and bound to the app, the queue and the finetune trainer;
+4. the settings the old engine rewrote (model list, active model, ...) get their OmniVoice values back, the old
+   engine's tuned values go to its profile and the new engine's are applied (ENGINE_TUNED_FIELDS), the new
+   synthesizer is built and bound to the app, the queue and the finetune trainer;
 5. the held jobs go back to the queue front, the worker restarts, the new engine preloads its model.
 
 A failed build rolls back to the old synthesizer object (it reloads lazily on the next request).
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import (
+    ENGINE_TUNED_FIELDS,
     RUNTIME_BACKEND_ENV,
     RUNTIME_BACKENDS,
     Settings,
@@ -35,13 +37,16 @@ from .config import (
     set_persisted_overrides,
     snapshot_engine_fields,
 )
-from .domain.models import EngineInfo, EngineSwitchStatus, JobStatus, SpeechRequest
+from .domain.models import EngineInfo, EngineSwitchStatus, JobStatus, ServerSettingsUpdateRequest, SpeechRequest
 from .domain.state import utcnow
 
 logger = logging.getLogger('omnivoice_tts_server.engines')
 
 DEFAULT_ACTIVE_MODEL = 'k2-fsa/OmniVoice-Base'
 MING_REPO_ID = 'inclusionAI/Ming-3.0-tts-0.5B'
+# The clone alias the queue serves on Ming. It ends in 'Base' so task-type inference, the default voice profile and
+# the OpenAI voice routing treat it like OmniVoice-Base.
+MING_BASE_ALIAS = 'inclusionAI/Ming-3.0-tts-0.5B-Base'
 _TERMINAL_JOB = {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}
 _TERMINAL_RUN = {'completed', 'failed', 'cancelled', 'error', 'done'}
 # Running jobs that ignore a cancel get this long before the engine is swapped anyway.
@@ -64,18 +69,22 @@ class EngineSpec:
     # Load the model right after start/switch so the first request is not cold.
     preload: bool
     test_only: bool = False
+    # GET /v1/capabilities: the engine clones a reference voice, and the request fields it really reads.
+    voice_cloning: bool = True
+    client_options: tuple[str, ...] = ()
 
 
 ENGINES: dict[str, EngineSpec] = {
     'omnivoice': EngineSpec(
         id='omnivoice',
         label='OmniVoice',
-        description='k2-fsa OmniVoice (Standard). Klonen ueber Stimmprofile, AutoVoice, VoiceDesign, Finetuning.',
+        description='k2-fsa OmniVoice Base (Standard). Klonen ueber Stimmprofile, Finetuning.',
         packages=('omnivoice',),
         uses_voice_profiles=True,
         native_model_ids=True,
         native_streaming=False,
         preload=True,
+        client_options=('speed', 'seed', 'language', 'instructions'),
     ),
     'ming': EngineSpec(
         id='ming',
@@ -87,6 +96,9 @@ ENGINES: dict[str, EngineSpec] = {
         native_model_ids=False,
         native_streaming=True,
         preload=True,
+        client_options=(
+            'seed', 'language', 'instructions', 'emotion', 'speaking_rate', 'pitch', 'volume', 'reference_mode',
+        ),
     ),
     'phonon': EngineSpec(
         id='phonon',
@@ -97,6 +109,8 @@ ENGINES: dict[str, EngineSpec] = {
         native_model_ids=False,
         native_streaming=True,
         preload=False,
+        voice_cloning=False,
+        client_options=('seed',),
     ),
     'mock': EngineSpec(
         id='mock',
@@ -108,9 +122,47 @@ ENGINES: dict[str, EngineSpec] = {
         native_streaming=False,
         preload=False,
         test_only=True,
+        voice_cloning=False,
     ),
 }
 assert set(ENGINES) == set(RUNTIME_BACKENDS)
+
+# PUT /api/admin/settings fields each engine reads. The admin shows these and nothing of another engine.
+_OMNIVOICE_SETTINGS_FIELDS = (
+    'default_voice', 'preferred_device', 'model_directory', 'allow_model_downloads', 'max_parallel_requests',
+    'max_batch_size', 'batch_wait_ms', 'vram_budget_mb', 'stream_chunk_ms', 'torch_dtype', 'num_step',
+    'guidance_scale', 'duration', 't_shift', 'position_temperature', 'class_temperature', 'audio_chunk_duration',
+    'audio_chunk_threshold', 'compile_model', 'sdpa_prefer_cudnn', 'packed_cfg', 'stream_first_preempt',
+    'cudagraph_skip_dynamic_graphs', 'cuda_memory_trim_after_batch', 'warmup_on_startup', 'denoise',
+    'preprocess_prompt', 'postprocess_output',
+)
+ENGINE_SETTINGS_FIELDS: dict[str, tuple[str, ...]] = {
+    'omnivoice': _OMNIVOICE_SETTINGS_FIELDS,
+    'ming': (
+        'default_voice', 'preferred_device', 'max_parallel_requests', 'stream_prebuffer_ms', 'ming_max_slots',
+        'ming_first_chunk_latents', 'ming_max_chunk_latents', 'ming_output_sample_rate', 'ming_model_dir',
+        'ming_cuda_graphs',
+    ),
+    'phonon': (
+        'max_parallel_requests', 'max_batch_size', 'batch_wait_ms', 'vram_budget_mb', 'stream_prebuffer_ms',
+        'phonon_lang', 'phonon_quant', 'phonon_workers', 'phonon_threads',
+    ),
+    'mock': _OMNIVOICE_SETTINGS_FIELDS,
+}
+# PUT /api/admin/settings fields of the whole service, whichever engine runs.
+SERVER_SETTINGS_FIELDS: tuple[str, ...] = (
+    'whisper_base_url', 'vllm_base_url', 'vllm_model', 'wer_concurrency', 'wer_transcription_concurrency',
+    'queue_limit', 'max_input_chars', 'text_optimization_default', 'sentence_chunking',
+)
+assert set(ENGINE_SETTINGS_FIELDS) == set(ENGINES)
+assert {name for names in ENGINE_SETTINGS_FIELDS.values() for name in names} <= set(ServerSettingsUpdateRequest.model_fields)
+assert set(SERVER_SETTINGS_FIELDS) <= set(ServerSettingsUpdateRequest.model_fields)
+assert set(ENGINE_TUNED_FIELDS) <= set(ServerSettingsUpdateRequest.model_fields)
+
+# Aliases clients keep using; the admin selects neither of them.
+CLIENT_ONLY_ALIAS_SUFFIXES = ('-AutoVoice', '-VoiceDesign')
+# The built-in tier an engine starts from while it has no profile yet.
+ENGINE_DEFAULT_TIERS = {'ming': 'Ming 24GB VRAM'}
 
 
 def engine_spec(backend: str | None) -> EngineSpec | None:
@@ -150,28 +202,48 @@ def _ming_model_present(settings: Settings) -> bool:
     return (model_dir / 'config.json').exists() and any(model_dir.glob('*.safetensors'))
 
 
-def engine_info(spec: EngineSpec, settings: Settings) -> EngineInfo:
+def engine_loaded(settings: Settings, synthesizer: Any) -> bool:
+    """The active engine really holds the admin's selection in memory, read from the synthesizer itself
+    (store.models_loaded and resident_models list every alias)."""
+    if settings.runtime_backend == 'omnivoice':
+        # One checkpoint at a time, and a client's explicit local/... replaces the selection until the next request.
+        loaded = getattr(synthesizer, '_loaded_model_id', None)
+        if loaded is None:
+            return False
+        selected = settings.active_model or ''
+        return loaded == selected or not (loaded.startswith('local/') or selected.startswith('local/'))
+    resident = getattr(synthesizer, 'resident_models', None)
+    return bool(resident()) if callable(resident) else False
+
+
+def engine_info(spec: EngineSpec, settings: Settings, synthesizer: Any = None) -> EngineInfo:
     missing = [name for name in spec.packages if not _module_installed(name)]
     installed = not missing
     model_id: str | None = None
     model_dir: str | None = None
+    # OmniVoice fetches missing weights itself when it loads; Ming needs them on disk before a switch.
+    fetched_at_load = False
     downloadable = False
     if spec.id == 'omnivoice':
         model_id = 'k2-fsa/OmniVoice'
         model_dir = str(Path(settings.models_root_dir) / 'OmniVoice')
         model_present = _omnivoice_model_present(settings)
-        downloadable = bool(settings.allow_model_downloads)
+        fetched_at_load = downloadable = bool(settings.allow_model_downloads)
         hint = 'Download beim ersten Laden (allow_model_downloads).'
     elif spec.id == 'ming':
         model_id = settings.ming_model_id
         model_dir = str(settings.ming_model_dir)
         model_present = _ming_model_present(settings)
-        hint = f'hf download {MING_REPO_ID} --local-dir "{model_dir}"'
+        downloadable = not model_present
+        hint = f'Download hier im Admin oder: hf download {MING_REPO_ID} --local-dir "{model_dir}"'
     elif spec.id == 'phonon':
         model_id = settings.phonon_model_id
         model_dir = str(settings.phonon_model_dir)
         model_present = (Path(settings.phonon_model_dir) / 'config.json').exists()
-        hint = f'Checkpoint {model_id} (gated) nach {model_dir} laden.'
+        hint = (
+            f'Nur manueller Download: Checkpoint {model_id} ist gated (CC-BY-NC-4.0, Zugang bei Hugging Face '
+            f'beantragen) und gehoert nach {model_dir}.'
+        )
     else:
         model_present = True
         hint = ''
@@ -179,7 +251,7 @@ def engine_info(spec: EngineSpec, settings: Settings) -> EngineInfo:
         status, detail = 'missing_package', 'Fehlende Python-Pakete: ' + ', '.join(missing)
         if spec.id == 'ming':
             detail += ' (install: pip install -e "backend[ming]")'
-    elif not model_present and downloadable:
+    elif not model_present and fetched_at_load:
         status, detail = 'downloadable', hint
     elif not model_present:
         status, detail = 'missing_model', 'Modell fehlt. ' + hint
@@ -193,7 +265,9 @@ def engine_info(spec: EngineSpec, settings: Settings) -> EngineInfo:
         active=active,
         installed=installed,
         model_present=model_present,
-        available=installed and (model_present or downloadable),
+        available=installed and (model_present or fetched_at_load),
+        downloadable=downloadable,
+        loaded=active and synthesizer is not None and engine_loaded(settings, synthesizer),
         status='active' if active else status,
         detail=detail,
         model_id=model_id,
@@ -201,11 +275,111 @@ def engine_info(spec: EngineSpec, settings: Settings) -> EngineInfo:
         uses_voice_profiles=spec.uses_voice_profiles,
         native_streaming=spec.native_streaming,
         test_only=spec.test_only,
+        settings_fields=list(ENGINE_SETTINGS_FIELDS[spec.id]),
     )
 
 
-def list_engines(settings: Settings) -> list[EngineInfo]:
-    return [engine_info(spec, settings) for spec in ENGINES.values()]
+def list_engines(settings: Settings, synthesizer: Any = None) -> list[EngineInfo]:
+    return [engine_info(spec, settings, synthesizer) for spec in ENGINES.values()]
+
+
+def selectable_models(settings: Settings) -> list[str]:
+    """What the admin can pick: supported_models without the client-only aliases, in that order. A saved alias stays
+    listed while it is the active model, nothing migrates it. Clients keep every id of supported_models."""
+    models = [
+        model for model in settings.supported_models
+        if model == settings.active_model or not model.endswith(CLIENT_ONLY_ALIAS_SUFFIXES)
+    ]
+    return models if settings.active_model in models else [*models, settings.active_model]
+
+
+def served_model(settings: Settings, model: str | None) -> str | None:
+    """The id to load for a request. Every id but local/... names the checkpoint the admin selected: with a promoted
+    local/x active, a client's literal OmniVoice-Base runs on it and evicts nothing. An explicit local/... is loaded."""
+    selected = settings.active_model or ''
+    if selected.startswith('local/') and not (model or '').startswith('local/'):
+        return selected
+    return model
+
+
+def engine_model(settings: Settings, backend: str, baseline: dict[str, Any] | None = None) -> str:
+    """The model id `backend` serves, also while another engine's alias is still in settings (a running switch or a
+    download for an engine that is not active). `baseline` holds the OmniVoice selection while such an engine runs."""
+    if backend == 'ming':
+        return MING_BASE_ALIAS
+    if backend == 'phonon':
+        return settings.phonon_model_id
+    current = engine_spec(settings.runtime_backend)
+    if baseline and current is not None and not current.native_model_ids:
+        return str(baseline.get('active_model') or DEFAULT_ACTIVE_MODEL)
+    return settings.active_model
+
+
+# -- engine profiles (ENGINE_TUNED_FIELDS per engine, settings.engine_profiles) ------------------------------------------
+
+
+def tuned_values(settings: Settings) -> dict[str, Any]:
+    return {name: getattr(settings, name) for name in ENGINE_TUNED_FIELDS}
+
+
+def default_tier_values(backend: str) -> dict[str, Any]:
+    name = ENGINE_DEFAULT_TIERS.get(backend)
+    if name is None:
+        return {}
+    from .presets import BUILTIN_PRESETS
+
+    return {key: value for key, value in BUILTIN_PRESETS[name]['values'].items() if key != 'runtime_backend'}
+
+
+def engine_start_values(settings: Settings, backend: str) -> dict[str, Any]:
+    """Settings values `backend` starts with: its profile, else its default tier, else nothing (current values stay)."""
+    profile = settings.engine_profiles.get(backend)
+    if profile:
+        return {name: profile[name] for name in ENGINE_TUNED_FIELDS if name in profile}
+    return default_tier_values(backend)
+
+
+def swap_engine_values(settings: Settings, old_backend: str, target: str) -> dict[str, Any]:
+    """Engine switch: the old engine's tuned values go to its profile, the target's are applied. Returns the replaced
+    values for a rollback."""
+    incoming = engine_start_values(settings, target)
+    replaced = {name: getattr(settings, name) for name in (*ENGINE_TUNED_FIELDS, *incoming)}
+    settings.engine_profiles[old_backend] = tuned_values(settings)
+    for name, value in incoming.items():
+        setattr(settings, name, value)
+    return replaced
+
+
+def stage_switch_values(settings: Settings, target: str, previous: dict[str, Any], sent: set[str]) -> None:
+    """A settings PUT that also switches the engine: its tuned values belong to the target, so the running engine gets
+    `previous` back (the switch then stores those under it) and the sent ones go to the target's profile. Other fields
+    of the PUT stay applied and win over the target's default tier."""
+    sent_tuned = {name: getattr(settings, name) for name in ENGINE_TUNED_FIELDS if name in sent}
+    for name, value in previous.items():
+        setattr(settings, name, value)
+    start = engine_start_values(settings, target)
+    for name, value in start.items():
+        if name not in ENGINE_TUNED_FIELDS and name not in sent:
+            setattr(settings, name, value)
+    tuned_start = {name: value for name, value in start.items() if name in ENGINE_TUNED_FIELDS}
+    settings.engine_profiles[target] = {**tuned_values(settings), **tuned_start, **sent_tuned}
+
+
+def apply_startup_engine_values(settings: Settings, environ: Any = None) -> None:
+    """Before the synthesizer is built: the active engine (saved or pinned by env) runs with its own values. Without a
+    profile its default tier applies, except keys the environment sets explicitly (like the first-start tier), and the
+    profile is seeded in memory. Nothing is written: the next full save stores it."""
+    backend = settings.runtime_backend
+    values = engine_start_values(settings, backend)
+    seed = not settings.engine_profiles.get(backend)
+    if seed:
+        env_prefix = str(Settings.model_config.get('env_prefix') or '').upper()
+        env_names = {name.upper() for name in (os.environ if environ is None else environ)}
+        values = {name: value for name, value in values.items() if f'{env_prefix}{name}'.upper() not in env_names}
+    for name, value in values.items():
+        setattr(settings, name, value)
+    if seed:
+        settings.engine_profiles[backend] = tuned_values(settings)
 
 
 def uses_voice_profiles(backend: str | None, synthesizer: Any = None) -> bool:
@@ -537,6 +711,7 @@ class EngineSwitcher:
             self.status.state = 'loading'
             self.status.message = 'Neue Engine wird gestartet.'
             await self._publish('engine.switch.loading')
+            replaced_values = swap_engine_values(settings, old_backend, target)
             settings.runtime_backend = target
             new_synth: Any = None
             try:
@@ -549,6 +724,7 @@ class EngineSwitcher:
                 logger.exception('engine switch to %s failed; keeping %s', target, old_backend)
                 settings.runtime_backend = old_backend
                 restore_engine_fields(settings, old_fields)
+                restore_engine_fields(settings, replaced_values, replaced_values)
                 self.sync_voice_profiles(old_backend, old_synth)
                 store.active_model = settings.active_model
                 self.status.state = 'failed'
@@ -565,6 +741,7 @@ class EngineSwitcher:
                 store.active_model = settings.active_model
                 self.sync_voice_profiles(target, new_synth)
                 self._bind(new_synth)
+                settings.engine_profiles[target] = tuned_values(settings)
                 success = True
         except asyncio.CancelledError:
             # Server shutdown: leave the worker stopped.

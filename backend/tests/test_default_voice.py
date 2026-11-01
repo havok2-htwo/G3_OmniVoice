@@ -35,7 +35,7 @@ def test_defaults_are_base_with_sonja_v2(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path)
     assert settings.active_model == 'k2-fsa/OmniVoice-Base'
     assert settings.default_voice == 'SonjaV2'
-    assert settings.num_step == 20
+    assert settings.num_step == 25
     assert settings.torch_dtype == 'bfloat16'
     assert (settings.max_parallel_requests, settings.max_batch_size) == (8, 8)
     assert settings.vram_budget_mb == 7000

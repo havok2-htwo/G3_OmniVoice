@@ -238,9 +238,11 @@ class MingEngine:
     def __init__(self, model_dir: Path | str, device: str = 'cuda:0', *, max_slots: int = 16, cuda_graphs: bool = True,
                  output_sample_rate: int = 24000, first_chunk_latents: int = 2, max_chunk_latents: int = 8,
                  dtype: torch.dtype = torch.bfloat16, batch_invariant: bool = True, vae_tile_rows: int | None = None,
-                 plan_cache: Path | str | None = None) -> None:
+                 plan_cache: Path | str | None = None, fragment_max_chars: int = 24) -> None:
         self.model_dir = Path(model_dir)
         self.device = torch.device(device)
+        # Longest text piece rendered in one go; see config.ming_fragment_max_chars.
+        self.fragment_max_chars = max(8, int(fragment_max_chars))
         self.max_slots = max(1, min(64, int(max_slots)))
         self.cuda_graphs = bool(cuda_graphs) and self.device.type == 'cuda'
         self.output_sample_rate = int(output_sample_rate)
@@ -652,7 +654,7 @@ class MingEngine:
         instruction = normalize_instruction(instruction)
         acoustic = prompt is not None and acoustic_prompt
         out = []
-        for piece in prepare_fragments(text, lang):
+        for piece in prepare_fragments(text, lang, self.fragment_max_chars):
             ids, spk_pos, lat_pos = build_input_ids(
                 self.tokenizer, tts_prompt, piece, num_speakers=1 if prompt is not None else 0,
                 instruction=instruction,

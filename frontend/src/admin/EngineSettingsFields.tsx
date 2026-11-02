@@ -25,7 +25,7 @@ type SettingKey = keyof ServerSettings;
 
 type FieldDef = { label: string; help: string } & (
   | { kind: "number"; fallback: number; shown?: number; min?: number; max?: number; step?: number; clamp?: boolean }
-  | { kind: "optional-number"; step?: number; placeholder?: string }
+  | { kind: "optional-number"; min?: number; max?: number; step?: number; placeholder?: string }
   | { kind: "text"; placeholder?: string; also?: Partial<ServerSettings> }
   | { kind: "select"; options: Array<{ value: string | number; label: string }>; fallback: string | number }
   | { kind: "toggle"; fallback: boolean }
@@ -36,7 +36,7 @@ type FieldDef = { label: string; help: string } & (
 // (settings_fields of the active engine, server_settings_fields), never from this table.
 const FIELDS: Partial<Record<SettingKey, FieldDef>> = {
   default_voice: { kind: "voice", label: "Default voice", help: "Default-Stimme passend zum Default-Modell. Base braucht eine gespeicherte Custom Voice." },
-  preferred_device: { kind: "device", label: "GPU", help: "CUDA-Geraet fuer die aktive Engine (OmniVoice und Ming; Phonon laeuft auf der CPU). Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv." },
+  preferred_device: { kind: "device", label: "GPU", help: "CUDA-Geraet fuer die aktive Engine (OmniVoice, Ming und Audio8; Phonon und Audio8 ONNX laufen auf der CPU). Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv." },
   model_directory: { kind: "text", label: "Model directory", help: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache." },
   allow_model_downloads: { kind: "toggle", label: "Model-Downloads erlauben", help: "Erlaubt dem Backend, k2-fsa/OmniVoice aus Hugging Face in das lokale models-Verzeichnis zu laden.", fallback: false },
   max_parallel_requests: { kind: "number", label: "Active requests", help: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.", fallback: 1 },
@@ -94,6 +94,28 @@ const FIELDS: Partial<Record<SettingKey, FieldDef>> = {
   phonon_quant: { kind: "text", label: "Phonon Quantisierung", help: "Phonon: Quantisierung der Modelldateien, z.B. q8. Aktiv beim naechsten Laden von Phonon.", placeholder: "q8" },
   phonon_workers: { kind: "number", label: "Phonon Worker", help: "Phonon: parallele Engine-Instanzen auf der CPU. Mehr Worker = mehr gleichzeitige Saetze und mehr RAM. Aktiv beim naechsten Laden von Phonon.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
   phonon_threads: { kind: "number", label: "Phonon Threads", help: "Phonon: Rust-Threads pro Engine. 0 = automatisch aus den CPU-Kernen und der Worker-Zahl. Aktiv beim naechsten Laden von Phonon.", fallback: 0, min: 0, max: 64, clamp: true },
+  audio8_max_slots: { kind: "number", label: "Audio8 Slots", help: "Audio8: Zeilen, die gleichzeitig rendern (kontinuierliches Batching, neue Anfragen steigen am naechsten Schritt ein). Mehr Slots = mehr Durchsatz und VRAM. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 16, min: 1, max: 64, clamp: true },
+  audio8_first_chunk_frames: { kind: "number", label: "Erster Chunk (Frames)", help: "Audio8: Frames (je 46 ms) im ersten Stream-Chunk eines Satzes. Klein = schnelle erste Audiodaten (TTFA). Default: 4. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 4, min: 1, max: 12, clamp: true },
+  audio8_chunk_frames: { kind: "number", label: "Folge-Chunks (Frames)", help: "Audio8: Frames (je 46 ms) in den folgenden Stream-Chunks. Groesser = weniger Overhead, etwas spaetere Lieferung. Default: 12. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 12, min: 1, max: 32, clamp: true },
+  audio8_output_sample_rate: {
+    kind: "select",
+    label: "Audio8 Ausgaberate",
+    help: "Audio8-Ausgaberate. 44100 ist die native Rate; 24000 rechnet herunter und haelt den Client-Vertrag (Raw-PCM von /v1/audio/speech ist 24 kHz). Aktiv beim naechsten Laden des Modells.",
+    fallback: 44100,
+    options: [
+      { value: 44100, label: "44100 Hz (nativ)" },
+      { value: 24000, label: "24000 Hz (Client-Vertrag)" },
+    ],
+  },
+  audio8_fragment_max_chars: { kind: "number", label: "Max. Zeichen pro Stueck", help: "Audio8: laengstes Textstueck, das in einem Zug gerendert wird (24-400). Das Modell laesst in langen Saetzen gelegentlich einen Satzteil aus, darum werden sie vorher geteilt; zu kleine Stuecke trennen Saetze an unguenstigen Stellen. Default: 200.", fallback: 200, min: 24, max: 400 },
+  audio8_temperature: { kind: "optional-number", label: "Temperature", help: "Audio8: Sampling-Temperatur (ueber 0 bis 2). Niedriger = gleichmaessiger, hoeher = mehr Variation. Default: 0.8. Aktiv beim naechsten Laden des Modells.", min: 0.05, max: 2, step: 0.05, placeholder: "0.8" },
+  audio8_top_p: { kind: "optional-number", label: "Top P", help: "Audio8: Anteil der Wahrscheinlichkeitsmasse, aus dem gesampelt wird (ueber 0 bis 1). Default: 0.95. Aktiv beim naechsten Laden des Modells.", min: 0.05, max: 1, step: 0.05, placeholder: "0.95" },
+  audio8_top_k: { kind: "number", label: "Top K", help: "Audio8: Anzahl der wahrscheinlichsten Token, aus denen gesampelt wird (1-1024). Default: 50. Aktiv beim naechsten Laden des Modells.", fallback: 50, min: 1, max: 1024, clamp: true },
+  audio8_cuda_graphs: { kind: "toggle", label: "Audio8 CUDA Graphs", help: "Audio8: CUDA Graphs fuer die Schritt-Schleife. Nur zum Debuggen abschalten. Aktiv beim naechsten Laden des Modells.", fallback: true },
+  audio8_onnx_workers: { kind: "number", label: "ONNX Worker", help: "Audio8 ONNX: Saetze, die gleichzeitig auf der CPU rendern. Jeder Worker hat einen LM-Thread und eigene Codec-Threads. Mehr Worker = mehr gleichzeitige Saetze und mehr RAM. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
+  audio8_onnx_threads: { kind: "number", label: "ONNX Codec-Threads", help: "Audio8 ONNX: Codec-Threads pro Worker. 0 = automatisch aus den physischen Kernen, die neben den LM-Threads frei bleiben. Aktiv beim naechsten Laden des Modells.", fallback: 0, min: 0, max: 64, clamp: true },
+  audio8_onnx_first_chunk_frames: { kind: "number", label: "Erster Chunk (Frames)", help: "Audio8 ONNX: Frames (je 46 ms) im ersten Stream-Chunk. Die CPU decodiert viel langsamer als die GPU, der erste Chunk muss bis zum naechsten reichen. Default: 6. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 6, min: 1, max: 32, clamp: true },
+  audio8_onnx_chunk_frames: { kind: "number", label: "Folge-Chunks (Frames)", help: "Audio8 ONNX: Mindestzahl Frames (je 46 ms) in den folgenden Stream-Chunks. Default: 8. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 8, min: 1, max: 64, clamp: true },
   whisper_base_url: { kind: "text", label: "Whisper URL", help: "Einzige Whisper URL. Host/Port reicht, z.B. http://127.0.0.1:7861 (Default, G3_WHISPER auf demselben Rechner); ein voller Endpoint wie /transcribe/ geht auch.", placeholder: "http://127.0.0.1:7861", also: { whisper_path: "" } },
   vllm_base_url: { kind: "text", label: "vLLM Base URL", help: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.", placeholder: "http://192.168.20.126:8000" },
   vllm_model: { kind: "vllm-model", label: "vLLM Model", help: "vLLM Modell fuer WER-Saetze. Default: Qwen/Qwen3.6-35B-A3B-FP8. Leer lassen nutzt das erste Modell aus /v1/models." },
@@ -158,7 +180,7 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
         return <input type="number" min={def.min} max={def.max} step={def.step} value={(raw as number | undefined) ?? def.shown ?? def.fallback} onChange={(event) => patch(parse(event.target.value))} />;
       }
       case "optional-number":
-        return <input type="number" step={def.step} placeholder={def.placeholder} value={(raw as number | null | undefined) ?? ""} onChange={(event) => patch(event.target.value ? Number(event.target.value) : null)} />;
+        return <input type="number" min={def.min} max={def.max} step={def.step} placeholder={def.placeholder} value={(raw as number | null | undefined) ?? ""} onChange={(event) => patch(event.target.value ? Number(event.target.value) : null)} />;
       case "text":
         return <input value={String(raw ?? "")} placeholder={def.placeholder} onChange={(event) => onPatch({ [name]: event.target.value, ...def.also } as Partial<ServerSettings>)} />;
       case "select":

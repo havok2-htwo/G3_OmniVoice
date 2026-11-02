@@ -22,6 +22,7 @@ import {
   type BenchmarkRunResponse,
   type CreatedApiKey,
   type DashboardSnapshot,
+  type EngineCapabilities,
   type EngineInfo,
   type EngineListResponse,
   type JobMetrics,
@@ -169,6 +170,7 @@ const ADMIN_HELP = {
   quickVoice: "Stimme fuer Quick Synthesis. Custom Voices laufen mit dem Base-Modell.",
   quickText: "Text fuer den Streaming-Test. Der erste Satz bekommt einen Fast-Path, danach werden kompatible Saetze wieder gebatcht.",
   quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
+  quickLanguageTextOnly: "Diese Engine hat keinen Sprachparameter: die Sprache wirkt hier nur auf die Textoptimierung.",
   quickInstructions: "Optionale Anweisung, die mit dem Request an die Engine geht.",
   quickMingInstruction: "Ming: freie Anweisung zur Sprechweise (z.B. \"spricht ruhig und warm, leicht laechelnd\"). Nicht mit Emotion/Tempo/Tonhoehe/Lautstaerke kombinierbar; solange eines davon gesetzt ist, wird sie nicht gesendet.",
   mingEmotion: "Ming: Emotion der Ausgabe. Geht zusammen mit Tempo/Tonhoehe/Lautstaerke als eine strukturierte Anweisung an das Modell.",
@@ -182,7 +184,7 @@ const ADMIN_HELP = {
   refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
   refreshRuntimeDevices: "Liest CPU/CUDA-Geraete neu ein.",
   voiceName: "Name fuer die gespeicherte Clone-Stimme im Voice-Katalog.",
-  voiceRefText: "Exakter gesprochener Text des Samples. OmniVoice-Base braucht ihn fuer Voice Clone Prompts.",
+  voiceRefText: "Exakter gesprochener Text des Samples. Die Klon-Modelle brauchen ihn fuer Voice Clone Prompts.",
   voiceSample: "Audio-Sample der Stimme. Backend normalisiert es nach 24 kHz WAV.",
   transcribeSample: "Schickt das Sample an den konfigurierten G3 Whisper Server und fuellt den Referenztext.",
   voiceConsent: "Bestaetigt, dass diese Stimme gespeichert und fuer lokale Tests genutzt werden darf.",
@@ -195,7 +197,7 @@ const ADMIN_HELP = {
   benchmarkIterations: "Gemessene Wiederholungen pro Case im Iterationsmodus. Warmups werden nicht in die Mittelwerte gerechnet.",
   benchmarkWarmups: "Nicht gemessene Vorlaeufe zum Fuellen von Modell-, CUDA- und Prompt-Caches.",
   benchmarkParallel: "Iterationsmodus: Anzahl gleichzeitig gestarteter Jobs. Trafficmodus ignoriert dieses Feld.",
-  werCount: "Anzahl zufaelliger Saetze, die vLLM erzeugt und OmniVoice danach vertont.",
+  werCount: "Anzahl zufaelliger Saetze, die vLLM erzeugt und die aktive Engine danach vertont.",
   werLanguage: "Sprache fuer die von vLLM generierten Referenzsaetze. TTS laeuft weiter mit Auto-Language.",
   werWords: "Wortbereich fuer vLLM-Saetze. Kuerzere Saetze machen Fehler leichter sichtbar.",
   werTolerance: "Levenshtein-Toleranz pro Wort. Bis zu 2 Buchstaben Unterschied gelten als Schreibweise, Einfuegungen/Loeschungen bleiben Fehler.",
@@ -213,11 +215,15 @@ const SEED_ENGINES: Array<{ id: SeedEngine; label: string }> = [
   { id: "omnivoice", label: "OmniVoice" },
   { id: "ming", label: "Ming" },
   { id: "phonon", label: "Phonon" },
+  { id: "audio8_realistic", label: "Audio8 Realistic 0.6B" },
+  { id: "audio8_preview", label: "Audio8 Preview 0.6B" },
+  { id: "audio8_mini", label: "Audio8 Preview 0.1B" },
+  { id: "audio8_onnx", label: "Audio8 0.1B ONNX INT8" },
 ];
 
 /** The seed slot an engine reads; mock (tests) renders like OmniVoice. */
 function seedEngineKey(engine?: string | null): SeedEngine {
-  return engine === "ming" || engine === "phonon" ? engine : "omnivoice";
+  return SEED_ENGINES.find((item) => item.id === engine)?.id ?? "omnivoice";
 }
 
 function seedEngineLabel(engine?: string | null) {
@@ -385,6 +391,7 @@ export function AdminApp() {
   const [quickText, setQuickText] = useState("Das neue Adminpanel nutzt dieselbe Streaming-Pipeline wie die offene Demo.");
   const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
+  const [capabilities, setCapabilities] = useState<EngineCapabilities | null>(null);
   const [quickSeed, setQuickSeed] = useState("");
   const [quickMingDelivery, setQuickMingDelivery] = useState<MingDeliveryDraft>(EMPTY_MING_DELIVERY);
   const quickTextRef = useRef<HTMLTextAreaElement | null>(null);
@@ -822,6 +829,16 @@ export function AdminApp() {
   // Ming reads delivery controls and a free-form instruction; the other engines ignore them.
   const mingEngineActive = activeEngineId === "ming";
   const quickMingStructured = mingEngineActive && hasStructuredMingControl(quickMingDelivery);
+  // Quick Synthesis shows what the engine reads. While the capabilities are unknown (first load, older server) nothing hides.
+  const quickCapabilities = capabilities?.engine === activeEngineId ? capabilities : null;
+  const quickReadsSeed = quickCapabilities?.options.seed ?? true;
+  // The OmniVoice flag means clone requests; its built-in voices read instructions.
+  const quickReadsInstructions = (quickCapabilities?.options.instructions ?? true) || (activeEngineId === "omnivoice" && quickTaskType !== "Base");
+  const quickOptimizationMode = quickTextOptimization || snapshot?.settings.text_optimization_default || "off";
+  // With a single language the model takes no choice; the text optimization still reads one.
+  const quickHasLanguageChoice = (quickCapabilities?.languages.length ?? 2) > 1;
+  const quickReadsLanguage = quickHasLanguageChoice || quickOptimizationMode === "deterministic";
+  const quickRequestLanguage = quickReadsLanguage ? quickLanguage : "Auto";
   // Same rule as finetune_supported in the backend's engines.py; no engine list carries it.
   const finetuneSupported = activeEngineId === "omnivoice" || activeEngineId === "mock";
   const libraryVoices = customVoices;
@@ -850,6 +867,22 @@ export function AdminApp() {
   useEffect(() => {
     if (activeEngineId && !finetuneSupported) setAdminTab("overview");
   }, [activeEngineId, finetuneSupported]);
+
+  useEffect(() => {
+    if (!adminKey || mustChange || !activeEngineId) return;
+    let stale = false;
+    apiFetch<EngineCapabilities>("/api/v1/capabilities")
+      .then((payload) => {
+        if (!stale) setCapabilities(payload);
+      })
+      .catch(() => {
+        // Only hides fields: without it Quick Synthesis shows them all.
+        if (!stale) setCapabilities(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [adminKey, mustChange, activeEngineId, snapshot?.settings.default_model]);
 
   function patchDraft(patch: Partial<ServerSettings>) {
     setSettingsDraft((current) => (current ? { ...current, ...patch } : current));
@@ -1026,8 +1059,7 @@ export function AdminApp() {
 
   async function handleQuickOptimizePreview() {
     setError("");
-    const effectiveMode = quickTextOptimization || snapshot?.settings.text_optimization_default || "off";
-    if (effectiveMode === "off") {
+    if (quickOptimizationMode === "off") {
       // The run would speak the raw text: show that instead of a deterministic rewrite.
       setQuickOptimizePreview({ text: quickText.trim(), applied_rules: [], language: null, binding_origin: "Textoptimierung aus", sentences: [] });
       return;
@@ -1036,7 +1068,7 @@ export function AdminApp() {
       const preview = await apiFetch<TextOptimizeResponse>("/api/admin/text/optimize", {
         method: "POST",
         adminKey,
-        body: { input: quickText, language: quickLanguage },
+        body: { input: quickText, language: quickRequestLanguage },
       });
       setQuickOptimizePreview(preview);
     } catch (previewError) {
@@ -1059,7 +1091,7 @@ export function AdminApp() {
       setQuickNote({ error: true, text: "Keine passende Stimme fuer dieses Modell." });
       return;
     }
-    let sampleRate = (mingEngineActive ? snapshot?.settings.ming_output_sample_rate : undefined) ?? snapshot?.settings.sample_rate ?? 24000;
+    let sampleRate = snapshot?.settings.output_sample_rate ?? snapshot?.settings.sample_rate ?? 24000;
     stopQuickPlayback();
     unlockAudioPlayback(sampleRate);
     if (quickAudioUrl) URL.revokeObjectURL(quickAudioUrl);
@@ -1084,11 +1116,11 @@ export function AdminApp() {
           voice: quickVoice,
           task_type: quickTaskType,
           // On Ming a structured control replaces the free instruction (the server rejects both together).
-          instructions: quickMingStructured ? "" : quickInstructions,
-          language: quickLanguage,
+          instructions: quickMingStructured || !quickReadsInstructions ? "" : quickInstructions,
+          language: quickRequestLanguage,
           stream: true,
           response_format: "pcm",
-          seed: parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
+          seed: quickReadsSeed && parsedSeed !== null && Number.isFinite(parsedSeed) ? parsedSeed : null,
           text_optimization: quickTextOptimization || null,
           ...(mingEngineActive ? mingDeliveryFields(quickMingDelivery) : {}),
         },
@@ -1417,9 +1449,9 @@ export function AdminApp() {
   }
 
   // Benchmark and WER runs measure the plain voice. On Ming the quick-synthesis textarea is the free-form
-  // instruction (a caption the engine applies), so it is not sent with them.
+  // instruction (a caption the engine applies), so it is not sent with them; an engine that reads none hides it.
   function benchmarkInstructions(): string {
-    return mingEngineActive ? "" : quickInstructions;
+    return mingEngineActive || !quickReadsInstructions ? "" : quickInstructions;
   }
 
   async function handleWerBenchmarkRun() {
@@ -2149,8 +2181,12 @@ export function AdminApp() {
               <label className="with-help" title={ADMIN_HELP.quickModel}>Modell<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{selectableModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
             ) : null}
             <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)}>{!quickVoices.length ? <option value="">Keine passende Stimme</option> : null}{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
-            <label className="with-help" title={ADMIN_HELP.quickLanguage}>Sprache<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
-            <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
+            {quickReadsLanguage ? (
+              <label className="with-help" title={quickHasLanguageChoice ? ADMIN_HELP.quickLanguage : ADMIN_HELP.quickLanguageTextOnly}>{quickHasLanguageChoice ? "Sprache" : "Sprache (Textoptimierung)"}<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
+            ) : null}
+            {quickReadsSeed ? (
+              <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
+            ) : null}
           </div>
           <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea ref={quickTextRef} value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
           {mingEngineActive ? (
@@ -2227,9 +2263,9 @@ export function AdminApp() {
               ) : null}
               </fieldset>
             </>
-          ) : (
+          ) : quickReadsInstructions ? (
             <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} /></label>
-          )}
+          ) : null}
           <label className="with-help" title={ADMIN_HELP.quickTextOptimization}>Textoptimierung<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
             <option value="">Server-Default ({snapshot?.settings.text_optimization_default ?? "off"})</option>
             <option value="off">off</option>

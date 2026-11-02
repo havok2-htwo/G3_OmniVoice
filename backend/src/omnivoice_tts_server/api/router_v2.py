@@ -16,14 +16,18 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ..audio8.variants import AUDIO8_VARIANTS
+from ..audio8.voice_cache import remove_voice, voice_cache_folder
 from ..audio_export import mp3_export_available, wav_to_mp3
-from ..config import save_runtime_settings
+from ..config import AUDIO8_SETTINGS_FIELDS, save_runtime_settings
 from ..engines import (
     MING_REPO_ID,
     SERVER_SETTINGS_FIELDS,
     EngineSwitchError,
+    audio8_model_dir,
     engine_loaded,
     engine_model,
+    engine_output_sample_rate,
     engine_spec,
     env_backend_override,
     finetune_supported,
@@ -173,7 +177,7 @@ SUPPORTED_LANGUAGES: list[str] = [
 ]
 
 # Engines POST /api/admin/models/download can name; Phonon only to be told it is a manual download.
-DOWNLOAD_ENGINES = ('omnivoice', 'ming', 'phonon')
+DOWNLOAD_ENGINES = ('omnivoice', 'ming', *AUDIO8_VARIANTS, 'phonon')
 
 MODEL_DOWNLOAD_META = {
     'k2-fsa/OmniVoice-AutoVoice': {
@@ -261,6 +265,13 @@ def _effective_task_type(model_id: str | None, request_task_type: TaskType | Non
     return TaskType.custom_voice
 
 
+def _output_sample_rate(settings: Any, synthesizer: Any, pending: str | None) -> int:
+    """What the audio of the admin's selection carries: during a switch the target's, as new requests wait for it."""
+    if pending:
+        return engine_output_sample_rate(settings, pending)
+    return int(getattr(synthesizer, 'sample_rate', settings.sample_rate))
+
+
 def _settings_response(settings: Any, synthesizer: Any = None, switcher: Any = None) -> ServerSettingsResponse:
     runtime_info = getattr(synthesizer, 'runtime_info', None)
     runtime = runtime_info() if callable(runtime_info) else {}
@@ -323,6 +334,7 @@ def _settings_response(settings: Any, synthesizer: Any = None, switcher: Any = N
         text_optimization_default=_text_optimization_default(settings),
         runtime_backend_env=env_backend_override(),
         runtime_backend_pending=switcher.pending_backend if switcher is not None else None,
+        output_sample_rate=_output_sample_rate(settings, synthesizer, switcher.pending_backend if switcher is not None else None),
         ming_model_id=str(getattr(settings, 'ming_model_id', '') or ''),
         ming_model_dir=str(getattr(settings, 'ming_model_dir', '') or ''),
         ming_max_slots=int(getattr(settings, 'ming_max_slots', 16)),
@@ -334,6 +346,7 @@ def _settings_response(settings: Any, synthesizer: Any = None, switcher: Any = N
         phonon_quant=str(getattr(settings, 'phonon_quant', 'q8')),
         phonon_workers=int(getattr(settings, 'phonon_workers', 2)),
         phonon_threads=int(getattr(settings, 'phonon_threads', 0)),
+        **{name: getattr(settings, name) for name in AUDIO8_SETTINGS_FIELDS},
     )
 
 
@@ -594,35 +607,47 @@ def _engine_model_statuses(request: Request) -> list[ModelDownloadStatus]:
             error=str(job.get('error')) if state == 'error' and job.get('error') else None,
             updated_at=str(job.get('updated_at')) if job.get('updated_at') else None,
             storage_root=str(model_dir.parent) if model_dir else '',
-            approx_size_gb=3.0 if spec.id == 'ming' else None,
+            approx_size_gb=spec.approx_size_gb,
             size_on_disk_gb=_directory_size_gb(model_dir) if model_dir and model_dir.exists() else None,
         )
         for model_id in selectable_models(settings)
     ]
 
 
+def _engine_download_source(settings: Any, backend: str) -> tuple[str, str | None, Path] | None:
+    """(repo, pinned revision, target folder) of an engine the server downloads itself, None for a manual download.
+    Audio8 runs model code from its folder, so only the reviewed revision of audio8/variants.py gets there."""
+    if backend == 'ming':
+        return MING_REPO_ID, None, Path(settings.ming_model_dir)
+    if backend in AUDIO8_VARIANTS:
+        variant = AUDIO8_VARIANTS[backend]
+        return variant.repo_id, variant.revision, audio8_model_dir(settings, backend)
+    return None
+
+
 def _queue_engine_model_download(request: Request, model_id: str, engine: str | None = None) -> dict[str, Any]:
-    """Ming: snapshot of the public repo into ming_model_dir, also before Ming is selected (engine='ming'). Phonon's
-    checkpoint is gated (manual download)."""
+    """Ming and Audio8: snapshot of the public repo into the engine's folder, also before the engine is selected
+    (engine='ming'). Phonon's checkpoint is gated (manual download)."""
     settings = request.app.state.settings
     store = request.app.state.store
     if engine is None and model_id not in settings.supported_models:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Unsupported model id')
     backend = engine or settings.runtime_backend
-    if backend != 'ming':
+    source = _engine_download_source(settings, backend)
+    if source is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f'{backend} checkpoints are downloaded by hand (gated repository, CC-BY-NC-4.0).',
         )
-    target = Path(settings.ming_model_dir)
-    key = ('engine:ming', os.path.normcase(str(target)))
+    repo_id, revision, target = source
+    key = (f'engine:{backend}', os.path.normcase(str(target)))
     with store.model_download_lock:
         existing = store.model_download_jobs.get(key)
         if existing and existing.get('status') == 'downloading':
             return dict(existing)
         job = {
             'model_id': model_id,
-            'repo_id': MING_REPO_ID,
+            'repo_id': repo_id,
             'storage_root': str(target),
             'status': 'downloading',
             'error': None,
@@ -635,7 +660,7 @@ def _queue_engine_model_download(request: Request, model_id: str, engine: str | 
             from huggingface_hub import snapshot_download
 
             target.mkdir(parents=True, exist_ok=True)
-            snapshot_download(MING_REPO_ID, local_dir=str(target))
+            snapshot_download(repo_id, local_dir=str(target), **({'revision': revision} if revision else {}))
             next_job = {**job, 'status': 'ready', 'error': None, 'updated_at': utcnow().isoformat()}
         except Exception as exc:
             next_job = {**job, 'status': 'error', 'error': str(exc), 'updated_at': utcnow().isoformat()}
@@ -1145,6 +1170,10 @@ async def update_admin_settings(request: Request, payload: ServerSettingsUpdateR
         settings.phonon_workers = payload.phonon_workers
     if payload.phonon_threads is not None:
         settings.phonon_threads = payload.phonon_threads
+    # Audio8 engine knobs: read when an Audio8 model loads (switch, reload or restart).
+    for name in AUDIO8_SETTINGS_FIELDS:
+        if getattr(payload, name) is not None:
+            setattr(settings, name, getattr(payload, name))
 
     if switch_target is not None:
         sent = {name for name in payload.model_fields_set if getattr(payload, name) is not None}
@@ -1630,7 +1659,10 @@ async def delete_voice_profile(request: Request, voice_id: str) -> dict[str, boo
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Voice not found')
     store.voice_profiles.pop(voice_id, None)
     store.prompt_cache.clear()
-    store.save_voices(request.app.state.settings.data_dir)
+    data_dir = request.app.state.settings.data_dir
+    store.save_voices(data_dir)
+    # Whichever engine runs now: the codes of a voice go with its profile.
+    remove_voice(voice_cache_folder(data_dir), voice_id)
     await request.app.state.events.publish('dashboard.snapshot', {'reason': 'voice.deleted'})
     return {'ok': True}
 
@@ -1705,6 +1737,9 @@ def _engine_languages(settings: Any, backend: str) -> list[str]:
         # One language per load (phonon_lang); the request's language is not read.
         code = settings.phonon_lang
         return [next((label for label in SUPPORTED_LANGUAGES if LANGUAGE_LABEL_TO_CODE.get(label.lower()) == code), code)]
+    if backend in AUDIO8_VARIANTS:
+        # No language parameter: the text alone decides (EngineSpec.option_notes says so).
+        return ['Auto']
     if backend == 'ming':
         from ..ming.prompt import normalize_language_id
 
@@ -1726,10 +1761,7 @@ def _capabilities(request: Request) -> CapabilitiesResponse:
     spec = engine_spec(backend)
     model = engine_model(settings, backend, switcher.baseline if switcher is not None else None)
     synthesizer = getattr(request.app.state, 'synthesizer', None)
-    if pending:
-        sample_rate = settings.ming_output_sample_rate if backend == 'ming' else settings.sample_rate
-    else:
-        sample_rate = getattr(synthesizer, 'sample_rate', settings.sample_rate)
+    sample_rate = _output_sample_rate(settings, synthesizer, pending)
     options = {name: name in spec.client_options for name in CapabilityOptions.model_fields}
     if backend == 'omnivoice' and (model.endswith('Base') or model.startswith('local/')):
         # Each request's task type decides, so the flag means "honored for clone requests": a clone's generate() takes
@@ -1748,6 +1780,7 @@ def _capabilities(request: Request) -> CapabilitiesResponse:
         languages=_engine_languages(settings, backend),
         response_formats=['wav', 'mp3', 'pcm'] if mp3_export_available() else ['wav', 'pcm'],
         options=CapabilityOptions(**options),
+        option_notes=dict(spec.option_notes),
     )
 
 

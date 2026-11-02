@@ -163,7 +163,7 @@ def _ref_audio_bytes(ref_audio: str) -> bytes:
     try:
         return base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise RuntimeError('ref_audio must be a readable local file path or base64 audio for the Ming engine.') from exc
+        raise RuntimeError('ref_audio must be a readable local file path or base64 audio.') from exc
 
 
 def _default_engine_factory(**kwargs: Any) -> Any:
@@ -178,14 +178,16 @@ class MingSynthesizer:
     # The queue may dispatch further batches while a native stream batch runs: they join the engine's batch.
     supports_concurrent_batches = True
     uses_voice_profiles = True
+    # What a subclass for another slot engine changes (Audio8Synthesizer).
+    engine_id = 'ming'
+    engine_label = 'Ming'
+    base_alias = MING_BASE_ALIAS
 
     def __init__(self, settings: Settings, store: InMemoryStore | None, *,
                  engine_factory: Callable[..., Any] | None = None) -> None:
         self.settings = settings
         self.store = store
-        self.model_id = settings.ming_model_id
-        self.sample_rate = int(settings.ming_output_sample_rate)
-        self.max_slots = int(settings.ming_max_slots)
+        self._read_settings()
         self._engine_factory = engine_factory or _default_engine_factory
         self._engine: Any = None
         self._loaded_model_id: str | None = None
@@ -206,8 +208,23 @@ class MingSynthesizer:
     @property
     def capacity_profile(self) -> dict[str, Any]:
         # The loaded engine's slots; unloaded, the configured ones (the next load uses them).
-        slots = self.max_slots if self._engine is not None else int(self.settings.ming_max_slots)
+        slots = self.max_slots if self._engine is not None else self._configured_slots()
+        return self._capacity(slots)
+
+    def _capacity(self, slots: int) -> dict[str, Any]:
         return ming_capacity_profile(slots)
+
+    def _configured_slots(self) -> int:
+        return int(self.settings.ming_max_slots)
+
+    def _read_settings(self) -> None:
+        """Settings an admin changed (a preset, the settings page) apply at every load, i.e. after Reload too."""
+        self.model_id = self.settings.ming_model_id
+        self.max_slots = self._configured_slots()
+        self.sample_rate = int(self.settings.ming_output_sample_rate)
+
+    def _model_dir(self) -> Path:
+        return Path(self.settings.ming_model_dir)
 
     # -- model lifecycle -------------------------------------------------------------------------------------------
 
@@ -233,19 +250,17 @@ class MingSynthesizer:
         with self._load_lock:
             if self._engine is not None:
                 return 0
-            model_dir = Path(self.settings.ming_model_dir)
+            model_dir = self._model_dir()
             if not (model_dir / 'config.json').exists():
-                raise RuntimeError(f'Ming checkpoint not found at {model_dir}. Download {self.model_id} there first.')
+                raise RuntimeError(f'{self.engine_label} checkpoint not found at {model_dir}. '
+                                   f'Download {self.model_id} there first.')
             started = time.perf_counter()
-            # Settings an admin changed (a preset, the settings page) apply at every load, i.e. after Reload too.
-            self.model_id = self.settings.ming_model_id
-            self.max_slots = int(self.settings.ming_max_slots)
-            self.sample_rate = int(self.settings.ming_output_sample_rate)
+            self._read_settings()
             self._reset_process_kernel_choices()
             engine = self._engine_factory(**self._engine_kwargs())
             engine.load()
             self._engine = engine
-            self._loaded_model_id = MING_BASE_ALIAS
+            self._loaded_model_id = self.base_alias
             with self._voice_lock:
                 self._voice_keys.clear()
             # The default voice's prompt is what most requests need first: encode it now, not in the first request.
@@ -253,17 +268,20 @@ class MingSynthesizer:
             profile = self._warmup_voice_profile()
             try:
                 prompt = self._prompt_from_profile(engine, profile, profile.ref_text) if profile is not None else None
-                engine.render(WARMUP_TEXT, prompt=prompt, language=MING_DEFAULT_LANGUAGE, seed=MING_DEFAULT_SEED)
+                self._warmup_render(engine, prompt, MING_DEFAULT_LANGUAGE)
             except Exception as exc:  # noqa: BLE001 - only a head start
-                logger.warning('ming: load warmup failed (non-critical): %s', exc)
+                logger.warning('%s: load warmup failed (non-critical): %s', self.engine_id, exc)
             self._warm_ms = int((time.perf_counter() - started) * 1000)
             stats = engine.stats() if hasattr(engine, 'stats') else {}
             logger.info(
-                'ming loaded dir=%s device=%s slots=%s graphs=%s rate=%s load_ms=%s vram_reserved_mb=%s',
-                model_dir, self._engine_kwargs()['device'], self.max_slots, stats.get('cuda_graphs'),
+                '%s loaded dir=%s device=%s slots=%s graphs=%s rate=%s load_ms=%s vram_reserved_mb=%s', self.engine_id,
+                model_dir, self._engine_kwargs().get('device', 'cpu'), self.max_slots, stats.get('cuda_graphs'),
                 self.sample_rate, self._warm_ms, stats.get('vram_reserved_mb'),
             )
             return self._warm_ms
+
+    def _warmup_render(self, engine: Any, prompt: Any, language: str) -> None:
+        engine.render(WARMUP_TEXT, prompt=prompt, language=language, seed=MING_DEFAULT_SEED)
 
     @staticmethod
     def _reset_process_kernel_choices() -> None:
@@ -295,15 +313,15 @@ class MingSynthesizer:
     async def ensure_model(self, requested_model: str | None) -> tuple[str, int]:
         # Any model id is served by the one checkpoint (benchmark / WER services submit OmniVoice ids directly).
         if self._engine is not None:
-            return MING_BASE_ALIAS, 0
+            return self.base_alias, 0
         async with self._lock_for_loop():
             if self._engine is not None:
-                return MING_BASE_ALIAS, 0
+                return self.base_alias, 0
             warm_ms = await asyncio.to_thread(self._load_sync)
-            return MING_BASE_ALIAS, warm_ms
+            return self.base_alias, warm_ms
 
     def resident_models(self) -> set[str]:
-        return {MING_BASE_ALIAS, self.model_id} if self._engine is not None else set()
+        return {self.base_alias, self.model_id} if self._engine is not None else set()
 
     async def preload(self, requested_model: str | None = None) -> tuple[str, int]:
         return await self.ensure_model(requested_model)
@@ -321,16 +339,15 @@ class MingSynthesizer:
                 return
             profile = self._resolve_voice_profile(voice) or self._warmup_voice_profile()
             if profile is None:
-                logger.info('ming warmup without a voice prompt (no saved voice profile with ref_text)')
+                logger.info('%s warmup without a voice prompt (no saved voice profile with ref_text)', self.engine_id)
             prompt = self._prompt_from_profile(engine, profile, profile.ref_text) if profile is not None else None
-            engine.render(WARMUP_TEXT, prompt=prompt, language=ming_language(language, WARMUP_TEXT),
-                          seed=MING_DEFAULT_SEED)
+            self._warmup_render(engine, prompt, ming_language(language, WARMUP_TEXT))
 
         try:
             await asyncio.to_thread(run)
         except Exception as exc:  # noqa: BLE001
-            logger.warning('ming warmup failed (non-critical): %s', exc)
-        return MING_BASE_ALIAS, load_ms + int((time.perf_counter() - started) * 1000)
+            logger.warning('%s warmup failed (non-critical): %s', self.engine_id, exc)
+        return self.base_alias, load_ms + int((time.perf_counter() - started) * 1000)
 
     def _close_sync(self, *, only_if_idle: bool = False) -> bool:
         """Close the engine. only_if_idle: only when no row renders and no batch is submitting (checked atomically
@@ -356,12 +373,12 @@ class MingSynthesizer:
                 if torch is not None and torch.cuda.is_available():
                     torch.cuda.empty_cache()
             except Exception as exc:  # noqa: BLE001
-                logger.warning('ming: CUDA cache release failed: %s', exc)
+                logger.warning('%s: CUDA cache release failed: %s', self.engine_id, exc)
             return True
 
     async def unload(self) -> tuple[str, int]:
         await asyncio.to_thread(self._close_sync)
-        return MING_BASE_ALIAS, 0
+        return self.base_alias, 0
 
     async def reload(self, requested_model: str | None = None) -> tuple[str, int]:
         await self.unload()
@@ -382,9 +399,9 @@ class MingSynthesizer:
         device = getattr(self.settings, 'preferred_device', None)
         before = await asyncio.to_thread(query_nvidia_smi, device)
         if await asyncio.to_thread(self._close_sync, only_if_idle=True):
-            message = 'Ming engine closed and its CUDA memory released; it reloads with the next request.'
+            message = f'{self.engine_label} engine closed and its CUDA memory released; it reloads with the next request.'
         else:
-            message = 'Ming engine is rendering; CUDA memory stays allocated (retry when idle).'
+            message = f'{self.engine_label} engine is rendering; CUDA memory stays allocated (retry when idle).'
         after = await asyncio.to_thread(query_nvidia_smi, device)
         before_used = int(before.get('memory_used_mb') or 0)
         after_used = int(after.get('memory_used_mb') or 0)
@@ -473,7 +490,7 @@ class MingSynthesizer:
                 pass
         cache[_CACHE_MARKER] = True
 
-    def _voice_prompt(self, engine: Any, key: str, raw: bytes, ref_text: str) -> Any:
+    def _voice_prompt(self, engine: Any, key: str, raw: bytes, ref_text: str, voice_id: str | None = None) -> Any:
         # Decoding a reference WAV takes about a millisecond; the engine returns its cached prompt for a known key.
         audio, sample_rate = _decode_audio(raw)
         prompt = engine.voice_prompt(key, audio, sample_rate, ref_text, seed=MING_PROMPT_SEED)
@@ -484,8 +501,8 @@ class MingSynthesizer:
     def _prompt_from_profile(self, engine: Any, profile: VoiceProfileRecord, ref_text: str) -> Any:
         self._sync_voice_cache(engine)
         raw = profile.audio_bytes or b''
-        key = '|'.join(['ming', self.model_id, profile.voice_id, hashlib.sha1(raw).hexdigest(), ref_text])
-        return self._voice_prompt(engine, key, raw, ref_text)
+        key = '|'.join([self.engine_id, self.model_id, profile.voice_id, hashlib.sha1(raw).hexdigest(), ref_text])
+        return self._voice_prompt(engine, key, raw, ref_text, profile.voice_id)
 
     def _prompt_for(self, engine: Any, request: Any) -> Any:
         """The engine voice prompt of a request, or None for plain (uncloned) synthesis."""
@@ -493,16 +510,16 @@ class MingSynthesizer:
         if profile is not None and profile.audio_bytes:
             ref_text = (getattr(request, 'ref_text', None) or profile.ref_text or '').strip()
             if not ref_text:
-                raise RuntimeError('Ming voice cloning requires ref_text for saved voice profiles.')
+                raise RuntimeError(f'{self.engine_label} voice cloning requires ref_text for saved voice profiles.')
             return self._prompt_from_profile(engine, profile, ref_text)
         ref_audio = getattr(request, 'ref_audio', None)
         if ref_audio:
             ref_text = (getattr(request, 'ref_text', None) or '').strip()
             if not ref_text:
-                raise RuntimeError('Ming voice cloning requires ref_text with ref_audio.')
+                raise RuntimeError(f'{self.engine_label} voice cloning requires ref_text with ref_audio.')
             self._sync_voice_cache(engine)
             raw = _ref_audio_bytes(ref_audio)
-            key = '|'.join(['ming', self.model_id, 'inline', hashlib.sha1(raw).hexdigest(), ref_text])
+            key = '|'.join([self.engine_id, self.model_id, 'inline', hashlib.sha1(raw).hexdigest(), ref_text])
             return self._voice_prompt(engine, key, raw, ref_text)
         return None
 
@@ -513,27 +530,30 @@ class MingSynthesizer:
         seed = getattr(request, 'seed', None)
         return MING_DEFAULT_SEED if seed is None else int(seed)
 
+    def _submit_row(self, engine: Any, item: BatchSynthesisItem) -> Any:
+        """Instruction and reference mode are per row: rows with different delivery controls share the batch."""
+        instruction = ming_instruction(item.request)
+        return engine.submit(
+            item.text,
+            prompt=self._prompt_for(engine, item.request),
+            language=ming_language(getattr(item.request, 'language', None), item.text),
+            seed=self._seed(item.request),
+            row_id=f'{item.job_id}:{item.sentence_index}',
+            instruction=instruction,
+            acoustic_prompt=resolve_reference_mode(item.request) == 'full',
+        )
+
     def _submit_items(self, engine: Any, items: list[BatchSynthesisItem]) -> list[Any]:
         """Resolve each voice and submit each row on its own: a batch mixes unrelated requests, so a bad voice (or an
-        over-long prompt) fails only its own item. Each entry is the engine stream, or that item's exception.
-        Instruction and reference mode are per row too: rows with different delivery controls share the batch."""
+        over-long prompt) fails only its own item. Each entry is the engine stream, or that item's exception."""
         streams: list[Any] = []
         try:
             for item in items:
                 try:
-                    instruction = ming_instruction(item.request)
-                    prompt = self._prompt_for(engine, item.request)
-                    stream = engine.submit(
-                        item.text,
-                        prompt=prompt,
-                        language=ming_language(getattr(item.request, 'language', None), item.text),
-                        seed=self._seed(item.request),
-                        row_id=f'{item.job_id}:{item.sentence_index}',
-                        instruction=instruction,
-                        acoustic_prompt=resolve_reference_mode(item.request) == 'full',
-                    )
+                    stream = self._submit_row(engine, item)
                 except Exception as exc:  # noqa: BLE001 - reported for this item only
-                    logger.warning('ming: sentence %s:%s rejected: %s', item.job_id, item.sentence_index, exc)
+                    logger.warning('%s: sentence %s:%s rejected: %s', self.engine_id, item.job_id, item.sentence_index,
+                                   exc)
                     streams.append(exc)
                     continue
                 streams.append(stream)
@@ -569,7 +589,7 @@ class MingSynthesizer:
                 if not getattr(stream, 'done', False):
                     stream.cancel()
             except Exception:  # noqa: BLE001
-                logger.exception('ming: cancelling a row failed')
+                logger.exception('%s: cancelling a row failed', self.engine_id)
             with self._streams_lock:
                 rows = self._job_streams.get(item.job_id)
                 if rows is not None:
@@ -585,7 +605,7 @@ class MingSynthesizer:
             try:
                 stream.cancel()
             except Exception:  # noqa: BLE001
-                logger.exception('ming: cancelling job %s failed', job_id)
+                logger.exception('%s: cancelling job %s failed', self.engine_id, job_id)
         return len(streams)
 
     async def render_batch(self, items: list[BatchSynthesisItem], trim_after: bool = True) -> list[BatchSynthesisResult]:
@@ -667,7 +687,7 @@ class MingSynthesizer:
                 post(index, stream)
                 post(index, _DONE)
                 continue
-            threading.Thread(target=pump, args=(index, stream), name=f'ming-pump-{index}', daemon=True).start()
+            threading.Thread(target=pump, args=(index, stream), name=f'{self.engine_id}-pump-{index}', daemon=True).start()
 
         finished = 0
         errors: dict[int, BaseException] = {}

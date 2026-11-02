@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..audio8.variants import AUDIO8_VARIANTS
 from ..passwords import build_pbkdf2_hash, verify_pbkdf2_hash
 from .models import JobStatus, SpeechRequest
 
@@ -55,7 +56,7 @@ def generate_api_key() -> str:
 # --- per-engine voice seeds (VoiceProfileRecord) ---
 # Engines a voice profile can store a best seed for. The OmniVoice seed lives in VoiceProfileRecord.seed (the field
 # every older profile, preset and PATCH client uses); the others in engine_seeds.
-SEED_ENGINES = ('omnivoice', 'ming', 'phonon')
+SEED_ENGINES = ('omnivoice', 'ming', 'phonon', *AUDIO8_VARIANTS)
 MAX_SEED = 2_147_483_647
 
 
@@ -120,7 +121,7 @@ class VoiceProfileRecord:
     # Seed used when a request for this voice sends none (the WER-benchmarked seed of a shipped preset). This is
     # the OmniVoice seed; a seed only fits the engine it was benchmarked on.
     seed: int | None = None
-    # The best seeds for the other engines (ming, phonon), same meaning as seed.
+    # The best seeds for the other engines (ming, phonon, audio8_*), same meaning as seed.
     engine_seeds: dict[str, int] = field(default_factory=dict)
 
     def seed_for_engine(self, engine: str | None) -> int | None:

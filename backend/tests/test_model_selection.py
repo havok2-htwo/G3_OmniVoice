@@ -862,6 +862,7 @@ def test_preset_list_carries_the_engine_and_filters() -> None:
         assert {item['name']: item['engine'] for item in listed} == {
             '32GB VRAM': 'omnivoice', '24GB VRAM': 'omnivoice', '24+8 VRAM': 'omnivoice',
             'Ming 32GB VRAM': 'ming', 'Ming 24GB VRAM': 'ming', 'Ming 24+8 VRAM': 'ming', 'Ming best performance': 'ming',
+            **{name: tier['values']['runtime_backend'] for name, tier in presets.AUDIO8_PRESETS.items()},
             'only ming keys': 'ming',
         }
         names = [item['name'] for item in client.get('/api/admin/settings/presets', params={'engine': 'ming'}).json()['presets']]
@@ -1033,7 +1034,7 @@ def test_a_download_without_engine_still_needs_a_known_model() -> None:
 
 CAPABILITY_KEYS = {
     'engine', 'engine_label', 'model', 'loaded', 'sample_rate', 'voice_cloning', 'voice_profiles', 'streaming',
-    'languages', 'response_formats', 'options',
+    'languages', 'response_formats', 'options', 'option_notes',
 }
 OPTION_KEYS = {
     'speed', 'seed', 'language', 'instructions', 'emotion', 'speaking_rate', 'pitch', 'volume', 'reference_mode',
@@ -1046,6 +1047,7 @@ def _capabilities_of(client) -> dict:
     assert response.status_code == 200, response.text
     body = response.json()
     assert set(body) == CAPABILITY_KEYS and set(body['options']) == OPTION_KEYS
+    assert body['option_notes'] == {}, 'only the Audio8 engines carry a note so far'
     assert client.get('/v1/capabilities').json() == body
     return body
 

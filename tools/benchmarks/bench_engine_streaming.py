@@ -1,4 +1,4 @@
-"""Client-side streaming benchmark for the G3 TTS server, for any engine (OmniVoice, Ming, Phonon).
+"""Client-side streaming benchmark for the G3 TTS server, for any engine (OmniVoice, Ming, Phonon, Audio8).
 
 Measures what a client sees over HTTP, nothing in-process:
   * TTFA (request sent -> first audio bytes) on the NDJSON stream (/api/v1/synthesize/stream) and on the
@@ -17,7 +17,8 @@ Two ways to run it:
      the repo's data/, secrets are not), benchmark it and stop it again:
        python bench_engine_streaming.py --spawn ming --set ming_max_slots=32 --set max_parallel_requests=32 \
            --work-dir C:/tmp/bench --out ming32.json
-     --spawn omnivoice --preset "32GB VRAM" applies an OmniVoice tier's values from presets.py.
+     --spawn omnivoice --preset "32GB VRAM" applies an OmniVoice tier's values from presets.py, likewise
+     --spawn audio8_realistic --preset "Audio8 32GB VRAM".
 
 Requires httpx + numpy (both in the backend env); --spawn also imports the server package, so run it from that env.
 The WER round trip lives in bench_wer_roundtrip.py.
@@ -35,6 +36,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -189,7 +191,7 @@ async def ndjson_stream(client: httpx.AsyncClient, base: str, text: str, *, voic
 
 
 async def raw_pcm_stream(client: httpx.AsyncClient, base: str, text: str, *, voice: str, language: str,
-                         seed: int | None = None) -> dict[str, Any]:
+                         seed: int | None = None, sample_rate: int = 24000) -> dict[str, Any]:
     payload: dict[str, Any] = {'input': text, 'voice': voice, 'language': language, 'stream': True}
     if seed is not None:
         payload['seed'] = seed
@@ -204,7 +206,7 @@ async def raw_pcm_stream(client: httpx.AsyncClient, base: str, text: str, *, voi
                 first = time.perf_counter()
             nbytes += len(chunk)
     ended = time.perf_counter()
-    audio_s = nbytes / 2 / 24000  # the raw stream contract is 24 kHz mono PCM16
+    audio_s = nbytes / 2 / sample_rate  # mono PCM16 with no header, at the engine's output rate
     total_ms = (ended - started) * 1000
     return {
         'ttfa_ms': (first - started) * 1000 if first else None,
@@ -392,7 +394,7 @@ async def wait_ready(base: str, *, voice: str, language: str, timeout_s: float =
 # Main
 # ----------------------------------------------------------------------------------------------------------------
 
-DEFAULT_ROUNDS = {1: 20, 4: 6, 8: 4, 16: 3, 32: 2, 48: 2, 64: 2}
+DEFAULT_ROUNDS = {1: 20, 2: 8, 4: 6, 8: 4, 16: 3, 32: 2, 48: 2, 64: 2}
 
 
 async def run_suite(base: str, args: argparse.Namespace, sampler: VramSampler | None) -> dict[str, Any]:
@@ -407,9 +409,10 @@ async def run_suite(base: str, args: argparse.Namespace, sampler: VramSampler | 
             out['ndjson'].append(res)
             print(f'[ndjson] n={n}: ttfa p50 {res["ttfa_ms_p50"]:.0f} p95 {res["ttfa_ms_p95"]:.0f} ms, '
                   f'rtf p50 {res["rtf_p50"]:.3f}, failed {res["failed"]}', flush=True)
+        raw_rate = int((await client.get(f'{base}/api/v1/capabilities')).json()['sample_rate'])
         for n in args.raw_concurrency:
-            res = await bursts(raw_pcm_stream, client, base, n=n, rounds=args.rounds or DEFAULT_ROUNDS.get(n, 2),
-                               voice=args.voice, language=args.language)
+            res = await bursts(partial(raw_pcm_stream, sample_rate=raw_rate), client, base, n=n,
+                               rounds=args.rounds or DEFAULT_ROUNDS.get(n, 2), voice=args.voice, language=args.language)
             out['raw_pcm'].append(res)
             print(f'[raw pcm] n={n}: ttfa p50 {res["ttfa_ms_p50"]:.0f} p95 {res["ttfa_ms_p95"]:.0f} ms, '
                   f'failed {res["failed"]}', flush=True)
@@ -430,7 +433,8 @@ async def run_suite(base: str, args: argparse.Namespace, sampler: VramSampler | 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base-url', default=None, help='benchmark a running server (default: spawn one)')
-    parser.add_argument('--spawn', choices=['omnivoice', 'ming', 'phonon'], help='engine of the spawned server')
+    parser.add_argument('--spawn', choices=['omnivoice', 'ming', 'phonon', 'audio8_realistic', 'audio8_preview',
+                                             'audio8_mini', 'audio8_onnx'], help='engine of the spawned server')
     parser.add_argument('--preset', default=None, help='built-in preset whose values the spawned server starts with')
     parser.add_argument('--set', action='append', default=[], metavar='KEY=VALUE',
                         help='runtime setting override for the spawned server (JSON value), repeatable')

@@ -31,13 +31,16 @@
 #   flashinfer-python==0.6.15.post1 flashinfer-jit-cache==0.6.15.post1+cu130
 #   --extra-index-url https://flashinfer.ai/whl/cu130/
 #
-# Ming-3.0-tts engine (backend extra [ming], install.ps1 installs ".[dev,ming,phonon]"):
+# Ming-3.0-tts engine (backend extra [ming], install.ps1 installs ".[dev,ming,phonon,audio8]"):
 # onnxruntime (CPU, CAM++ speaker encoder) and soxr (44.1 -> 24 kHz stream resampler) are
 # pinned below (the vendored model code needs no einops/x-transformers/diffusers). Ming's model code is vendored in omnivoice_tts_server/ming (MIT, upstream
 # github.com/inclusionAI/Ming-3.0-tts commit 9332fb9); its weights live in models/Ming-3.0-tts-0.5b.
 #
 # Gradium Phonon engine (backend extra [phonon]): ptts is pinned below; its checkpoint lives in
 # models/phonon-40m-multilingual (gated, CC-BY-NC-4.0, downloaded by hand).
+#
+# Audio8 engines (backend extra [audio8]): onnx (cuts the CPU codec graph at load) and ml_dtypes are pinned below.
+# Their model code loads from the pinned model folders in models/ (audio8/variants.py), nothing is vendored.
 #
 # Known drift (2026-10-28): the machine's .conda-env still runs omnivoice 0.1.5 and
 # transformers 5.9.0 (the pins below are the 0.2.1 / 5.10.2 stack the Dockerfile uses).
@@ -82,6 +85,7 @@ llvmlite==0.47.0
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
+ml_dtypes==0.6.0
 mpmath==1.3.0
 msgpack==1.1.2
 narwhals==2.22.1
@@ -90,6 +94,7 @@ numba==0.65.1
 num2words==0.5.14
 numpy==2.4.4
 omnivoice==0.2.1
+onnx==1.23.2
 onnxruntime==1.31.1
 orjson==3.11.9
 packaging==26.0

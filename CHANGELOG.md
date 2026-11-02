@@ -4,6 +4,39 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - Audio8 engines
+
+- Four new engines, each with its own model card, presets, profile, voice seeds and live switch: `audio8_realistic`,
+  `audio8_preview` and `audio8_mini` on the GPU, `audio8_onnx` on the CPU. They clone the saved voice profiles and stream
+  natively. A shared slot engine with CUDA graphs runs the GPU models, and the decoder runs on its own CUDA stream.
+- **Licences differ.** Realistic 0.6B, Preview 0.6B and the ONNX INT8 model are Apache-2.0. **Preview 0.1B (`audio8_mini`) is
+  under the Audio8 Community License v1.0: commercial use only below US$2M annual revenue.** The admin highlights this on
+  the card. The model code runs from the pinned folder below `models/`, and nothing is fetched at load.
+- Measured over HTTP on the RTX 5090, 32 slots, SonjaV2: TTFA 50-53 ms for one stream, 199-228 ms for a burst of 32, 79-82x
+  realtime at saturation, 3.8-4.6 GB VRAM. ONNX on the CPU: TTFA 557 ms, 2.3x realtime with 2 workers. German WER over 131
+  sentences with `deterministic` text optimization: 0.48-0.59 % on the GPU engines, 0.80 % on ONNX. No Audio8 engine dropped
+  a word in the long sentences. Realistic dropped units after raw decimal numbers ("9,99 Euro im Monat") in 4 clips with
+  text optimization off. Details: `docs/benchmarks/audio8-2026-11.md`. Nobody has listened to the audio, and nothing is
+  measured on an RTX 3090.
+- **Client-visible difference:** Audio8 output is 44.1 kHz, also on the raw `audio/pcm` stream, which has no header. Clients
+  read `sample_rate` from the capabilities, or the admin sets `audio8_output_sample_rate=24000`. The `language` field is
+  accepted with no effect, because the model has no language parameter.
+- New API fields: `option_notes` in the capabilities, `output_sample_rate` in `GET /api/admin/settings`, and `license`,
+  `license_restricted`, `cpu_only` and `approx_size_gb` on `GET /api/admin/runtime/engines`. New settings: `audio8_*`
+  (see `API_DOCUMENTATION.md`). `POST /api/admin/models/download` fetches the pinned revisions; `install.bat -DownloadAudio8`
+  fetches all four.
+- Voice caches are bounded. The GPU engines keep up to 400 MB of voices on the card, least recently used out first, and
+  count that in `estimated_peak_vram_mb`. `audio8_onnx` keeps the reference codes of saved voices in
+  `data/audio8_onnx_voices`: deleting a voice removes them whichever engine runs, each load removes files of voices that
+  no longer exist, and a reference sent with a single request is never written to disk.
+- Quick Synthesis follows the capabilities: it shows only what the engine reads and uses `output_sample_rate`. On OmniVoice
+  with Base, Instructions is now hidden, because clone requests ignore it.
+- `bench_engine_streaming.py --spawn` takes the Audio8 engines. `bench_wer_roundtrip.py` takes `--sentences-file` and
+  `--seed`, with a fixed 131-sentence corpus in `tools/benchmarks/wer_sentences_de.tsv`. Its JSON now has `groups` instead
+  of `numeric` and `plain`.
+- The suite runs on transformers 5.9.0. On 5.10.2, the version in the lock file and the Docker image, the Audio8 engine GPU tests
+  (`test_audio8_engine_gpu.py`, `test_audio8_falcon_gpu.py`) pass too, including the RoPE repair; the ONNX and server tests were not repeated there.
+
 ### Fixed - Admin details found by clicking through the panel
 
 - A preset name with a slash saves and deletes; it used to end in "Method Not Allowed".

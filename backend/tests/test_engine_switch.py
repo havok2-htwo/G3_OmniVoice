@@ -175,7 +175,7 @@ def test_engine_registry_reports_install_state(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_backend='mock', ming_model_dir=tmp_path / 'missing', models_root_dir=tmp_path,
                         allow_model_downloads=False)
     by_id = {info.id: info for info in engines.list_engines(settings)}
-    assert list(by_id) == ['omnivoice', 'ming', 'phonon', 'mock']
+    assert list(by_id) == ['omnivoice', 'ming', 'audio8_realistic', 'audio8_preview', 'audio8_mini', 'audio8_onnx', 'phonon', 'mock']
     assert by_id['mock'].active and by_id['mock'].test_only and by_id['mock'].status == 'active'
     assert by_id['phonon'].status == 'missing_package' and not by_id['phonon'].available
     assert by_id['ming'].status == 'missing_model' and 'hf download inclusionAI/Ming-3.0-tts-0.5B' in by_id['ming'].detail
@@ -202,7 +202,9 @@ def test_engines_endpoint_lists_every_engine(fake_ming) -> None:
     try:
         body = client.get('/api/admin/runtime/engines').json()
         assert body['active'] == 'mock'
-        assert [engine['id'] for engine in body['engines']] == ['omnivoice', 'ming', 'phonon', 'mock']
+        assert [engine['id'] for engine in body['engines']] == [
+            'omnivoice', 'ming', 'audio8_realistic', 'audio8_preview', 'audio8_mini', 'audio8_onnx', 'phonon', 'mock',
+        ]
         assert body['switch']['state'] == 'idle'
         ming = next(engine for engine in body['engines'] if engine['id'] == 'ming')
         assert ming['available'] and ming['native_streaming'] and ming['uses_voice_profiles']

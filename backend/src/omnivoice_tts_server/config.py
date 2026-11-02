@@ -10,12 +10,30 @@ from typing import Any, Iterable, Literal, Mapping
 from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .audio8.variants import AUDIO8_VARIANTS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODELS_ROOT = PROJECT_ROOT / 'models'
 DEFAULT_FRONTEND_DIST = PROJECT_ROOT / 'frontend' / 'dist'
 DEFAULT_DATA_DIR = PROJECT_ROOT / 'data'
 
 RUNTIME_SETTINGS_FILE = 'runtime_settings.json'
+# Shared by the Audio8 engines, read when one loads (switch, reload or restart). Same names in the settings PUT.
+AUDIO8_SETTINGS_FIELDS = (
+    'audio8_max_slots',
+    'audio8_cuda_graphs',
+    'audio8_output_sample_rate',
+    'audio8_first_chunk_frames',
+    'audio8_chunk_frames',
+    'audio8_fragment_max_chars',
+    'audio8_temperature',
+    'audio8_top_p',
+    'audio8_top_k',
+    'audio8_onnx_workers',
+    'audio8_onnx_threads',
+    'audio8_onnx_first_chunk_frames',
+    'audio8_onnx_chunk_frames',
+)
 RUNTIME_SETTINGS_FIELDS = {
     'active_model',
     'default_voice',
@@ -80,15 +98,18 @@ RUNTIME_SETTINGS_FIELDS = {
     'phonon_quant',
     'phonon_workers',
     'phonon_threads',
+    *AUDIO8_SETTINGS_FIELDS,
     # {engine id: its ENGINE_TUNED_FIELDS values}. The flat keys stay the active engine's values.
     'engine_profiles',
 }
 # Saved as str, loaded back as Path.
 PATH_SETTINGS_FIELDS = {'models_root_dir', 'ming_model_dir'}
-RUNTIME_BACKENDS = ('omnivoice', 'phonon', 'ming', 'mock')
+RUNTIME_BACKENDS = ('omnivoice', 'phonon', 'ming', *AUDIO8_VARIANTS, 'mock')
 RUNTIME_BACKEND_ENV = 'OMNIVOICE_TTS_RUNTIME_BACKEND'
 # Fields whose good value depends on the engine (Ming wants 16 parallel requests, OmniVoice a batch window). They move
-# with the engine on a switch (engine_profiles); every other field is shared or read by one engine only.
+# with the engine on a switch (engine_profiles); every other field is shared or read by one engine only. The audio8_*
+# keys are read by three engines and each has its own tiers, so they are tuned per engine like max_parallel_requests,
+# which has to match the slots.
 ENGINE_TUNED_FIELDS = (
     'max_parallel_requests',
     'max_batch_size',
@@ -97,6 +118,10 @@ ENGINE_TUNED_FIELDS = (
     'stream_chunk_ms',
     'stream_prebuffer_ms',
     'preferred_device',
+    'audio8_max_slots',
+    'audio8_cuda_graphs',
+    'audio8_first_chunk_frames',
+    'audio8_chunk_frames',
 )
 
 
@@ -161,6 +186,30 @@ class Settings(BaseSettings):
     # Longest text piece Ming renders in one go (semantic length). Sentences are kept whole up to this size, so a
     # sentence is not cut at a comma mid-way; 24 is upstream's default, which splits at most commas.
     ming_fragment_max_chars: int = Field(default=24, ge=8, le=400)
+    # Audio8 engines (audio8/ package, Audio8Synthesizer in audio8_runtime.py). The models live in
+    # models_root_dir/<folder of audio8/variants.py>. Rows the engine renders at once; new rows join at the next step.
+    audio8_max_slots: int = Field(default=32, ge=1, le=64)
+    audio8_cuda_graphs: bool = True
+    # 44100 is the native rate; 24000 resamples with one stateful resampler per row like Ming.
+    audio8_output_sample_rate: Literal[24000, 44100] = 44100
+    # Code frames (46 ms each) in the first streamed chunk of a sentence and in later chunks.
+    audio8_first_chunk_frames: int = Field(default=4, ge=1, le=12)
+    audio8_chunk_frames: int = Field(default=12, ge=1, le=32)
+    # Longest text piece Audio8 renders in one go, in characters. The model sometimes drops a clause of a long sentence,
+    # and a cut in mid-sentence can cost a misread word instead (audio8/text.py has the numbers).
+    audio8_fragment_max_chars: int = Field(default=200, ge=24, le=400)
+    # Sampling of the semantic token and the codebooks (model card values).
+    audio8_temperature: float = Field(default=0.8, gt=0, le=2)
+    audio8_top_p: float = Field(default=0.95, gt=0, le=1)
+    audio8_top_k: int = Field(default=50, ge=1, le=1024)
+    # audio8_onnx (CPU, audio8/onnx_engine.py). Rows rendering at once; each has one LM thread and a decoder thread pool.
+    audio8_onnx_workers: int = Field(default=2, ge=1, le=16)
+    # Codec threads per worker. 0 = the physical cores left after the LM threads, split over the workers.
+    audio8_onnx_threads: int = Field(default=0, ge=0, le=64)
+    # Code frames (46 ms each) in the first streamed chunk and the least in later ones. The CPU decodes far slower than
+    # the GPU, so the first chunk has to last until the next one is decoded.
+    audio8_onnx_first_chunk_frames: int = Field(default=6, ge=1, le=32)
+    audio8_onnx_chunk_frames: int = Field(default=8, ge=1, le=64)
     # Per engine values of ENGINE_TUNED_FIELDS: a live switch stores the old engine's and applies the new one's.
     engine_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
     allow_model_downloads: bool = True

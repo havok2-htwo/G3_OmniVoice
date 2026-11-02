@@ -298,7 +298,7 @@ class VoiceProfilePatchRequest(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     # The seed a request for this voice uses when it sends none (the benchmarked best seed). null clears it.
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
-    # The engine the seed belongs to (omnivoice, ming, phonon); omitted means omnivoice.
+    # The engine the seed belongs to (omnivoice, ming, phonon, audio8_*); omitted means omnivoice.
     engine: str | None = Field(default=None, max_length=32)
 
 
@@ -430,6 +430,8 @@ class ServerSettingsResponse(BaseModel):
     runtime_backend_env: str | None = None
     # The engine a running live switch is moving to (None when no switch runs).
     runtime_backend_pending: str | None = None
+    # What streams and files of the active engine carry (the target's during a switch). sample_rate is OmniVoice's.
+    output_sample_rate: int = 24000
     ming_model_id: str = 'inclusionAI/Ming-3.0-tts-0.5B'
     ming_model_dir: str = ''
     ming_max_slots: int = 16
@@ -441,9 +443,24 @@ class ServerSettingsResponse(BaseModel):
     phonon_quant: str = 'q8'
     phonon_workers: int = 2
     phonon_threads: int = 0
+    audio8_max_slots: int = 32
+    audio8_cuda_graphs: bool = True
+    audio8_output_sample_rate: int = 44100
+    audio8_first_chunk_frames: int = 4
+    audio8_chunk_frames: int = 12
+    audio8_fragment_max_chars: int = 200
+    audio8_temperature: float = 0.8
+    audio8_top_p: float = 0.95
+    audio8_top_k: int = 50
+    audio8_onnx_workers: int = 2
+    audio8_onnx_threads: int = 0
+    audio8_onnx_first_chunk_frames: int = 6
+    audio8_onnx_chunk_frames: int = 8
 
 
-RuntimeBackendName = Literal['omnivoice', 'phonon', 'ming', 'mock']
+RuntimeBackendName = Literal[
+    'omnivoice', 'phonon', 'ming', 'audio8_realistic', 'audio8_preview', 'audio8_mini', 'audio8_onnx', 'mock',
+]
 
 
 class ServerSettingsUpdateRequest(BaseModel):
@@ -510,6 +527,19 @@ class ServerSettingsUpdateRequest(BaseModel):
     phonon_quant: str | None = None
     phonon_workers: int | None = Field(default=None, ge=1, le=16)
     phonon_threads: int | None = Field(default=None, ge=0, le=64)
+    audio8_max_slots: int | None = Field(default=None, ge=1, le=64)
+    audio8_cuda_graphs: bool | None = None
+    audio8_output_sample_rate: Literal[24000, 44100] | None = None
+    audio8_first_chunk_frames: int | None = Field(default=None, ge=1, le=12)
+    audio8_chunk_frames: int | None = Field(default=None, ge=1, le=32)
+    audio8_fragment_max_chars: int | None = Field(default=None, ge=24, le=400)
+    audio8_temperature: float | None = Field(default=None, gt=0, le=2)
+    audio8_top_p: float | None = Field(default=None, gt=0, le=1)
+    audio8_top_k: int | None = Field(default=None, ge=1, le=1024)
+    audio8_onnx_workers: int | None = Field(default=None, ge=1, le=16)
+    audio8_onnx_threads: int | None = Field(default=None, ge=0, le=64)
+    audio8_onnx_first_chunk_frames: int | None = Field(default=None, ge=1, le=32)
+    audio8_onnx_chunk_frames: int | None = Field(default=None, ge=1, le=64)
 
     @field_validator('runtime_backend', mode='before')
     @classmethod
@@ -540,6 +570,13 @@ class EngineInfo(BaseModel):
     native_streaming: bool = False
     # The mock tone generator: listed for tests and demos only.
     test_only: bool = False
+    # Runs without a GPU: the GPU selection and VRAM tiers mean nothing for it.
+    cpu_only: bool = False
+    # The checkpoint's licence, None when not recorded here. restricted: commercial use is limited.
+    license: str | None = None
+    license_restricted: bool = False
+    # Size of the download, None when not recorded here.
+    approx_size_gb: float | None = None
     # PUT /api/admin/settings fields this engine reads (engines.ENGINE_SETTINGS_FIELDS).
     settings_fields: list[str] = Field(default_factory=list)
 
@@ -582,7 +619,8 @@ class EngineSwitchRequest(BaseModel):
 
 
 class CapabilityOptions(BaseModel):
-    """Request fields the active engine really honors; the others are accepted and ignored."""
+    """Request fields the active engine really honors; the others are accepted and ignored. A note in
+    CapabilitiesResponse.option_notes qualifies a field, e.g. one that is accepted but changes nothing."""
 
     speed: bool = False
     seed: bool = False
@@ -608,6 +646,8 @@ class CapabilitiesResponse(BaseModel):
     languages: list[str]
     response_formats: list[str]
     options: CapabilityOptions
+    # CapabilityOptions field -> what a client should know about it on this engine.
+    option_notes: dict[str, str] = Field(default_factory=dict)
 
 
 class SettingsPresetItem(BaseModel):

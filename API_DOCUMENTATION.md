@@ -122,6 +122,10 @@ Runtime backends (engines):
 | --- | --- | --- | --- | --- |
 | `omnivoice` (default) | `k2-fsa/OmniVoice` | the three aliases above, promoted `local/...` | voice profiles, `Auto Voice`, VoiceDesign | per sentence (whole sentence rendered, then sliced) |
 | `ming` | `inclusionAI/Ming-3.0-tts-0.5B` (MIT) | `inclusionAI/Ming-3.0-tts-0.5B-Base` | voice profiles (clone), `Auto Voice` | native chunk streaming inside each sentence |
+| `audio8_realistic` | `Edge0/Audio8-TTS-Realistic-0.6b` (Apache-2.0) | `Edge0/Audio8-TTS-Realistic-0.6b-Base` | voice profiles (clone) | native chunk streaming inside each sentence |
+| `audio8_preview` | `Edge0/Audio8-TTS-Preview-0.6b` (Apache-2.0) | `Edge0/Audio8-TTS-Preview-0.6b-Base` | voice profiles (clone) | native chunk streaming inside each sentence |
+| `audio8_mini` | `Edge0/Audio8-TTS-Preview-0.1b` (Audio8 Community License v1.0, commercial use only below US$2M annual revenue) | `Edge0/Audio8-TTS-Preview-0.1b-Base` | voice profiles (clone) | native chunk streaming inside each sentence |
+| `audio8_onnx` | `Edge0/audio8-TTS-0.1B-ONNX-INT8` (CPU, Apache-2.0) | `Edge0/audio8-TTS-0.1B-ONNX-INT8-Base` | voice profiles (clone) | native chunk streaming inside each sentence |
 | `phonon` | `gradium/phonon-40m-multilingual` (CPU) | `gradium/phonon-40m-multilingual` | its own catalog voices (no profiles) | native chunk streaming |
 | `mock` | sine tone | the OmniVoice aliases | as OmniVoice | per sentence |
 
@@ -142,6 +146,15 @@ Runtime backends (engines):
   gives the native rate; raw `audio/pcm` clients must then know the rate). Ming's quality
   settings are fixed (10 flow steps, CFG 2.0, no reference trimming); `num_step`,
   `guidance_scale` and the other OmniVoice generation settings do not apply to it.
+- **Audio8** is four engines that share one implementation: `audio8_realistic`, `audio8_preview` and `audio8_mini` run on
+  the GPU, `audio8_onnx` runs on the CPU. They clone the saved voice profiles (`ref_text` is required) through their
+  `...-Base` alias. **Their licences differ:** `audio8_mini` (0.1B) is under the Audio8 Community License v1.0, which allows
+  commercial use only below US$2M annual revenue. The other three checkpoints are Apache-2.0, `audio8_onnx` included.
+  The output is 44.1 kHz by default, so **unlike the other engines, raw `audio/pcm` is 44.1 kHz too** and carries no header;
+  read `sample_rate` from `GET /api/v1/capabilities`, or set `audio8_output_sample_rate=24000` to get the 24 kHz contract.
+  Requests read `seed`; `language` is accepted and has no effect. Sampling (`audio8_temperature`, `audio8_top_p`,
+  `audio8_top_k`) is an admin setting, and the OmniVoice generation settings do not apply. The model code runs from the
+  pinned model folder (`trust_remote_code` with `local_files_only`), and nothing is fetched at load.
 - **Phonon** runs on the CPU with its own voice catalog; saved voice profiles are not used
   (and cannot be edited) while it is active, and a client that names one on `/v1/audio/speech` gets
   `404`. `phonon_lang`, `phonon_quant`, `phonon_workers` and `phonon_threads` are runtime settings
@@ -543,20 +556,24 @@ Response shape:
 | `engine`, `engine_label` | the active engine (id and name) |
 | `model` | the admin's selection, also when a request named another id |
 | `loaded` | the selection is in memory now, read from the engine (`false` until the first load and during a switch) |
-| `sample_rate` | output rate in Hz |
+| `sample_rate` | output rate in Hz: 24000, or 44100 on the Audio8 engines by default and on Ming with `ming_output_sample_rate=44100` |
 | `voice_cloning`, `voice_profiles` | the engine clones a reference voice; saved voice profiles work (`false` on Phonon: a profile voice is a `404` on `/v1/audio/speech`) |
 | `streaming` | `native` sends audio as the engine produces it, `sentence` renders a whole sentence and then slices it |
 | `languages` | labels the engine has a language for; Phonon lists its one `phonon_lang` |
 | `response_formats` | `pcm` is the stream format, a non-streaming `pcm` request gets WAV; `mp3` is left out without ffmpeg |
 | `options` | request fields the engine reads; the others are accepted and ignored |
 
-| Option | `omnivoice` | `ming` | `phonon` |
-| --- | --- | --- | --- |
-| `speed` | yes | no (see `speaking_rate`) | no |
-| `seed` | yes | yes | yes |
-| `language` | yes | yes | no |
-| `instructions` | no with Base or a `local/...` selected | yes | no |
-| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
+| Option | `omnivoice` | `ming` | `phonon` | `audio8_*` |
+| --- | --- | --- | --- | --- |
+| `speed` | yes | no (see `speaking_rate`) | no | no |
+| `seed` | yes | yes | yes | yes |
+| `language` | yes | yes | no | accepted, no effect (see `option_notes`) |
+| `instructions` | no with Base or a `local/...` selected | yes | no | no |
+| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no | no |
+
+`option_notes` (`{field: text}`, empty on most engines) explains an option that needs it. On the Audio8 engines
+`options.language` is `true` because the field is accepted, but the model has no language parameter and the text alone
+decides: `languages` is `["Auto"]`, and `option_notes.language` says so.
 
 On OmniVoice each request's task type decides, so `instructions` here means "honored for clone requests": a clone does
 not read it, also not on a selected `local/...` checkpoint. Built-in voices and requests naming the AutoVoice or
@@ -646,11 +663,11 @@ Purpose:
 - submits a streaming synthesis job
 - returns newline-delimited JSON events
 - OmniVoice: emits chunks after sentence/batch generation because OmniVoice does not expose native partial audio streaming
-- Ming and Phonon: native streaming; every audio chunk is sent the moment the engine produced it
-  (`"native_stream": true`), the first one after a few 80 ms latents of the first sentence
-  (`ming_first_chunk_latents`)
-- chunks always arrive in sentence order, and `sample_rate` is 24000 for every engine (unless
-  `ming_output_sample_rate` is set to 44100)
+- Ming, Audio8 and Phonon: native streaming; every audio chunk is sent the moment the engine produced it
+  (`"native_stream": true`), on Ming the first one after a few 80 ms latents of the first sentence
+  (`ming_first_chunk_latents`), on Audio8 after `audio8_first_chunk_frames` frames
+- chunks always arrive in sentence order. Each chunk carries `sample_rate`: 24000, except 44100 on the Audio8 engines
+  (unless `audio8_output_sample_rate` is 24000) and on Ming with `ming_output_sample_rate` 44100
 
 Content type:
 
@@ -697,14 +714,15 @@ Behavior:
 - `stream=false` with `response_format="wav"`: returns `audio/wav`
 - `stream=false` with `response_format="mp3"`: returns `audio/mpeg`
 - `stream=true`: returns raw `audio/pcm` chunks
-- streaming PCM is 24 kHz, mono, signed 16-bit little-endian (for every engine; Ming resamples its
-  44.1 kHz output per stream)
+- streaming PCM is mono, signed 16-bit little-endian. It is 24 kHz on OmniVoice, Ming and Phonon (Ming resamples its
+  44.1 kHz output per stream), but 44.1 kHz on the Audio8 engines by default: the stream has no header, so read
+  `sample_rate` from `GET /api/v1/capabilities`, or set `audio8_output_sample_rate=24000`
 
 OpenAI-client tolerance:
 
 - `model`: exact supported model ids (case-insensitive) are used as-is; OpenAI aliases (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`, ...) and unknown ids fall back to the active model
 - `voice`: resolved case-insensitively against built-in voices and saved voice profiles (by id or name); standard OpenAI voice names (`alloy`, `echo`, `fable`, ...) fall back to the default voice; anything else returns `404`
-- a resolved custom voice profile automatically routes the request to the active engine's `...-Base` (voice clone) alias (`k2-fsa/OmniVoice-Base`, or `inclusionAI/Ming-3.0-tts-0.5B-Base` while Ming runs)
+- a resolved custom voice profile automatically routes the request to the active engine's `...-Base` (voice clone) alias (`k2-fsa/OmniVoice-Base`, `inclusionAI/Ming-3.0-tts-0.5B-Base` while Ming runs, `<Audio8 repo>-Base` while an Audio8 engine runs)
 - the `Authorization: Bearer ...` header sent by OpenAI clients is accepted and ignored (the endpoint stays public, like all synthesis endpoints)
 - `text_optimization` (top level via `extra_body`, or `metadata.text_optimization`) is honoured; when it ran, the response has an `X-Text-Optimization` header
 - the Ming delivery controls (`emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode`) are honoured the same way (top level via `extra_body`, or `metadata.<field>`); OpenAI's own `instructions` field is Ming's free-form instruction
@@ -904,6 +922,14 @@ Response fields include:
   once), `ming_cuda_graphs`, `ming_output_sample_rate` (24000 | 44100), `ming_first_chunk_latents`
   (1-8, 80 ms each, first chunk of a sentence), `ming_max_chunk_latents` (1-32, later chunks). They
   apply when Ming loads (engine switch, model reload or restart).
+- `output_sample_rate`: the rate of the active engine, or of the target engine during a switch
+- Audio8 settings, read when an Audio8 engine loads. All four engines: `audio8_output_sample_rate` (24000 | 44100),
+  `audio8_fragment_max_chars` (24-400, default 200, longest text piece rendered in one go; it is lowered automatically
+  for long reference clips), `audio8_temperature` (above 0 to 2, default 0.8), `audio8_top_p` (above 0 to 1, default
+  0.95), `audio8_top_k` (1-1024, default 50). GPU engines: `audio8_max_slots` (1-64), `audio8_cuda_graphs`,
+  `audio8_first_chunk_frames` (1-12, default 4), `audio8_chunk_frames` (1-32, default 12), each kept per engine. CPU
+  engine: `audio8_onnx_workers` (1-16, default 2), `audio8_onnx_threads` (0-64, 0 = automatic),
+  `audio8_onnx_first_chunk_frames` (1-32, default 6), `audio8_onnx_chunk_frames` (1-64, default 8).
 
 ### `PUT /api/admin/settings`
 
@@ -964,7 +990,8 @@ Common request fields:
 `text_optimization` themselves (env: `OMNIVOICE_TTS_TEXT_OPTIMIZATION_DEFAULT`).
 Benchmark, WER and finetune jobs ignore it.
 
-`runtime_backend` (`omnivoice` | `ming` | `phonon` | `mock`) different from the active engine
+`runtime_backend` (`omnivoice` | `ming` | `audio8_realistic` | `audio8_preview` | `audio8_mini` | `audio8_onnx` |
+`phonon` | `mock`) different from the active engine
 starts a live engine switch after the other fields are saved (same as
 `POST /api/admin/runtime/backend` with `wait=false`); an unavailable engine is rejected with `400`
 before anything is applied. While a switch runs, the PUT returns `409`. The engine alias of a
@@ -1007,7 +1034,11 @@ Response:
       "uses_voice_profiles": true,
       "native_streaming": true,
       "test_only": false,
-      "settings_fields": ["default_voice", "preferred_device", "max_parallel_requests", "ming_max_slots"]
+      "settings_fields": ["default_voice", "preferred_device", "max_parallel_requests", "ming_max_slots"],
+      "license": "MIT",
+      "license_restricted": false,
+      "cpu_only": false,
+      "approx_size_gb": 3.0
     }
   ],
   "switch": { "state": "idle", "drained_jobs": 0, "cancelled_jobs": 0, "requeued_jobs": 0 },
@@ -1020,8 +1051,11 @@ weights when it loads), `downloading`, `missing_package` (install `backend[ming]
 `missing_model` (`detail` says how to get the weights). `available` means a switch can start now;
 a missing Ming model cannot be switched to. `downloadable` means
 `POST /api/admin/models/download` can fetch the weights: OmniVoice with downloads allowed or while
-its weights are missing, Ming while its model is missing, never Phonon (gated repository,
+its weights are missing, Ming and the Audio8 engines while their model is missing, never Phonon (gated repository,
 CC-BY-NC-4.0, a manual download).
+`license` is the text to show for the checkpoint, and `license_restricted` is `true` when it limits use (`audio8_mini`:
+commercial use only below US$2M annual revenue; `phonon`: non-commercial). `cpu_only` is `true` on `audio8_onnx` and
+`phonon`, and `approx_size_gb` is the download size. An Audio8 model counts as present only when all of its weight files exist.
 A running download sets `downloadable` and `available` to `false`, a failed one shows in `detail`.
 `loaded` is read from the engine and only ever `true` on the active one.
 `settings_fields` lists the `PUT /api/admin/settings` fields that engine reads,
@@ -1100,7 +1134,8 @@ Response:
 ```
 
 `engine` is derived, never stored: `values.runtime_backend` when set, else `ming` when a `ming_*`
-key is present, else `omnivoice`.
+key is present, `audio8_onnx` when an `audio8_onnx_*` key is present, `audio8_realistic` when another `audio8_*` key is
+present, else `omnivoice`.
 
 ### `PUT /api/admin/settings/presets/{name}`
 
@@ -1206,8 +1241,9 @@ Purpose:
 - starts or resumes the model download of the active engine, or of the one named in `engine`
 - `engine` (optional): `ming` fetches its weights into `ming_model_dir` before it is selected,
   `omnivoice` works the same way while another engine runs, `phonon` answers `400` (gated repository,
-  CC-BY-NC-4.0, a manual download). Progress and errors of a download show on
-  `GET /api/admin/runtime/engines`
+  CC-BY-NC-4.0, a manual download). `audio8_realistic`, `audio8_preview`, `audio8_mini` and `audio8_onnx` always fetch their
+  pinned revision into their own folder below `models/`; a `model` in the request cannot change the repository.
+  Progress and errors of a download show on `GET /api/admin/runtime/engines`
 - an OmniVoice download also enables `allow_model_downloads`; a Ming download leaves it alone
 
 Request:
@@ -1404,7 +1440,7 @@ Request (every field optional):
 | --- | --- |
 | `name` | new display name (not empty) |
 | `seed` | best seed `0..2147483647`; `null` clears it |
-| `engine` | engine the seed belongs to: `omnivoice` (default when omitted), `ming` or `phonon`; anything else is `400` |
+| `engine` | engine the seed belongs to: `omnivoice` (default when omitted), `ming`, `audio8_realistic`, `audio8_preview`, `audio8_mini`, `audio8_onnx` or `phonon`; anything else is `400` |
 
 Behavior:
 
@@ -1513,7 +1549,7 @@ Purpose:
 Purpose:
 
 - generates reference sentences with vLLM
-- synthesizes them with the active engine (OmniVoice, Ming or Phonon)
+- synthesizes them with the active engine (OmniVoice, Ming, Audio8 or Phonon)
 - transcribes the audio with the configured Whisper server
 - computes word error rate and optional seed leaderboard
 
@@ -1605,10 +1641,10 @@ Purpose:
 - Saved clone voices require explicit consent and `ref_text`.
 - Non-streaming output can be returned as WAV or MP3.
 - MP3 export uses FFmpeg. The app first checks `ffmpeg` on `PATH`, then falls back to the bundled `imageio-ffmpeg` package.
-- OmniVoice streaming is simulated by emitting PCM chunks after sentence/batch completion; Ming and
+- OmniVoice streaming is simulated by emitting PCM chunks after sentence/batch completion; Ming, Audio8 and
   Phonon stream natively (each chunk is sent the moment it is generated).
 - Ming (`runtime_backend=ming`) batches continuously: requests join the running decode loop at the
-  next 80 ms step, so a new stream does not wait for a running batch to finish.
+  next 80 ms step, so a new stream does not wait for a running batch to finish. The Audio8 GPU engines work the same way.
 - A first-audio fast path schedules the first sentence of streaming requests before larger follow-up batches.
 - `fp8` uses `transformers.FineGrainedFP8Config` when the compatible `kernels` package is installed.
 - On Windows, the unsupported DeepGEMM Hub lookup is disabled so fp8 uses the finegrained-fp8 Triton fallback without repeated Hub retries.

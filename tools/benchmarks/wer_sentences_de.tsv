@@ -1,0 +1,133 @@
+# German WER corpus for bench_wer_roundtrip.py --sentences-file. Hand-written, fixed, no LLM.
+# group<TAB>sentence. plain: everyday text. numeric: times, prices, dates, units, abbreviations. long: 170-208 characters.
+plain	Die Sitzung beginnt pünktlich im großen Konferenzraum neben dem Empfang.
+plain	Unsere Kinder spielen am liebsten draußen im Garten Fußball.
+plain	Nach dem langen Winter freuen sich alle auf den Frühling.
+plain	Der Kühlschrank ist leer, wir müssen dringend einkaufen gehen.
+plain	Die Polizei bittet die Bevölkerung um Hinweise zu dem Vorfall.
+plain	In Hamburg regnet es heute, in Berlin bleibt es überwiegend trocken.
+plain	Bitte schalten Sie Ihre Mobiltelefone während der Vorstellung aus.
+plain	Meine Schwester hat gestern ihren neuen Führerschein abgeholt.
+plain	Der Hausarzt empfiehlt mir mehr Bewegung und weniger Kaffee am Abend.
+plain	Wir haben das Angebot geprüft und melden uns morgen bei Ihnen.
+plain	Der Drucker im zweiten Stock braucht wieder eine neue Patrone.
+plain	Können Sie mir bitte den kürzesten Weg zum Rathaus zeigen?
+plain	Das Bürgeramt verlangt für den Antrag einen gültigen Personalausweis.
+plain	Im Herbst fallen die bunten Blätter von den alten Bäumen.
+plain	Mein Großvater erzählt gern Geschichten aus seiner Jugend auf dem Bauernhof.
+plain	Die neue Software läuft stabil, nur die Anmeldung dauert etwas länger.
+plain	Wer hat die Schlüssel für das Lager zuletzt benutzt?
+plain	Die Wanderung führt durch einen dichten Wald bis hinauf zum Aussichtsturm.
+plain	Vergiss bitte nicht, die Blumen auf dem Balkon zu gießen.
+plain	Der Kellner brachte uns die Speisekarte und ein Glas Leitungswasser.
+plain	Unser Flug wurde wegen starken Nebels auf den Abend verschoben.
+plain	Die Apotheke am Marktplatz hat auch am Wochenende geöffnet.
+plain	Ich habe mein Passwort vergessen und komme nicht mehr ins System.
+plain	Die Handwerker reparieren heute die undichte Stelle im Dach.
+plain	Der Vortrag war spannend, aber die Akustik im Saal war schlecht.
+plain	Sie öffnete das Fenster und hörte die Vögel im Hof singen.
+plain	Das Museum zeigt eine Ausstellung über die Geschichte der Seefahrt.
+plain	Die Krankenschwester misst dem Patienten den Blutdruck und notiert den Wert.
+plain	Wir suchen eine helle Wohnung mit Balkon in der Nähe der Innenstadt.
+plain	Der Hund bellte laut, als der Briefträger vor der Tür stand.
+plain	Die Lieferung verzögert sich leider, weil ein Ersatzteil fehlt.
+plain	Am liebsten trinke ich meinen Tee mit etwas Honig und Zitrone.
+plain	Die Prüfung war schwieriger, als die meisten Studenten erwartet hatten.
+plain	Der Busfahrer wartete freundlich, bis alle Fahrgäste einen Platz gefunden hatten.
+plain	Bitte tragen Sie Ihre Änderungen bis morgen früh in die Tabelle ein.
+plain	Das Gewitter zog schnell vorüber, und die Sonne kam wieder hervor.
+plain	Mein Laptop startet nach dem letzten Update nicht mehr richtig.
+plain	Die Bäckerei an der Ecke verkauft das beste Roggenbrot der ganzen Stadt.
+plain	Er stellte den Koffer ab und suchte in der Jacke nach seinem Ticket.
+plain	Die Gemeinde plant einen neuen Radweg entlang des Flussufers.
+plain	Könnten wir das Gespräch auf nächste Woche verschieben?
+plain	Die Feuerwehr war innerhalb weniger Minuten am Unglücksort.
+plain	Der Lehrer verteilte die korrigierten Hefte und lobte die ganze Klasse.
+plain	Zum Geburtstag wünscht sie sich eine Reise an die Nordsee.
+plain	Die Versicherung braucht noch ein Foto vom Schaden am Fahrzeug.
+plain	Heute Abend kochen wir Kartoffelsuppe mit frischem Lauch und Möhren.
+plain	Das Kind lachte und rannte barfuß über die nasse Wiese.
+plain	Unsere Abteilung zieht im Sommer in das neue Gebäude um.
+plain	Die Zeitung berichtet ausführlich über die Wahl des Bürgermeisters.
+plain	Vor dem Schlafengehen liest er seiner Tochter noch eine Geschichte vor.
+numeric	Am 3. Oktober 1990 wurde Deutschland wiedervereinigt.
+numeric	Die Rechnung über 1.250 Euro ist bis zum 15. November fällig.
+numeric	Der Termin bei Dr. Müller ist am Dienstag um 14:30 Uhr.
+numeric	Bitte rufen Sie uns unter der Nummer 030 1234567 an.
+numeric	Die Temperatur steigt heute auf 28 Grad Celsius.
+numeric	Der ICE 578 nach München hat etwa 20 Minuten Verspätung.
+numeric	Die GmbH beschäftigt rund 350 Mitarbeiterinnen und Mitarbeiter.
+numeric	Wir treffen uns z. B. am Hauptbahnhof oder in der Nähe vom Rathaus.
+numeric	Das Paket wiegt 2,5 Kilogramm und kostet 7,99 Euro Porto.
+numeric	Die Bundesstraße B 27 ist zwischen Stuttgart und Tübingen gesperrt.
+numeric	Laut Statistik nutzen 87 Prozent der Haushalte täglich das Internet.
+numeric	Herr Schmidt wohnt in der Goethestraße 12 im dritten Stock.
+numeric	Die EU hat neue Regeln für den Datenschutz beschlossen.
+numeric	Der Zahnarzttermin wurde auf Freitag, den 12. März, um 9:15 Uhr verlegt.
+numeric	Das Monatsticket kostet ab Januar 58 Euro.
+numeric	Unser Zug fährt um 7:42 Uhr von Gleis 11 ab.
+numeric	Die Miete steigt zum 1. April um 45 Euro.
+numeric	Der Kurs findet jeden Mittwoch von 18 bis 20 Uhr statt.
+numeric	Die Strecke ist 12,5 Kilometer lang und dauert etwa zwei Stunden.
+numeric	Bitte überweisen Sie die 89,90 Euro bis spätestens 30. Juni.
+numeric	Der Akku hält ungefähr 14 Stunden und lädt in 90 Minuten.
+numeric	Im Jahr 2023 kamen über 120.000 Besucher zur Messe.
+numeric	Die Praxis öffnet montags erst um 10:30 Uhr.
+numeric	Das Konzert beginnt am 21. Juni um 20 Uhr im Stadtpark.
+numeric	Für 3 Personen reichen 500 Gramm Nudeln vollkommen aus.
+numeric	Die Laptops haben 16 GB Arbeitsspeicher und 1 TB Speicherplatz.
+numeric	Das Auto hat erst 45.000 Kilometer auf dem Tacho.
+numeric	Der Flug LH 454 landet um 22:05 Uhr in Frankfurt.
+numeric	Die Kundennummer lautet 4471 und die Rechnungsnummer 2098.
+numeric	Der Eintritt beträgt 12 Euro, ermäßigt 8,50 Euro.
+numeric	Wir bieten 20 Prozent Rabatt auf alle Artikel bis Sonntag.
+numeric	Die Tagung dauert vom 4. bis zum 6. September.
+numeric	Der Wasserverbrauch lag im letzten Jahr bei 96 Kubikmetern.
+numeric	Dr. Weber hält am 8. Mai um 16 Uhr einen Vortrag.
+numeric	Die A 7 ist nach einem Unfall in Richtung Hamburg gesperrt.
+numeric	Mein Sohn wurde am 17. August 2014 in Leipzig geboren.
+numeric	Die Bahn erstattet 25 Prozent des Fahrpreises ab 60 Minuten Verspätung.
+numeric	Der Router der Firma schafft bis zu 500 Mbit pro Sekunde.
+numeric	Bitte kommen Sie 15 Minuten vor Ihrem Termin in die Praxis.
+numeric	Das Haus wurde 1894 gebaut und 2012 komplett saniert.
+numeric	Die Lieferzeit beträgt 3 bis 5 Werktage.
+numeric	Mit 2 Tabletten täglich sollte die Erkältung bald besser werden.
+numeric	Der Bus der Linie 42 fährt alle 10 Minuten.
+numeric	Die Stadt hat etwa 75.000 Einwohner und liegt 320 Meter über dem Meer.
+numeric	Das Abo kostet 9,99 Euro im Monat und ist jederzeit kündbar.
+numeric	Der Pegel des Rheins stieg bis Montag auf 6,40 Meter.
+numeric	Die Bewerbungsfrist endet am 31. Januar um Mitternacht.
+numeric	Die CDU und die SPD verhandeln seit 3 Wochen über den Haushalt.
+numeric	Die Bäckerei verkauft jeden Morgen rund 800 Brötchen.
+numeric	Sein Zimmer im Hotel kostet 129 Euro pro Nacht inklusive Frühstück.
+numeric	Der Marathon startet am 26. Oktober um 8:30 Uhr am Rathaus.
+long	Das Bürgeramt hat seine Öffnungszeiten geändert, deshalb sollten Sie vor dem Besuch online einen Termin buchen und alle Unterlagen, die im Bescheid aufgeführt sind, vollständig mitbringen.
+long	Nachdem der Techniker den alten Server abgeschaltet hatte, übertrug er die Daten auf das neue System und prüfte anschließend, ob alle Mitarbeiter wieder auf ihre Dateien zugreifen konnten.
+long	Wegen der Bauarbeiten am Hauptbahnhof fahren die Regionalzüge bis Ende des Monats nur bis zum Vorort, von dort aus bringen Ersatzbusse die Fahrgäste in die Innenstadt und zurück.
+long	Meine Großmutter erzählte uns oft, wie sie als junges Mädchen mit dem Fahrrad zur Schule fuhr, im Winter durch tiefen Schnee und im Sommer vorbei an den reifen Feldern der Nachbarn.
+long	Die Ärztin erklärte dem Patienten in aller Ruhe, welche Untersuchungen noch nötig sind, wie lange er auf die Ergebnisse warten muss und worauf er in den nächsten Tagen achten sollte.
+long	Sobald die Lieferung im Lager eingetroffen ist, prüfen wir jede Kiste auf Schäden, tragen die Mengen in die Liste ein und schicken Ihnen eine Bestätigung per E-Mail an die angegebene Adresse.
+long	Am Wochenende fuhren wir mit den Kindern an den See, packten ein Picknick aus, liehen uns ein kleines Ruderboot und blieben dort, bis die Sonne hinter den Hügeln verschwunden war.
+long	Der Stadtrat hat nach langer Diskussion beschlossen, die alte Turnhalle zu sanieren, den Parkplatz dahinter zu verkleinern und auf der frei werdenden Fläche einen Spielplatz für die Grundschule zu bauen.
+long	Weil das Flugzeug wegen eines Sturms erst mit großer Verspätung gelandet war, verpasste sie ihren Anschlusszug, buchte spontan ein Hotelzimmer am Flughafen und rief ihre Familie an.
+long	Bevor Sie das Gerät zum ersten Mal einschalten, lesen Sie bitte die Sicherheitshinweise, entfernen Sie die Schutzfolie vom Display und laden Sie den Akku vollständig auf.
+long	Der Koch schnitt die Zwiebeln in feine Würfel, briet sie langsam in Butter an, gab Pilze und frische Kräuter dazu und löschte alles mit einem kleinen Schluck Weißwein ab.
+long	In der kommenden Woche wird das Wetter unbeständig, am Montag ziehen von Westen dichte Wolken auf, und ab Mittwoch müssen wir in weiten Teilen des Landes mit kräftigen Schauern rechnen.
+long	Die Studentin arbeitete die ganze Nacht an ihrer Präsentation, kürzte die langen Abschnitte, ergänzte zwei Grafiken und schickte die fertige Datei kurz vor Sonnenaufgang an ihren Professor.
+long	Wenn Sie Ihre Bestellung zurückgeben möchten, füllen Sie bitte das beiliegende Formular aus, legen es zusammen mit der Ware in den Originalkarton und bringen das Paket zur nächsten Filiale.
+long	Der Reiseleiter führte die Gruppe durch die engen Gassen der Altstadt, zeigte ihnen den Dom und das alte Rathaus und empfahl zum Schluss ein kleines Restaurant direkt am Hafen.
+long	Nach monatelangen Verhandlungen einigten sich die beiden Unternehmen auf einen Vertrag, der die gemeinsame Entwicklung neuer Produkte regelt und beiden Seiten den Zugang zu den Märkten des anderen sichert.
+long	Während der Regen unaufhörlich gegen die Scheiben schlug, saßen wir um den alten Küchentisch, spielten Karten, tranken heißen Kakao und vergaßen für ein paar Stunden die ganze Arbeit.
+long	Die Polizei sperrte die Kreuzung nach dem Unfall für mehrere Stunden, leitete den Verkehr über die Nebenstraßen um und bat alle Zeugen, sich bei der nächsten Dienststelle zu melden.
+long	Unsere Firma sucht ab sofort eine erfahrene Buchhalterin, die selbstständig arbeitet, sicher mit Tabellen umgeht und bereit ist, unser kleines Team auch in den stressigen Wochen am Jahresende zu unterstützen.
+long	Er hob den schweren Koffer aus dem Kofferraum, schloss das Auto ab, überquerte den Parkplatz im strömenden Regen und erreichte das Terminal gerade noch rechtzeitig vor dem Ende der Abfertigung.
+long	Die Bibliothek bietet neben Büchern und Zeitschriften nun auch Sprachkurse im Internet an, die alle Mitglieder kostenlos nutzen können, sofern sie sich vorher mit ihrem Ausweis angemeldet haben.
+long	Als der Lehrer die Klasse betrat, wurde es sofort still, denn alle wussten, dass heute die Ergebnisse der Prüfung bekannt gegeben und die Plätze für den Austausch vergeben würden.
+long	Der Architekt legte dem Bauherrn drei Entwürfe vor, erläuterte die Vor- und Nachteile jeder Lösung und riet schließlich zu der Variante mit den großen Fenstern auf der Südseite.
+long	Für die Steuererklärung benötigen Sie Ihre Lohnabrechnungen, die Belege über Spenden und Handwerkerrechnungen sowie die Bescheinigung der Krankenkasse, die Ihnen meist automatisch im Januar zugeschickt wird.
+long	Das kleine Dorf liegt versteckt zwischen zwei Bergen, hat nur eine Straße, eine Kirche und einen Gasthof, und im Winter ist es manchmal tagelang von der Außenwelt abgeschnitten.
+long	Der Trainer wechselte in der zweiten Halbzeit zwei Spieler aus, stellte die Abwehr um und sah kurz vor dem Abpfiff, wie seine Mannschaft das entscheidende Tor zum Sieg erzielte.
+long	Bitte denken Sie daran, das Licht im Besprechungsraum auszuschalten, die Fenster zu schließen und den Schlüssel nach der Sitzung beim Pförtner am Haupteingang wieder abzugeben.
+long	Die Forscher untersuchten über mehrere Jahre, wie sich der Klimawandel auf die Vögel an der Küste auswirkt, und stellten fest, dass viele Arten deutlich früher im Jahr zurückkehren.
+long	Nachdem wir das Wohnzimmer gestrichen und den neuen Teppich verlegt hatten, stellten wir fest, dass das Sofa nicht mehr durch die Tür passte und wieder auseinandergebaut werden musste.
+long	Wer an der Führung durch das Schloss teilnehmen möchte, trifft sich bitte vor dem Haupttor, zeigt dort seine Eintrittskarte vor und folgt anschließend der Gruppe in den ersten Saal.

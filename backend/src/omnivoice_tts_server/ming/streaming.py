@@ -3,8 +3,13 @@
 - ``ChunkSchedule``: how many latents to decode per streaming VAE call (small first, then growing).
 - ``SilenceTrimmer``: a streaming, sample-exact version of upstream ``ming_tts.trim_trailing_silence``.
 - ``StreamResampler``: stateful soxr resampling per row (bit-identical to one-shot ``soxr.resample``).
+- ``MingStream``: the blocking chunk iterator a row hands to its consumer (the Audio8 engines use it too).
 """
 from __future__ import annotations
+
+import queue
+import time
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -14,6 +19,7 @@ SILENCE_THRESHOLD = 1e-3
 SILENCE_TAIL_SECONDS = 0.3
 
 _EMPTY = np.zeros(0, dtype=np.float32)
+_END = object()
 
 
 class ChunkSchedule:
@@ -162,3 +168,65 @@ class StreamResampler:
 
     def flush(self) -> np.ndarray:
         return self.push(_EMPTY, last=True)
+
+
+class MingStream:
+    """Blocking iterator over np.float32 audio chunks at the engine's output sample rate."""
+
+    def __init__(self, row_id: str, engine: Any) -> None:
+        self.row_id = row_id
+        self._engine = engine
+        self._queue: queue.Queue = queue.Queue()
+        self._row: Any = None
+        self.submitted_at = time.perf_counter()
+        self.started_at: float | None = None
+        self.first_chunk_at: float | None = None
+        self.finished_at: float | None = None
+        self.metrics: dict[str, Any] = {}
+        self.sample_rate = engine.output_sample_rate
+        self._done = False
+
+    # -- producer side (GPU thread) ---------------------------------------------------------------------------
+    def _put(self, chunk: np.ndarray) -> None:
+        if chunk.size == 0 or self._done:
+            return
+        if self.first_chunk_at is None:
+            self.first_chunk_at = time.perf_counter()
+            self.metrics['ttfa_ms'] = (self.first_chunk_at - self.submitted_at) * 1000.0
+        self.metrics['samples'] = self.metrics.get('samples', 0) + int(chunk.size)
+        self._queue.put(chunk)
+
+    def _finish(self, error: BaseException | None = None) -> None:
+        if self._done:
+            return
+        self._done = True
+        self.finished_at = time.perf_counter()
+        self.metrics['total_ms'] = (self.finished_at - self.submitted_at) * 1000.0
+        self.metrics['audio_s'] = self.metrics.get('samples', 0) / float(self.sample_rate)
+        self._queue.put(error if error is not None else _END)
+
+    # -- consumer side ----------------------------------------------------------------------------------------
+    def next_chunk(self, timeout: float | None = None) -> np.ndarray | None:
+        """Next chunk, or None when the row has finished. Raises the engine error, or queue.Empty on timeout."""
+        item = self._queue.get(timeout=timeout)
+        if item is _END:
+            self._queue.put(_END)
+            return None
+        if isinstance(item, BaseException):
+            self._queue.put(item)
+            raise item
+        return item
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        while True:
+            chunk = self.next_chunk()
+            if chunk is None:
+                return
+            yield chunk
+
+    def cancel(self) -> None:
+        self._engine._cancel(self)
+
+    @property
+    def done(self) -> bool:
+        return self._done

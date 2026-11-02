@@ -2,7 +2,9 @@ param(
     [switch]$SkipTorch,
     [switch]$SkipFrontendBuild,
     # Also download the Ming-3.0-tts 0.5B weights (~3 GB, MIT) into models\Ming-3.0-tts-0.5b.
-    [switch]$DownloadMing
+    [switch]$DownloadMing,
+    # Also download the four Audio8 checkpoints (~7 GB, pinned revisions) into models\.
+    [switch]$DownloadAudio8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -152,7 +154,8 @@ Invoke-External -Label 'Installing optional Triton for torch.compile' -FilePath 
 
 # [ming] adds the Ming-3.0-tts engine's runtime dependencies (onnxruntime for the CAM++ speaker encoder,
 # soxr for the 44.1 -> 24 kHz stream resampler). [phonon] adds ptts, the Gradium Phonon runtime.
-Invoke-External -Label 'Installing OmniVoice backend package (+ Ming and Phonon engine extras)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming,phonon]")
+# [audio8] adds what the Audio8 CPU engine needs (onnxruntime, onnx, tokenizers) and soxr.
+Invoke-External -Label 'Installing OmniVoice backend package (+ Ming, Phonon and Audio8 engine extras)' -FilePath $PythonExe -Arguments @('-m', 'pip', 'install', '-e', "$BackendDir[dev,ming,phonon,audio8]")
 
 $MingDir = Join-Path $ModelsDir 'Ming-3.0-tts-0.5b'
 if ($DownloadMing) {
@@ -164,6 +167,34 @@ if ($DownloadMing) {
             '-c', 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], local_dir=sys.argv[2])',
             'inclusionAI/Ming-3.0-tts-0.5B', $MingDir
         )
+    }
+}
+
+# Same repos and revisions as backend\src\omnivoice_tts_server\audio8\variants.py: the model code runs from these folders.
+$Audio8Models = @(
+    @{ Repo = 'Edge0/Audio8-TTS-Realistic-0.6b'; Folder = 'Audio8-TTS-Realistic-0.6b'; Revision = '925bbd4c2d8360af85f2594bf0205173fda853ba'; Weights = @('config.json', 'model.safetensors', 'codec.pth') },
+    @{ Repo = 'Edge0/Audio8-TTS-Preview-0.6b'; Folder = 'Audio8-TTS-Preview-0.6b'; Revision = '20e519d6e2c485ea1544f95f1fcaa6de6712bfc2'; Weights = @('config.json', 'model.safetensors', 'codec.pth') },
+    @{ Repo = 'Edge0/Audio8-TTS-Preview-0.1b'; Folder = 'Audio8-TTS-Preview-0.1b'; Revision = '8c837020ab800498834038363dea06757872afda'; Weights = @('config.json', 'model.safetensors', 'codec.pth') },
+    @{ Repo = 'Edge0/audio8-TTS-0.1B-ONNX-INT8'; Folder = 'Audio8-TTS-Preview-0.1B-ONNX-INT8'; Revision = '317c12d4e0da83847b594fcf8bd74bf2c76615ec'; Weights = @('config.json', 'runtime_manifest.json', 'slow_ar_int8.onnx.data', 'fast_ar_int8.onnx.data', 'codec_decoder_fp16.onnx.data', 'registration/codec_encoder_fp16.onnx.data') }
+)
+# A download that stopped halfway leaves the small files behind, so only the weights themselves count, as in the server.
+function Test-Audio8Weights {
+    param([hashtable]$Model)
+    $Folder = Join-Path $ModelsDir $Model.Folder
+    return -not ($Model.Weights | Where-Object { -not (Test-Path (Join-Path $Folder $_)) })
+}
+if ($DownloadAudio8) {
+    foreach ($Model in $Audio8Models) {
+        $Audio8Dir = Join-Path $ModelsDir $Model.Folder
+        if (Test-Audio8Weights $Model) {
+            Write-Host "Audio8 weights already present: $Audio8Dir"
+        }
+        else {
+            Invoke-External -Label "Downloading $($Model.Repo)" -FilePath $PythonExe -Arguments @(
+                '-c', 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], revision=sys.argv[2], local_dir=sys.argv[3])',
+                $Model.Repo, $Model.Revision, $Audio8Dir
+            )
+        }
     }
 }
 
@@ -196,10 +227,13 @@ Write-Host 'Note: the first OmniVoice startup downloads k2-fsa/OmniVoice (~3 GB)
 if (-not (Test-Path (Join-Path $MingDir 'config.json'))) {
     Write-Host 'Ming engine: weights not downloaded. Run .\install.bat -DownloadMing, or the admin UI (Engine -> Ming, Model Control -> Download).'
 }
+if ($Audio8Models | Where-Object { -not (Test-Audio8Weights $_) }) {
+    Write-Host 'Audio8 engines: weights not downloaded. Run .\install.bat -DownloadAudio8, or the admin UI (model card -> Download). The 0.1B checkpoint is under the Audio8 Community License (commercial use only below US$2M annual revenue).'
+}
 $PhononDir = Join-Path $ModelsDir 'phonon-40m-multilingual'
 if (-not (Test-Path (Join-Path $PhononDir 'config.json'))) {
     Write-Host 'Phonon engine: weights not downloaded. They are gated and CC-BY-NC-4.0 (non-commercial): accept the terms at https://huggingface.co/gradium/phonon-40m-multilingual, then:'
     Write-Host "  .\.conda-env\Scripts\hf.exe auth login"
     Write-Host "  .\.conda-env\Scripts\hf.exe download gradium/phonon-40m-multilingual --local-dir `"$PhononDir`""
 }
-Write-Host 'Switch the TTS engine (OmniVoice / Ming / Phonon) live in the admin UI; the choice is saved in data\runtime_settings.json.'
+Write-Host 'Switch the TTS engine (OmniVoice / Ming / Audio8 / Phonon) live in the admin UI; the choice is saved in data\runtime_settings.json.'

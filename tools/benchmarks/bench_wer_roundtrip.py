@@ -10,6 +10,9 @@ engines see exactly the same input.
   python bench_wer_roundtrip.py --base-url http://127.0.0.1:8191 --voices SonjaV2,SonjaV3,Tom \
       --modes off,deterministic --out wer_ming.json --wav-dir wavs_ming
 
+--sentences-file reads a corpus instead of the built-in 20 sentences, for example wer_sentences_de.tsv (131 fixed
+sentences in the groups plain, numeric, long). --seed sends a fixed seed; without it the voice's own seed applies.
+
 --modes picks the request's text_optimization: 'off' = the raw sentence goes to the engine, 'deterministic'
 = the server's rule-based spoken-text optimization (numbers, dates, units -> words) runs first. Run with the
 backend env python (it imports omnivoice_tts_server for the scorer).
@@ -62,10 +65,23 @@ def wav_seconds(data: bytes) -> float:
         return handle.getnframes() / handle.getframerate()
 
 
-async def synthesize(client: httpx.AsyncClient, base: str, text: str, voice: str, mode: str) -> tuple[bytes, float]:
+def load_sentences(path: Path | None) -> list[tuple[str, str]]:
+    """(group, sentence). Built-in list: group numeric or plain. File: one group<TAB>sentence per line, # comments."""
+    if path is None:
+        return [('numeric' if numeric else 'plain', text) for text, numeric in SENTENCES]
+    lines = path.read_text(encoding='utf-8').splitlines()
+    rows = [line.split('	', 1) for line in lines if line.strip() and not line.startswith('#')]
+    return [(group.strip(), text.strip()) for group, text in rows]
+
+
+async def synthesize(client: httpx.AsyncClient, base: str, text: str, voice: str, mode: str,
+                     seed: int | None) -> tuple[bytes, float]:
     t0 = time.perf_counter()
-    response = await client.post(f'{base}/v1/audio/speech', json={
-        'input': text, 'voice': voice, 'language': 'de', 'response_format': 'wav', 'text_optimization': mode})
+    body: dict[str, Any] = {'input': text, 'voice': voice, 'language': 'de', 'response_format': 'wav',
+                            'text_optimization': mode}
+    if seed is not None:
+        body['seed'] = seed
+    response = await client.post(f'{base}/v1/audio/speech', json=body)
     response.raise_for_status()
     return response.content, (time.perf_counter() - t0) * 1000
 
@@ -87,6 +103,7 @@ def aggregate(items: list[dict[str, Any]]) -> dict[str, Any]:
         'wer_corpus': errors / words if words else None,  # sum of errors / sum of reference words
         'wer_mean': sum(i['wer'] for i in ok) / len(ok) if ok else None,
         'exact': sum(1 for i in ok if i['word_errors'] == 0),
+        'deletions': sum(i['deletions'] for i in ok),
         'audio_s_sum': sum(i.get('audio_s') or 0 for i in ok),
     }
 
@@ -97,13 +114,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     sem_tts = asyncio.Semaphore(args.concurrency)
     sem_asr = asyncio.Semaphore(args.asr_concurrency)
     items: list[dict[str, Any]] = []
+    sentences = load_sentences(args.sentences_file)
+    groups = sorted({group for group, _ in sentences})
     async with httpx.AsyncClient(timeout=httpx.Timeout(600.0)) as client:
 
-        async def one(voice: str, mode: str, idx: int, text: str, numeric: bool) -> None:
-            item: dict[str, Any] = {'voice': voice, 'mode': mode, 'index': idx, 'text': text, 'numeric': numeric}
+        async def one(voice: str, mode: str, idx: int, text: str, group: str) -> None:
+            item: dict[str, Any] = {'voice': voice, 'mode': mode, 'index': idx, 'text': text, 'group': group}
             try:
                 async with sem_tts:
-                    wav, synth_ms = await synthesize(client, base, text, voice, mode)
+                    wav, synth_ms = await synthesize(client, base, text, voice, mode, args.seed)
                 item['synthesis_ms'] = synth_ms
                 item['audio_s'] = wav_seconds(wav)
                 if args.wav_dir:
@@ -118,16 +137,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 item['error'] = f'{type(exc).__name__}: {exc}'
             items.append(item)
 
-        await asyncio.gather(*(one(v, m, i, t, n) for v in args.voices for m in args.modes
-                               for i, (t, n) in enumerate(SENTENCES)))
+        await asyncio.gather(*(one(v, m, i, t, g) for v in args.voices for m in args.modes
+                               for i, (g, t) in enumerate(sentences)))
     items.sort(key=lambda i: (i['voice'], i['mode'], i['index']))
     summary: dict[str, Any] = {}
     for mode in args.modes:
         rows = [i for i in items if i['mode'] == mode]
         summary[mode] = {
             'all': aggregate(rows),
-            'numeric': aggregate([i for i in rows if i['numeric']]),
-            'plain': aggregate([i for i in rows if not i['numeric']]),
+            'groups': {g: aggregate([i for i in rows if i['group'] == g]) for g in groups},
             'per_voice': {v: aggregate([i for i in rows if i['voice'] == v]) for v in args.voices},
         }
     return {'base_url': base, 'whisper_url': whisper, 'voices': args.voices, 'modes': args.modes,
@@ -143,6 +161,8 @@ def main() -> None:
     parser.add_argument('--concurrency', type=int, default=4)
     parser.add_argument('--asr-concurrency', type=int, default=4)
     parser.add_argument('--tolerance', type=int, default=2, help='letters per word (admin WER default 2)')
+    parser.add_argument('--sentences-file', type=Path, default=None, help='group<TAB>sentence per line')
+    parser.add_argument('--seed', type=int, default=None)
     parser.add_argument('--wav-dir', type=Path, default=None)
     parser.add_argument('--label', default='')
     parser.add_argument('--out', type=Path, required=True)
@@ -158,8 +178,8 @@ def main() -> None:
     for mode, block in report['summary'].items():
         a = block['all']
         print(f'[{args.label} {mode}] WER corpus {a["wer_corpus"]:.3%}, mean {a["wer_mean"]:.3%}, exact '
-              f'{a["exact"]}/{a["scored"]}; numeric {block["numeric"]["wer_corpus"]:.3%}, plain '
-              f'{block["plain"]["wer_corpus"]:.3%}; per voice '
+              f'{a["exact"]}/{a["scored"]}; '
+              + ', '.join(f'{g} {s["wer_corpus"]:.3%}' for g, s in block['groups'].items()) + '; per voice '
               + ', '.join(f'{v} {s["wer_corpus"]:.3%}' for v, s in block['per_voice'].items()))
     failed = [i for i in report['items'] if i.get('error')]
     if failed:

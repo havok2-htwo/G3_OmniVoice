@@ -6,9 +6,9 @@ Windows-first OmniVoice TTS server using the active G3 control-room shape:
 - React/Vite landing page, public demo, and private admin panel
 - Username/password admin login with httpOnly session cookies
 - Admin-managed client API keys for public synthesis endpoints
-- OmniVoice runtime adapter for `k2-fsa/OmniVoice` (default engine), plus two more engines behind the
-  same API: inclusionAI Ming-3.0-tts 0.5B (voice cloning from the same profiles, native chunk streaming,
-  continuous batching) and Gradium Phonon (CPU); switched live in the admin panel
+- OmniVoice runtime adapter for `k2-fsa/OmniVoice` (default engine), plus more engines behind the
+  same API: inclusionAI Ming-3.0-tts 0.5B and four Audio8 models (voice cloning from the same profiles, native chunk
+  streaming, continuous batching) and Gradium Phonon (CPU); switched live in the admin panel
 - Traffic benchmark mode for random user-like arrivals, sentence-count variation, TTFA percentiles, best/worst, and queue timing
 - Streaming requests use a first-audio fast path: the first sentence of each active stream is scheduled before larger follow-up batches
 
@@ -130,8 +130,9 @@ Diagnostic benchmark scripts live under `tools\benchmarks`:
 
 Engine benchmarks (streaming TTFA, throughput, VRAM, CPU/RAM, German WER) are written up in
 `docs/benchmarks/`: [tts-engine-comparison-2026-10.md](docs/benchmarks/tts-engine-comparison-2026-10.md)
-compares OmniVoice, Ming-3.0-tts and Gradium Phonon, and
-[ming-3.0-tts-2026-10.md](docs/benchmarks/ming-3.0-tts-2026-10.md) has the Ming details.
+compares OmniVoice, Ming-3.0-tts and Gradium Phonon,
+[ming-3.0-tts-2026-10.md](docs/benchmarks/ming-3.0-tts-2026-10.md) has the Ming details, and
+[audio8-2026-11.md](docs/benchmarks/audio8-2026-11.md) has the four Audio8 engines.
 
 Pinned Windows/CUDA runtime versions are recorded in `docs/RUNTIME_VERSIONS.md`.
 In particular, fp8 currently needs `kernels>=0.14.1,<0.15`; `kernels 0.15.1`
@@ -164,7 +165,7 @@ their saved values, which take precedence over these defaults.
   (`data/voice_presets_seeded.json`). A voice profile can carry a best seed per engine
   that applies to requests for that voice without their own seed: `seed` for OmniVoice
   (the shipped values come from the OmniVoice WER seed benchmark), `engine_seeds` for
-  Ming and Phonon; the active engine picks its own, `null` means random.
+  Ming, Audio8 and Phonon; the active engine picks its own, `null` means random.
 - `bfloat16`, `sdpa` attention with cuDNN first (`sdpa_prefer_cudnn`), packed CFG rows
   (`packed_cfg`), `torch.compile` on, CUDA cache trim once the queue runs empty
   (`cuda_memory_trim_after_batch`), warmup on start
@@ -202,8 +203,8 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
 
 ## Operator Features
 
-- **TTS engines** - `omnivoice` (default), `ming` (inclusionAI Ming-3.0-tts 0.5B, MIT) and
-  `phonon` (Gradium Phonon, CPU). The admin panel shows each engine's install and model state and
+- **TTS engines** - `omnivoice` (default), `ming` (inclusionAI Ming-3.0-tts 0.5B, MIT), four Audio8
+  engines (see below) and `phonon` (Gradium Phonon, CPU). The admin panel shows each engine's install and model state and
   switches it live: running jobs finish on the old engine, queued and new requests
   go to the new one, clients keep the same endpoints (`POST /api/admin/runtime/backend`, see
   `API_DOCUMENTATION.md` "Runtime backends"). The choice is saved in `data/runtime_settings.json`;
@@ -218,6 +219,22 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   `docs/RUNTIME_VERSIONS.md`. Each engine keeps its own batching, parallelism and device values
   (`engine_profiles` in `data/runtime_settings.json`), so a Ming tier no longer leaks into OmniVoice
   after switching back. Without a profile Ming starts from the `Ming 24GB VRAM` tier.
+- **Audio8 engines** - each model is its own engine with its own card in the admin panel, and they clone the saved
+  voice profiles. **Check the licence of the model you pick:**
+
+  | Engine | Model | Runs on | Licence |
+  | --- | --- | --- | --- |
+  | `audio8_realistic` | Audio8 Realistic 0.6B | GPU | Apache-2.0 |
+  | `audio8_preview` | Audio8 Preview 0.6B | GPU | Apache-2.0 |
+  | `audio8_mini` | Audio8 Preview 0.1B | GPU, needs about 0.8 GB less VRAM | **Audio8 Community License v1.0: commercial use only below US$2M annual revenue** |
+  | `audio8_onnx` | Audio8 0.1B ONNX INT8 | CPU | Apache-2.0 |
+
+  Weights: `install.bat -DownloadAudio8` (all four, pinned revisions, about 7 GB) or the download button on the model
+  card. Dependencies: `pip install -e backend[audio8]` (done by `install.bat`). The output is 44.1 kHz, also on the raw
+  PCM stream, so clients read `sample_rate` from `GET /api/v1/capabilities`, or `audio8_output_sample_rate=24000` keeps
+  the 24 kHz contract of the other engines. Requests take `seed`; `language` is accepted and has no effect, because the
+  model has no language parameter. Presets: `Audio8 32GB VRAM`, `Audio8 24GB VRAM` and `Audio8 24+8 VRAM`, the same three
+  as `Audio8 Preview ...` and `Audio8 Mini ...`, and `Audio8 ONNX CPU`. Nothing is measured on an RTX 3090.
 - **Ming reference length** - use 7-15 s. The reference counts against the 512 positions of every
   text piece: 15 s leaves about 15 s of audio per piece, 25 s about 2 s, and 30 s no longer fits
   (the request fails with "Ming prompt too long"). Long texts are not limited by this, they are split
@@ -228,8 +245,8 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   spelled for the active engine and removed where the engine does not know them. See
   `API_DOCUMENTATION.md` "Delivery controls (Ming)".
 - **Settings presets** - read-only built-in GPU tiers (`32GB VRAM`, `24GB VRAM`,
-  `24+8 VRAM`; the OmniVoice tiers do not change the engine, the `Ming ...` tiers
-  switch to Ming) plus named runtime/VRAM parameter sets you save, load into the
+  `24+8 VRAM`; the OmniVoice tiers do not change the engine, the `Ming ...` and
+  `Audio8 ...` tiers switch to their engine) plus named runtime/VRAM parameter sets you save, load into the
   settings draft, and delete from the admin panel
   (`GET/PUT/DELETE /api/admin/settings/presets`, saved ones in
   `data/settings_presets.json`). Every preset belongs to an engine (`engine` on the list,
@@ -299,5 +316,5 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
 
 - Public demo and synthesis endpoints stay open until at least one client API key exists. Once keys exist, callers send `X-API-Key`.
 - Admin endpoints use the browser login session from `/api/admin/auth/login`.
-- Streaming is simulated PCM chunking after sentence/batch generation because OmniVoice does not expose an official native streaming hook.
+- On OmniVoice, streaming is simulated PCM chunking after sentence/batch generation because OmniVoice does not expose an official native streaming hook. Ming, Audio8 and Phonon stream natively.
 - Non-streaming output can be downloaded as WAV or MP3.

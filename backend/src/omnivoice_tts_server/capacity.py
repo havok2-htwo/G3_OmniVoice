@@ -164,3 +164,47 @@ def ming_capacity_profile(max_slots: int) -> dict[str, Any]:
         'newcomer_headroom': int(slots * MING_NEWCOMER_HEADROOM_SHARE) if slots > 1 else 0,
         'estimated_peak_vram_mb': ming_resident_vram_mb(slots),
     }
+
+
+# --- Audio8 slot engine (audio8/engine.py) -----------------------------------------------------------------------------
+# Like Ming, the engine allocates everything per slot at load, so VRAM does not grow with the audio. Measured on the
+# RTX 5090 with bench_audio8_engine.py (torch reserved memory, CUDA context not included): 3080 MB at 1 slot, 3394 at 4,
+# 4074 at 16, 4276 at 32, 6082 at 64. The constants are the upper envelope of those points. The whole process on the
+# card (nvidia-smi delta, CUDA context included, idle == peak under full bursts): 4098 MB at 16 slots, 4350 at 32.
+AUDIO8_RESIDENT_BASE_MB = 3400
+AUDIO8_MB_PER_SLOT = 43.0
+# The 0.1B checkpoint on the same engine: 2210 MB at 1 slot, 2500 at 4, 3132 at 16, 3458 at 32, 5416 at 64. Whole
+# process on the card: 3236 MB at 16 slots, 3522 at 32.
+AUDIO8_MINI_RESIDENT_BASE_MB = 2400
+AUDIO8_MINI_MB_PER_SLOT = 48.0
+# The one thing that grows after load: a voice's KV (and Mamba state) stays on the card for the next request, least
+# recently used out first above this budget. About 30 MB for an 11 s reference on the 0.6B, 40 MB on the 0.1B, 80 MB and
+# 105 MB for 30 s.
+AUDIO8_VOICE_CACHE_MB = 400
+# Queue-level sentence cap, as for Ming: the engine fragments long text itself and streams it in one row.
+AUDIO8_MAX_CHARS_PER_SENTENCE = 400
+
+
+def audio8_resident_vram_mb(max_slots: int, engine: str = 'audio8_realistic') -> int:
+    slots = max(1, int(max_slots))
+    if engine == 'audio8_mini':
+        return int(AUDIO8_MINI_RESIDENT_BASE_MB + AUDIO8_MINI_MB_PER_SLOT * slots + AUDIO8_VOICE_CACHE_MB)
+    return int(AUDIO8_RESIDENT_BASE_MB + AUDIO8_MB_PER_SLOT * slots + AUDIO8_VOICE_CACHE_MB)
+
+
+def audio8_capacity_profile(max_slots: int, engine: str = 'audio8_realistic') -> dict[str, Any]:
+    """Queue limits for the Audio8 slot engine; same meaning as ming_capacity_profile."""
+    slots = max(1, int(max_slots))
+    return {
+        'engine': engine,
+        'max_chars_per_chunk': AUDIO8_MAX_CHARS_PER_SENTENCE,
+        'max_batch_items': slots,
+        'max_inflight_items': slots,
+        'newcomer_headroom': int(slots * MING_NEWCOMER_HEADROOM_SHARE) if slots > 1 else 0,
+        'estimated_peak_vram_mb': audio8_resident_vram_mb(slots, engine),
+    }
+
+
+def audio8_onnx_capacity_profile(workers: int, engine: str = 'audio8_onnx') -> dict[str, Any]:
+    """Queue limits for the Audio8 CPU engine (audio8/onnx_engine.py): one sentence per worker, no VRAM."""
+    return {**audio8_capacity_profile(workers, engine), 'estimated_peak_vram_mb': 0}

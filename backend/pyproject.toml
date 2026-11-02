@@ -38,6 +38,9 @@ ming = ["onnxruntime>=1.20", "safetensors>=0.4", "soxr>=0.5"]
 # Gradium Phonon engine (omnivoice_tts_server.phonon_runtime): the ptts Rust runtime, CPU only. Capped at the
 # minor version the engine was measured with.
 phonon = ["ptts>=0.5,<0.6"]
+# Audio8 engines (omnivoice_tts_server.audio8): soxr resamples to 24 kHz on request, torch and transformers come with
+# omnivoice. The CPU engine (audio8.onnx_engine) adds the rest; onnx only cuts the codec graph in two at load.
+audio8 = ["onnxruntime>=1.31", "onnx>=1.23", "tokenizers>=0.20", "soxr>=0.5"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -43,7 +43,7 @@ set "CONDA_ENVS_PATH=%LOCAL_CONDA_HOME%\envs"
 set "CONDA_BLD_PATH=%LOCAL_CONDA_HOME%\bld"
 set "CONDA_NUMBER_CHANNEL_NOTICES=0"
 set "CONDA_REPORT_ERRORS=false"
-REM The engine (omnivoice / ming / phonon) is saved in data\runtime_settings.json and switched live in the
+REM The engine (omnivoice / ming / audio8_realistic / audio8_preview / audio8_mini / audio8_onnx / phonon) is saved in data\runtime_settings.json and switched live in the
 REM admin UI. Set OMNIVOICE_TTS_RUNTIME_BACKEND only to pin one; it then wins over the saved choice.
 if not defined OMNIVOICE_TTS_MODELS_ROOT_DIR set "OMNIVOICE_TTS_MODELS_ROOT_DIR=%~dp0models"
 if not defined OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS set "OMNIVOICE_TTS_ALLOW_MODEL_DOWNLOADS=true"

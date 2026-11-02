@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from types import MethodType
 from typing import Any
 
+from .audio8.variants import AUDIO8_VARIANTS
 from .config import Settings
 from .domain.models import METADATA_SECONDS_LIMITS, SpeechRequest, TaskType, bounded_metadata_seconds
 from . import decode_overlap, fast_silence, packed_decode, row_seeds
@@ -1439,6 +1440,15 @@ def build_synthesizer(settings: Settings, store: InMemoryStore) -> Any:
         settings.supported_models = [MING_BASE_ALIAS]
         settings.active_model = MING_BASE_ALIAS
         store.active_model = MING_BASE_ALIAS
+        return synthesizer
+    if settings.runtime_backend.lower() in AUDIO8_VARIANTS:
+        from .audio8_runtime import Audio8Synthesizer
+
+        # Everything as for Ming: lazy weights, one clone alias ending in 'Base', voice profiles stay loaded.
+        synthesizer = Audio8Synthesizer(settings=settings, store=store, variant=settings.runtime_backend.lower())
+        settings.supported_models = [synthesizer.base_alias]
+        settings.active_model = synthesizer.base_alias
+        store.active_model = synthesizer.base_alias
         return synthesizer
     if settings.runtime_backend.lower() != 'omnivoice':
         raise RuntimeError(f'Unsupported runtime backend: {settings.runtime_backend}')

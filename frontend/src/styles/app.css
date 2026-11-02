@@ -466,6 +466,7 @@ textarea:disabled {
   margin-top: 16px;
   padding: 14px 16px;
   border-radius: 18px;
+  overflow-wrap: anywhere;
 }
 
 .message.success {
@@ -771,6 +772,19 @@ textarea:disabled {
 
 .engine-card .message {
   margin-top: 0;
+}
+
+.engine-license {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.engine-license.restricted {
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: #ffcb9c;
 }
 
 .engine-card-confirm {

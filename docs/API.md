@@ -265,20 +265,24 @@ No API key, like the other GET routes. What the admin's selection offers right n
 | `engine`, `engine_label` | the active engine (id and name) |
 | `model` | the admin's selection, also when a request named another id |
 | `loaded` | the selection is in memory now, read from the engine (`false` until the first load and during a switch) |
-| `sample_rate` | output rate in Hz |
+| `sample_rate` | output rate in Hz: 24000, or 44100 on the Audio8 engines by default and on Ming with `ming_output_sample_rate=44100` |
 | `voice_cloning`, `voice_profiles` | the engine clones a reference voice; saved voice profiles work (`false` on Phonon: a profile voice is a `404` on `/v1/audio/speech`) |
 | `streaming` | `native` sends audio as the engine produces it, `sentence` renders a whole sentence and then slices it |
 | `languages` | labels the engine has a language for; Phonon lists its one `phonon_lang` |
 | `response_formats` | `pcm` is the stream format, a non-streaming `pcm` request gets WAV; `mp3` is left out without ffmpeg |
 | `options` | request fields the engine reads; the others are accepted and ignored |
 
-| Option | `omnivoice` | `ming` | `phonon` |
-| --- | --- | --- | --- |
-| `speed` | yes | no (see `speaking_rate`) | no |
-| `seed` | yes | yes | yes |
-| `language` | yes | yes | no |
-| `instructions` | no with Base or a `local/...` selected | yes | no |
-| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no |
+| Option | `omnivoice` | `ming` | `phonon` | `audio8_*` |
+| --- | --- | --- | --- | --- |
+| `speed` | yes | no (see `speaking_rate`) | no | no |
+| `seed` | yes | yes | yes | yes |
+| `language` | yes | yes | no | accepted, no effect (see `option_notes`) |
+| `instructions` | no with Base or a `local/...` selected | yes | no | no |
+| `emotion`, `speaking_rate`, `pitch`, `volume`, `reference_mode` | no | yes | no | no |
+
+`option_notes` (`{field: text}`, empty on most engines) explains an option that needs it. On the Audio8 engines
+`options.language` is `true` because the field is accepted, but the model has no language parameter and the text alone
+decides: `languages` is `["Auto"]`, and `option_notes.language` says so.
 
 On OmniVoice each request's task type decides, so `instructions` here means "honored for clone requests": a clone does
 not read it, also not on a selected `local/...` checkpoint. Built-in voices and requests naming the AutoVoice or
@@ -395,8 +399,10 @@ Invoke-WebRequest `
   -OutFile out.wav
 ```
 
-When `stream=true`, the endpoint returns raw `audio/pcm` chunks. The sample rate
-is 24 kHz, mono, signed 16-bit little-endian PCM.
+When `stream=true`, the endpoint returns raw `audio/pcm` chunks: mono, signed 16-bit
+little-endian PCM at 24 kHz. The Audio8 engines stream 44.1 kHz by default; the stream has no
+header, so read `sample_rate` from `GET /api/v1/capabilities`, or set
+`audio8_output_sample_rate=24000`.
 
 When text optimization ran, the response has a header like
 `X-Text-Optimization: deterministic; language=de; rules=date_de_dmy,time_de_hhmm`.
@@ -526,6 +532,13 @@ requests without their own `text_optimization` field.
 `phonon_lang`, `phonon_quant`, `phonon_workers` (1-16) and `phonon_threads` (0-64) are read when the
 Phonon engines load; `phonon_threads` needs a server restart.
 
+The `audio8_*` settings are read when an Audio8 engine loads: `audio8_output_sample_rate` (24000 | 44100, default 44100),
+`audio8_fragment_max_chars` (24-400, default 200), `audio8_temperature` (default 0.8), `audio8_top_p` (default 0.95),
+`audio8_top_k` (default 50), and for the GPU engines `audio8_max_slots` (1-64), `audio8_cuda_graphs`,
+`audio8_first_chunk_frames` (default 4), `audio8_chunk_frames` (default 12), each kept per engine, for `audio8_onnx`
+`audio8_onnx_workers`, `audio8_onnx_threads`, `audio8_onnx_first_chunk_frames` and `audio8_onnx_chunk_frames`.
+`output_sample_rate` in the response is the rate of the active engine, or of the target engine during a switch.
+
 `max_parallel_requests`, `max_batch_size`, `batch_wait_ms`, `vram_budget_mb`, `stream_chunk_ms`,
 `stream_prebuffer_ms` and `preferred_device` are kept per engine (`engine_profiles` in
 `runtime_settings.json`, not part of this API), so a value tuned for one engine survives a switch
@@ -576,6 +589,20 @@ RTX 5090 (docs/benchmarks/ming-3.0-tts-2026-10.md): Ming needs 4.25 GB at 16 slo
 4.4 GB at 32 and 4.7 GB at 64, idle and peak alike. For 64 parallel requests the queue
 limit must be at least 64 (`queue_limit` is not a preset key).
 
+Each Audio8 engine has its own tiers, and saving one switches to that engine live:
+
+| Name | Engine | Machine | Slots / parallel |
+| --- | --- | --- | --- |
+| `Audio8 32GB VRAM` | `audio8_realistic` | RTX 5090, all G3 services on one card | 32 / 32 |
+| `Audio8 24GB VRAM` | `audio8_realistic` | RTX 4090 or RTX 3090, all G3 services on one card | 16 / 16 |
+| `Audio8 24+8 VRAM` | `audio8_realistic` | 3090 + 2070S, on the 24 GB card | 16 / 16 |
+| `Audio8 Preview 32GB VRAM`, `... 24GB VRAM`, `... 24+8 VRAM` | `audio8_preview` | as above | 32 / 16 / 16 |
+| `Audio8 Mini 32GB VRAM`, `... 24GB VRAM`, `... 24+8 VRAM` | `audio8_mini` | as above | 32 / 16 / 16 |
+| `Audio8 ONNX CPU` | `audio8_onnx` | CPU only | 2 workers / 2 |
+
+GPU tiers: `audio8_cuda_graphs` on, 44.1 kHz, chunks of 4 then 12 frames, `batch_wait_ms` 0. Measurements are in
+docs/benchmarks/audio8-2026-11.md. Nothing was measured on a 3090.
+
 First start: when `data/runtime_settings.json` does not exist yet, the server applies
 `24GB VRAM` (`presets.FIRST_START_PRESET`) on top of the code defaults, validated like
 `PUT /api/admin/settings`, and writes only those tier keys to that file, so
@@ -620,10 +647,13 @@ voices, theme, unknown keys) is dropped, and `null` values are skipped:
 `max_batch_size`, `batch_wait_ms`, `vram_budget_mb`, `max_input_chars`, `num_step`,
 `audio_chunk_duration`, `audio_chunk_threshold`, `runtime_backend`, `ming_max_slots`,
 `ming_cuda_graphs`, `ming_output_sample_rate`, `ming_first_chunk_latents`,
-`ming_max_chunk_latents`, `phonon_lang`, `phonon_quant`, `phonon_workers`, `phonon_threads`.
+`ming_max_chunk_latents`, `phonon_lang`, `phonon_quant`, `phonon_workers`, `phonon_threads`,
+`audio8_max_slots`, `audio8_cuda_graphs`, `audio8_output_sample_rate`, `audio8_first_chunk_frames`, `audio8_chunk_frames`,
+`audio8_onnx_workers`, `audio8_onnx_threads`, `audio8_onnx_first_chunk_frames`, `audio8_onnx_chunk_frames`.
 
 `engine` on a list item is derived, never stored: `values.runtime_backend` when set, else `ming` when
-a `ming_*` key is present, else `omnivoice`. `?engine=` keeps only that engine's presets.
+a `ming_*` key is present, `audio8_onnx` when an `audio8_onnx_*` key is present, `audio8_realistic` when another `audio8_*`
+key is present, else `omnivoice`. `?engine=` keeps only that engine's presets.
 
 Names are trimmed (inner whitespace collapsed), at most 64 characters. Saved presets
 are written atomically to `data/settings_presets.json`.
@@ -677,8 +707,8 @@ Download/delete body:
 ```
 
 `POST /api/admin/models/download` also takes `engine`: `{ "engine": "ming" }` fetches Ming's weights
-before it is selected. Phonon answers `400`: its repository is gated and CC-BY-NC-4.0, a manual
-download. Progress and errors show on `GET /api/admin/runtime/engines`.
+before it is selected, and the four Audio8 ids fetch their pinned revision the same way. Phonon answers `400`: its
+repository is gated and CC-BY-NC-4.0, a manual download. Progress and errors show on `GET /api/admin/runtime/engines`.
 
 Preload/warmup/reload body:
 
@@ -734,7 +764,7 @@ Uploaded samples are normalized to 24 kHz WAV and persisted under `data/voices`.
 { "name": "SonjaV3", "seed": 41, "engine": "ming" }
 ```
 
-`engine` is `omnivoice` (default when omitted), `ming` or `phonon` (anything else is `400`); `seed: null` clears
+`engine` is `omnivoice` (default when omitted), `ming`, one of the four `audio8_*` engines or `phonon` (anything else is `400`); `seed: null` clears
 that engine's seed. A request or WER run without a seed uses the seed of the engine active at that moment; a queued job held through
 an engine switch gets the new engine's seed.
 Responses carry `seed` (the OmniVoice seed, as before) and `engine_seeds` with every engine's seed, e.g.

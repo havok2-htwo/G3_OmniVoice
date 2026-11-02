@@ -34,7 +34,7 @@ ENV PYTHONUNBUFFERED=1 \
     # PROJECT_ROOT (=/app), so the frontend/dist default resolves correctly too.
     OMNIVOICE_TTS_HOST=0.0.0.0 \
     OMNIVOICE_TTS_PORT=8091 \
-    # The TTS engine (omnivoice / ming / phonon) is saved in /app/data/runtime_settings.json and
+    # The TTS engine (omnivoice / ming / audio8_* / phonon) is saved in /app/data/runtime_settings.json and
     # switched live in the admin UI; set OMNIVOICE_TTS_RUNTIME_BACKEND at run time only to pin one.
     OMNIVOICE_TTS_MODELS_ROOT_DIR=/app/models \
     OMNIVOICE_TTS_DATA_DIR=/app/data \
@@ -97,10 +97,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # (models/Ming-3.0-tts-0.5b) or download them from the admin UI after switching to Ming.
 # [phonon] adds ptts, the Gradium Phonon runtime. Its checkpoint is gated and CC-BY-NC-4.0, so
 # it is never in the image either: put it into the models volume (models/phonon-40m-multilingual).
+# [audio8] adds the Audio8 CPU engine's dependencies (onnxruntime, onnx, tokenizers) and soxr. Its
+# weights are not in the image either: download them from the admin UI (pinned revisions).
 COPY backend/ ./backend/
 COPY requirements-lock.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e "./backend[ming,phonon]" \
+    pip install -e "./backend[ming,phonon,audio8]" \
         -c requirements-lock.txt \
         --extra-index-url https://download.pytorch.org/whl/cu130
 

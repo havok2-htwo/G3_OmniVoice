@@ -83,10 +83,13 @@ export function ModelPicker({ list, target, switchRunning, downloadingId, onSele
                   <span className="inline-pills">
                     <span className={`pill ${engine.active || engine.available ? "active" : ""}`}>{STATUS_LABELS[engine.status] ?? engine.status}</span>
                     {engine.active ? <span className={`pill ${engine.loaded ? "active" : ""}`}>{engine.loaded ? "geladen" : "nicht geladen"}</span> : null}
+                    {engine.cpu_only ? <span className="pill">CPU</span> : null}
                     {!engine.uses_voice_profiles ? <span className="pill">keine Stimmprofile</span> : null}
+                    {engine.approx_size_gb && !engine.model_present ? <span className="pill">~{engine.approx_size_gb.toLocaleString("de-DE")} GB</span> : null}
                   </span>
                 </span>
                 <span className="widget-copy">{engine.description}</span>
+                {engine.license ? <span className={`engine-license ${engine.license_restricted ? "restricted" : ""}`}>Lizenz: {engine.license}</span> : null}
                 {engine.detail ? <span className="model-error">{engine.detail}</span> : null}
               </label>
               {confirmId === engine.id ? (

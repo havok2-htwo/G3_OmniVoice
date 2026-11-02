@@ -6,7 +6,7 @@ const HELP = {
   warmup: "Fuehrt eine kurze Testgenerierung aus, damit CUDA/Triton/Kernels und Caches vorbereitet sind.",
   reload: "Entlaedt und laedt das gewaehlte Modell neu. Noetig nach dtype/compile/graph-Aenderungen.",
   unload: "Entfernt das Modell aus dem Speicher und leert CUDA Cache soweit moeglich.",
-  freeMemory: "Gibt ungenutzten VRAM frei. OmniVoice bleibt geladen, Ming wird im Leerlauf geschlossen und laedt mit der naechsten Anfrage neu.",
+  freeMemory: "Gibt ungenutzten VRAM frei. OmniVoice bleibt geladen, Ming und Audio8 werden im Leerlauf geschlossen und laden mit der naechsten Anfrage neu.",
   saveDefault: "Speichert das gewaehlte Modell als Default fuer neue Requests und Startups.",
   refreshCache: "Liest den lokalen Modellcache neu ein.",
   download: "Startet einen Hugging-Face-Download im Hintergrund. Danach das Modell mit Preload/Warmup in den Speicher laden.",

@@ -1,7 +1,7 @@
 """TTS engine registry and the live engine switch.
 
-Engines: 'omnivoice' (default), 'ming' (inclusionAI Ming-3.0-tts 0.5B), 'phonon' (Gradium Phonon) and
-'mock' (test tone). `runtime_v2.build_synthesizer` builds the synthesizer for `settings.runtime_backend`;
+Engines: 'omnivoice' (default), 'ming' (inclusionAI Ming-3.0-tts 0.5B), the four Audio8 checkpoints of
+audio8/variants.py, 'phonon' (Gradium Phonon) and 'mock' (test tone). `runtime_v2.build_synthesizer` builds the synthesizer for `settings.runtime_backend`;
 this module lists the engines with their install state and swaps the running one without a restart:
 
 1. new public requests wait (`EngineSwitcher.wait_ready`), queued jobs are held back from the old engine;
@@ -23,10 +23,11 @@ import logging
 import os
 import sys
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, get_args
 
+from .audio8.variants import AUDIO8_VARIANTS
 from .config import (
     ENGINE_TUNED_FIELDS,
     RUNTIME_BACKEND_ENV,
@@ -37,7 +38,14 @@ from .config import (
     set_persisted_overrides,
     snapshot_engine_fields,
 )
-from .domain.models import EngineInfo, EngineSwitchStatus, JobStatus, ServerSettingsUpdateRequest, SpeechRequest
+from .domain.models import (
+    EngineInfo,
+    EngineSwitchStatus,
+    JobStatus,
+    RuntimeBackendName,
+    ServerSettingsUpdateRequest,
+    SpeechRequest,
+)
 from .domain.state import utcnow
 
 logger = logging.getLogger('omnivoice_tts_server.engines')
@@ -72,6 +80,38 @@ class EngineSpec:
     # GET /v1/capabilities: the engine clones a reference voice, and the request fields it really reads.
     voice_cloning: bool = True
     client_options: tuple[str, ...] = ()
+    # CapabilityOptions field -> note for clients, e.g. an option that is accepted but changes nothing.
+    option_notes: Mapping[str, str] = field(default_factory=dict)
+    # Runs without a GPU: no device selection, no VRAM.
+    cpu_only: bool = False
+    # The checkpoint's licence as the admin shows it; restricted when commercial use is limited.
+    license: str | None = None
+    license_restricted: bool = False
+    approx_size_gb: float | None = None
+
+
+_AUDIO8_LANGUAGE_NOTE = 'Accepted, but Audio8 has no language parameter: the text alone decides.'
+
+
+def _audio8_spec(engine_id: str, description: str) -> EngineSpec:
+    variant = AUDIO8_VARIANTS[engine_id]
+    runtime = ('onnxruntime', 'onnx', 'tokenizers') if variant.runtime == 'onnx' else ('transformers',)
+    return EngineSpec(
+        id=engine_id,
+        label=variant.label,
+        description=description,
+        packages=('omnivoice_tts_server.audio8', 'omnivoice_tts_server.audio8_runtime', *runtime, 'soxr'),
+        uses_voice_profiles=True,
+        native_model_ids=False,
+        native_streaming=True,
+        preload=True,
+        client_options=('seed', 'language'),
+        option_notes={'language': _AUDIO8_LANGUAGE_NOTE},
+        cpu_only=variant.runtime == 'onnx',
+        license=variant.license,
+        license_restricted=variant.license_restricted,
+        approx_size_gb=variant.approx_size_gb,
+    )
 
 
 ENGINES: dict[str, EngineSpec] = {
@@ -99,6 +139,28 @@ ENGINES: dict[str, EngineSpec] = {
         client_options=(
             'seed', 'language', 'instructions', 'emotion', 'speaking_rate', 'pitch', 'volume', 'reference_mode',
         ),
+        license='MIT',
+        approx_size_gb=3.0,
+    ),
+    'audio8_realistic': _audio8_spec(
+        'audio8_realistic',
+        'Audio8 Realistic 0.6B (Apache-2.0). Klonen ueber Stimmprofile, echtes Chunk-Streaming, kontinuierliches '
+        'Batching; Ausgabe 44,1 kHz.',
+    ),
+    'audio8_preview': _audio8_spec(
+        'audio8_preview',
+        'Audio8 Preview 0.6B (Apache-2.0). Klonen ueber Stimmprofile, echtes Chunk-Streaming, kontinuierliches '
+        'Batching; Ausgabe 44,1 kHz.',
+    ),
+    'audio8_mini': _audio8_spec(
+        'audio8_mini',
+        'Audio8 Preview 0.1B (Falcon-H1, weniger VRAM). Klonen ueber Stimmprofile, echtes Chunk-Streaming, '
+        'kontinuierliches Batching; Ausgabe 44,1 kHz.',
+    ),
+    'audio8_onnx': _audio8_spec(
+        'audio8_onnx',
+        'Audio8 0.1B ONNX INT8 (Apache-2.0) auf der CPU, keine GPU noetig. Klonen ueber Stimmprofile, '
+        'Chunk-Streaming; Ausgabe 44,1 kHz.',
     ),
     'phonon': EngineSpec(
         id='phonon',
@@ -111,6 +173,9 @@ ENGINES: dict[str, EngineSpec] = {
         preload=False,
         voice_cloning=False,
         client_options=('seed',),
+        cpu_only=True,
+        license='CC-BY-NC-4.0: keine kommerzielle Nutzung',
+        license_restricted=True,
     ),
     'mock': EngineSpec(
         id='mock',
@@ -125,7 +190,7 @@ ENGINES: dict[str, EngineSpec] = {
         voice_cloning=False,
     ),
 }
-assert set(ENGINES) == set(RUNTIME_BACKENDS)
+assert set(ENGINES) == set(RUNTIME_BACKENDS) == set(get_args(RuntimeBackendName))
 
 # PUT /api/admin/settings fields each engine reads. The admin shows these and nothing of another engine.
 _OMNIVOICE_SETTINGS_FIELDS = (
@@ -136,12 +201,27 @@ _OMNIVOICE_SETTINGS_FIELDS = (
     'cudagraph_skip_dynamic_graphs', 'cuda_memory_trim_after_batch', 'warmup_on_startup', 'denoise',
     'preprocess_prompt', 'postprocess_output',
 )
+_AUDIO8_SHARED_SETTINGS_FIELDS = (
+    'default_voice', 'max_parallel_requests', 'stream_prebuffer_ms', 'audio8_output_sample_rate',
+    'audio8_fragment_max_chars', 'audio8_temperature', 'audio8_top_p', 'audio8_top_k',
+)
+_AUDIO8_GPU_SETTINGS_FIELDS = (
+    *_AUDIO8_SHARED_SETTINGS_FIELDS, 'preferred_device', 'audio8_max_slots', 'audio8_first_chunk_frames',
+    'audio8_chunk_frames', 'audio8_cuda_graphs',
+)
 ENGINE_SETTINGS_FIELDS: dict[str, tuple[str, ...]] = {
     'omnivoice': _OMNIVOICE_SETTINGS_FIELDS,
     'ming': (
         'default_voice', 'preferred_device', 'max_parallel_requests', 'stream_prebuffer_ms', 'ming_max_slots',
         'ming_first_chunk_latents', 'ming_max_chunk_latents', 'ming_output_sample_rate', 'ming_model_dir',
         'ming_cuda_graphs',
+    ),
+    'audio8_realistic': _AUDIO8_GPU_SETTINGS_FIELDS,
+    'audio8_preview': _AUDIO8_GPU_SETTINGS_FIELDS,
+    'audio8_mini': _AUDIO8_GPU_SETTINGS_FIELDS,
+    'audio8_onnx': (
+        *_AUDIO8_SHARED_SETTINGS_FIELDS, 'audio8_onnx_workers', 'audio8_onnx_threads',
+        'audio8_onnx_first_chunk_frames', 'audio8_onnx_chunk_frames',
     ),
     'phonon': (
         'max_parallel_requests', 'max_batch_size', 'batch_wait_ms', 'vram_budget_mb', 'stream_prebuffer_ms',
@@ -162,11 +242,17 @@ assert set(ENGINE_TUNED_FIELDS) <= set(ServerSettingsUpdateRequest.model_fields)
 # Aliases clients keep using; the admin selects neither of them.
 CLIENT_ONLY_ALIAS_SUFFIXES = ('-AutoVoice', '-VoiceDesign')
 # The built-in tier an engine starts from while it has no profile yet.
-ENGINE_DEFAULT_TIERS = {'ming': 'Ming 24GB VRAM'}
+ENGINE_DEFAULT_TIERS = {
+    'ming': 'Ming 24GB VRAM',
+    'audio8_realistic': 'Audio8 24GB VRAM',
+    'audio8_preview': 'Audio8 Preview 24GB VRAM',
+    'audio8_mini': 'Audio8 Mini 24GB VRAM',
+    'audio8_onnx': 'Audio8 ONNX CPU',
+}
 # Tier keys a start or switch without a profile leaves alone. The sample rate is what clients of this host get, not
 # tuning: a saved 44100 stays, and nothing saved gives the code default, which equals the tier's value. Applying a tier
 # as a preset still sets it, because the PUT sends it.
-TIER_KEYS_NOT_STARTED_WITH = ('runtime_backend', 'ming_output_sample_rate')
+TIER_KEYS_NOT_STARTED_WITH = ('runtime_backend', 'ming_output_sample_rate', 'audio8_output_sample_rate')
 
 
 def engine_spec(backend: str | None) -> EngineSpec | None:
@@ -204,6 +290,10 @@ def _omnivoice_model_present(settings: Settings) -> bool:
 def _ming_model_present(settings: Settings) -> bool:
     model_dir = Path(settings.ming_model_dir)
     return (model_dir / 'config.json').exists() and any(model_dir.glob('*.safetensors'))
+
+
+def audio8_model_dir(settings: Settings, engine_id: str) -> Path:
+    return Path(settings.models_root_dir) / AUDIO8_VARIANTS[engine_id].folder
 
 
 def engine_loaded(settings: Settings, synthesizer: Any) -> bool:
@@ -246,6 +336,16 @@ def engine_info(spec: EngineSpec, settings: Settings, synthesizer: Any = None) -
         model_present = _ming_model_present(settings)
         downloadable = not model_present
         hint = f'Download hier im Admin oder: hf download {MING_REPO_ID} --local-dir "{model_dir}"'
+    elif spec.id in AUDIO8_VARIANTS:
+        variant = AUDIO8_VARIANTS[spec.id]
+        model_id = variant.repo_id
+        model_dir = str(audio8_model_dir(settings, spec.id))
+        model_present = all((Path(model_dir) / name).exists() for name in variant.weight_files)
+        downloadable = not model_present
+        hint = (
+            f'Download hier im Admin oder: hf download {variant.repo_id} --revision {variant.revision} '
+            f'--local-dir "{model_dir}"'
+        )
     elif spec.id == 'phonon':
         model_id = settings.phonon_model_id
         model_dir = str(settings.phonon_model_dir)
@@ -261,6 +361,8 @@ def engine_info(spec: EngineSpec, settings: Settings, synthesizer: Any = None) -
         status, detail = 'missing_package', 'Fehlende Python-Pakete: ' + ', '.join(missing)
         if spec.id == 'ming':
             detail += ' (install: pip install -e "backend[ming]")'
+        elif spec.id in AUDIO8_VARIANTS:
+            detail += ' (install: pip install -e "backend[audio8]")'
     elif not model_present and fetched_at_load:
         status, detail = 'downloadable', hint
     elif not model_present:
@@ -285,6 +387,10 @@ def engine_info(spec: EngineSpec, settings: Settings, synthesizer: Any = None) -
         uses_voice_profiles=spec.uses_voice_profiles,
         native_streaming=spec.native_streaming,
         test_only=spec.test_only,
+        cpu_only=spec.cpu_only,
+        license=spec.license,
+        license_restricted=spec.license_restricted,
+        approx_size_gb=spec.approx_size_gb,
         settings_fields=list(ENGINE_SETTINGS_FIELDS[spec.id]),
     )
 
@@ -317,12 +423,23 @@ def engine_model(settings: Settings, backend: str, baseline: dict[str, Any] | No
     download for an engine that is not active). `baseline` holds the OmniVoice selection while such an engine runs."""
     if backend == 'ming':
         return MING_BASE_ALIAS
+    if backend in AUDIO8_VARIANTS:
+        return AUDIO8_VARIANTS[backend].base_alias
     if backend == 'phonon':
         return settings.phonon_model_id
     current = engine_spec(settings.runtime_backend)
     if baseline and current is not None and not current.native_model_ids:
         return str(baseline.get('active_model') or DEFAULT_ACTIVE_MODEL)
     return settings.active_model
+
+
+def engine_output_sample_rate(settings: Settings, backend: str) -> int:
+    """The rate `backend` delivers once loaded with the current settings. Its synthesizer knows it while it runs."""
+    if backend == 'ming':
+        return settings.ming_output_sample_rate
+    if backend in AUDIO8_VARIANTS:
+        return settings.audio8_output_sample_rate
+    return settings.sample_rate
 
 
 # -- engine profiles (ENGINE_TUNED_FIELDS per engine, settings.engine_profiles) ------------------------------------------

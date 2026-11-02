@@ -59,6 +59,49 @@ With Ming active, the admin "Model Control" panel can download them as well. Pre
 "Ming best performance" set `runtime_backend=ming` and the `ming_*` keys (32 / 16 / 16 / 64 slots, measured
 in docs/benchmarks/ming-3.0-tts-2026-10.md).
 
+## Audio8 engines
+
+`runtime_backend` `audio8_realistic`, `audio8_preview`, `audio8_mini` and `audio8_onnx` serve four Audio8 checkpoints.
+The backend extra `[audio8]` installs what they need (`install.ps1` installs `backend[dev,ming,phonon,audio8]`, the
+Dockerfile `backend[ming,phonon,audio8]`):
+
+| Package | Version in `.conda-env` | Used for |
+| --- | --- | --- |
+| soxr | 1.1.0 | 44.1 kHz -> 24 kHz resampler per stream, when `audio8_output_sample_rate` is 24000 |
+| onnxruntime | 1.31.1 (CPU) | `audio8_onnx` inference |
+| onnx | 1.23.2 | `audio8_onnx` only: cuts the codec graph in two at load |
+| tokenizers | 0.22.2 | `audio8_onnx` text tokenizer |
+
+The GPU engines use torch and transformers from the OmniVoice stack.
+
+**The licences differ per checkpoint:**
+
+| Engine | Repository | Revision | Runtime | Licence |
+| --- | --- | --- | --- | --- |
+| `audio8_realistic` | `Edge0/Audio8-TTS-Realistic-0.6b` | `925bbd4c2d8360af85f2594bf0205173fda853ba` | GPU slots | Apache-2.0 |
+| `audio8_preview` | `Edge0/Audio8-TTS-Preview-0.6b` | `20e519d6e2c485ea1544f95f1fcaa6de6712bfc2` | GPU slots | Apache-2.0 |
+| `audio8_mini` | `Edge0/Audio8-TTS-Preview-0.1b` | `8c837020ab800498834038363dea06757872afda` | GPU, Falcon-H1 with Mamba | **Audio8 Community License v1.0: commercial use only below US$2M annual revenue** |
+| `audio8_onnx` | `Edge0/audio8-TTS-0.1B-ONNX-INT8` | `317c12d4e0da83847b594fcf8bd74bf2c76615ec` | CPU, onnxruntime INT8 + FP16 codec | Apache-2.0 |
+
+The model code runs from the pinned folder below `models/` (`trust_remote_code=True`, `local_files_only=True`); nothing
+is fetched at load, and the code is not vendored because the 0.1B code is under the Community License. The revisions are
+pinned because that code runs in the server process: a new revision needs a new review. `audio8/variants.py` and
+`install.ps1` must stay in step.
+
+```powershell
+.\install.bat -DownloadAudio8
+```
+
+The admin model cards can download each checkpoint as well. They always fetch the pinned revision.
+
+**Transformers 5:** `from_pretrained` builds on the meta device and leaves non-persistent buffers uninitialized, so the
+RoPE tables of the Audio8 model stay empty and a clone silently ends after a few frames. The server recomputes those
+buffers after load, and `backend/tests/test_audio8_engine.py` covers it. The full suite runs on transformers 5.9.0, the
+version in `.conda-env`. On 5.10.2, used by the lock file and the Docker image, `test_audio8_engine_gpu.py` and
+`test_audio8_falcon_gpu.py` pass as well (huggingface_hub 1.16.1, not the locked 1.18.0).
+
+Measurements are in docs/benchmarks/audio8-2026-11.md.
+
 ## Gradium Phonon engine
 
 `runtime_backend=phonon` serves Gradium Phonon 40M on the CPU through the `ptts` Rust runtime

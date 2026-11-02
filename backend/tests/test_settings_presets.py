@@ -14,7 +14,10 @@ from test_app import make_client
 
 TIER_NAMES = ['32GB VRAM', '24GB VRAM', '24+8 VRAM']
 MING_TIER_NAMES = ['Ming 32GB VRAM', 'Ming 24GB VRAM', 'Ming 24+8 VRAM', 'Ming best performance']
-BUILTIN_NAMES = [*TIER_NAMES, *MING_TIER_NAMES]
+AUDIO8_TIER_NAMES = [
+    f'{prefix} {size} VRAM' for prefix in ('Audio8', 'Audio8 Preview', 'Audio8 Mini') for size in ('32GB', '24GB', '24+8')
+]
+BUILTIN_NAMES = [*TIER_NAMES, *MING_TIER_NAMES, *AUDIO8_TIER_NAMES, 'Audio8 ONNX CPU']
 NOW = '2026-10-16T12:00:00+00:00'
 
 

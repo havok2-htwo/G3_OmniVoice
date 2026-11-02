@@ -14,7 +14,7 @@ picks preferred_device by matching the detected CUDA cards' total memory (machin
 number their cards differently), see resolve_presets. Single-card tiers never set it.
 
 Engine tiers ("Ming 32GB VRAM", "Ming 24GB VRAM", "Ming 24+8 VRAM", "Ming best
-performance") also set runtime_backend='ming' and the ming_* keys. There runtime_backend
+performance", the Audio8 tiers) also set runtime_backend and their engine's keys. There runtime_backend
 names the engine the preset belongs to (preset_engine): the admin lists it under that
 engine and loading or saving a preset never switches the engine. The OmniVoice tiers
 deliberately do NOT carry runtime_backend: their values stay byte-identical (and the
@@ -89,6 +89,15 @@ PRESET_KEYS = (
     'phonon_quant',
     'phonon_workers',
     'phonon_threads',
+    'audio8_max_slots',
+    'audio8_cuda_graphs',
+    'audio8_output_sample_rate',
+    'audio8_first_chunk_frames',
+    'audio8_chunk_frames',
+    'audio8_onnx_workers',
+    'audio8_onnx_threads',
+    'audio8_onnx_first_chunk_frames',
+    'audio8_onnx_chunk_frames',
 )
 # Every preset key is a persisted runtime setting and accepted by the settings PUT
 # under the same name (checked here so a rename cannot silently break presets).
@@ -229,6 +238,104 @@ MING_PRESETS: dict[str, dict[str, Any]] = {
 }
 BUILTIN_PRESETS.update(MING_PRESETS)
 
+# ---------------------------------------------------------------------------
+# AUDIO8 ENGINE TIERS, one set per engine, because the admin lists a preset under one engine. Only slots and chunks are
+# tuned; sampling stays at the settings' values. Like Ming: the engine allocates everything at load, rows join the
+# running batch (batch_wait_ms 0) and max_parallel_requests matches the slots. Output stays 44.1 kHz, the native rate.
+#
+# Measured on the RTX 5090 over HTTP (2026-11, SonjaV2, docs/benchmarks/audio8-2026-11.md; card VRAM is the nvidia-smi
+# delta of the server process, CUDA context included, idle == peak under full bursts):
+#   checkpoint       slots   card VRAM    saturation   TTFA 1 / full burst (p50 ms)
+#   Realistic 0.6B     16     4.36 GB       52.4x        49 / 130
+#   Realistic 0.6B     32     4.57 GB       82.3x        50 / 228
+#   Preview 0.6B       16     4.36 GB       51.0x        49 / 129
+#   Preview 0.6B       32     4.58 GB       80.4x        50 / 220
+#   Preview 0.1B       16     3.48 GB       49.9x        51 / 120
+#   Preview 0.1B       32     3.77 GB       78.6x        53 / 199
+# Realistic at 64 slots gains little (90.1x) for 1.1 GB more and has the slowest rows, so no tier uses it.
+# VRAM tier budgets (sum of every G3 service at peak, see the OmniVoice comment above):
+#   32GB tier: OmniVoice peaks 5.0 GB -> Audio8 32 slots 4.57 GB, sum 27.1 -> ~26.7 GB (<= 30).
+#   24GB tier: OmniVoice peaks 3.8 GB -> Audio8 16 slots 4.36 GB, sum 21.8 -> ~22.4 GB (<= 23).
+#   24+8 box, 3090: 20.7 -> ~21.3 GB with 16 slots. Neither speed nor stability is measured on the 3090.
+# Those sums hold one voice on the card. A full voice cache (capacity.AUDIO8_VOICE_CACHE_MB) adds up to 0.4 GB: ~27.1,
+# ~22.8 and ~21.7 GB, each still inside its budget.
+# The CPU engine has no VRAM; its one tier holds the measured default (Ryzen 9800X3D, 2 workers x 3 codec threads).
+# ---------------------------------------------------------------------------
+_AUDIO8_COMMON: dict[str, Any] = {
+    'audio8_cuda_graphs': True,
+    'audio8_output_sample_rate': 44100,
+    'audio8_first_chunk_frames': 4,
+    'audio8_chunk_frames': 12,
+    'batch_wait_ms': 0,
+}
+
+
+def _audio8_tiers(prefix: str, engine: str, label: str, big: str, small: str) -> dict[str, dict[str, Any]]:
+    def values(slots: int) -> dict[str, Any]:
+        return {**_AUDIO8_COMMON, 'runtime_backend': engine, 'audio8_max_slots': slots, 'max_parallel_requests': slots}
+
+    return {
+        f'{prefix} 32GB VRAM': {
+            'description': f'{label} auf der RTX 5090, alle G3-Dienste auf einer Karte. 32 Slots: {big} '
+            'Gemessen auf der RTX 5090.',
+            'target_vram_gb': None,
+            'values': values(32),
+        },
+        f'{prefix} 24GB VRAM': {
+            'description': f'{label} auf einer 24-GB-Karte (RTX 4090 oder RTX 3090), alle G3-Dienste auf einer Karte. '
+            f'16 Slots: {small} Gemessen auf der RTX 5090.',
+            'target_vram_gb': None,
+            'values': values(16),
+        },
+        f'{prefix} 24+8 VRAM': {
+            'description': f'{label} auf der 24-GB-Karte (3090) der 24+8-Maschine. 16 Slots: {small} Gemessen auf der '
+            'RTX 5090, auf der 3090 nicht gemessen.',
+            'target_vram_gb': 24,
+            'values': values(16),
+        },
+    }
+
+
+AUDIO8_PRESETS: dict[str, dict[str, Any]] = {
+    **_audio8_tiers(
+        'Audio8', 'audio8_realistic', 'Audio8 Realistic 0.6B',
+        '4,6 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 82x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '50 ms (32 gleichzeitige Streams: 228 ms).',
+        '4,4 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 52x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '49 ms (16 gleichzeitige Streams: 130 ms).',
+    ),
+    **_audio8_tiers(
+        'Audio8 Preview', 'audio8_preview', 'Audio8 Preview 0.6B',
+        '4,6 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 80x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '50 ms (32 gleichzeitige Streams: 220 ms).',
+        '4,4 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 51x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '49 ms (16 gleichzeitige Streams: 129 ms).',
+    ),
+    **_audio8_tiers(
+        'Audio8 Mini', 'audio8_mini', 'Audio8 Preview 0.1B',
+        '3,8 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 79x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '53 ms (32 gleichzeitige Streams: 199 ms).',
+        '3,5 GB fuer diesen Prozess (Leerlauf = Spitze), etwa 50x Echtzeit unter Volllast, erstes Audio nach etwa '
+        '51 ms (16 gleichzeitige Streams: 120 ms).',
+    ),
+    'Audio8 ONNX CPU': {
+        'description': 'Audio8 0.1B ONNX INT8 auf der CPU, keine GPU noetig. 2 Worker mit je 3 Codec-Threads: erstes '
+        'Audio nach etwa 560 ms, etwa 2,3x Echtzeit unter Volllast, 2,2 GB RAM. Gemessen auf einem Ryzen 9800X3D.',
+        'target_vram_gb': None,
+        'values': {
+            'runtime_backend': 'audio8_onnx',
+            'audio8_onnx_workers': 2,
+            'audio8_onnx_threads': 0,
+            'audio8_onnx_first_chunk_frames': 6,
+            'audio8_onnx_chunk_frames': 8,
+            'audio8_output_sample_rate': 44100,
+            'max_parallel_requests': 2,
+            'batch_wait_ms': 0,
+        },
+    },
+}
+BUILTIN_PRESETS.update(AUDIO8_PRESETS)
+
 
 def _path(data_dir: Path) -> Path:
     return data_dir / PRESETS_FILE
@@ -239,6 +346,10 @@ def preset_engine(values: Mapping[str, Any]) -> str:
     backend = values.get('runtime_backend')
     if backend:
         return str(backend)
+    if any(key.startswith('audio8_onnx_') for key in values):
+        return 'audio8_onnx'
+    if any(key.startswith('audio8_') for key in values):
+        return 'audio8_realistic'
     return 'ming' if any(key.startswith('ming_') for key in values) else 'omnivoice'
 
 

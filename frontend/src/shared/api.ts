@@ -14,8 +14,11 @@ export interface VoiceItem {
   engine_seeds?: Partial<Record<SeedEngine, number>>;
 }
 
+/** The Audio8 checkpoints, one engine each. */
+export type Audio8Engine = "audio8_realistic" | "audio8_preview" | "audio8_mini" | "audio8_onnx";
+
 /** Engines a voice profile stores a best seed for (mock renders like OmniVoice). */
-export type SeedEngine = "omnivoice" | "ming" | "phonon";
+export type SeedEngine = "omnivoice" | "ming" | "phonon" | Audio8Engine;
 
 /** Ming delivery controls on a speech request; OmniVoice and Phonon ignore them. */
 export type MingEmotion = "happy" | "sad" | "angry" | "fearful" | "disgusted" | "surprised" | "neutral";
@@ -103,6 +106,8 @@ export interface ServerSettings {
   cuda_memory_trim_after_batch: boolean;
   warmup_on_startup: boolean;
   sample_rate: number;
+  /** Read-only: rate of the audio the active engine sends, or the target's during a switch. */
+  output_sample_rate?: number;
   poll_interval_ms: number;
   theme: string;
   built_in_voices: string[];
@@ -146,9 +151,22 @@ export interface ServerSettings {
   phonon_quant?: string;
   phonon_workers?: number;
   phonon_threads?: number;
+  audio8_max_slots?: number;
+  audio8_cuda_graphs?: boolean;
+  audio8_output_sample_rate?: number;
+  audio8_first_chunk_frames?: number;
+  audio8_chunk_frames?: number;
+  audio8_fragment_max_chars?: number;
+  audio8_temperature?: number | null;
+  audio8_top_p?: number | null;
+  audio8_top_k?: number;
+  audio8_onnx_workers?: number;
+  audio8_onnx_threads?: number;
+  audio8_onnx_first_chunk_frames?: number;
+  audio8_onnx_chunk_frames?: number;
 }
 
-export type RuntimeBackend = "omnivoice" | "ming" | "phonon" | "mock";
+export type RuntimeBackend = "omnivoice" | "ming" | "phonon" | Audio8Engine | "mock";
 
 export interface EngineInfo {
   id: RuntimeBackend;
@@ -170,6 +188,13 @@ export interface EngineInfo {
   uses_voice_profiles: boolean;
   native_streaming: boolean;
   test_only: boolean;
+  /** Runs without a GPU. */
+  cpu_only?: boolean;
+  /** The checkpoint's licence; restricted when commercial use is limited. */
+  license?: string | null;
+  license_restricted?: boolean;
+  /** Size of the download. */
+  approx_size_gb?: number | null;
   /** PUT /api/admin/settings fields this engine reads. */
   settings_fields: string[];
 }
@@ -195,6 +220,16 @@ export interface EngineListResponse {
   switch: EngineSwitchStatus;
   /** PUT /api/admin/settings fields of the whole service, whichever engine runs. */
   server_settings_fields: string[];
+}
+
+/** GET /api/v1/capabilities: what a request gets from the selected engine. */
+export interface EngineCapabilities {
+  engine: string;
+  sample_rate: number;
+  languages: string[];
+  /** Request fields the engine really reads. For OmniVoice `instructions` means clone requests. */
+  options: { seed: boolean; language: boolean; instructions: boolean };
+  option_notes: Record<string, string>;
 }
 
 export interface DashboardSnapshot {

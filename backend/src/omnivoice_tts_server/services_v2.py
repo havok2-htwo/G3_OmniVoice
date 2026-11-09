@@ -341,11 +341,17 @@ class QueueService:
             job = self.store.jobs.get(job_id)
             if job is None:
                 raise KeyError(job_id)
-            if job.status not in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
+            if job.status not in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled} and (
+                job_id in self.store.waiting_requests
+            ):
+                # Not started yet: end it now, like cancel() does (it would otherwise wait for promotion).
+                self._mark_cancelled_locked(job, 'Cancelled before execution.')
+                self._recompute_positions_locked()
+            elif job.status not in {JobStatus.completed, JobStatus.failed, JobStatus.cancelled}:
                 job.cancel_requested = True
                 job.status = JobStatus.cancelling
                 job.error_message = 'Cancellation requested.'
-                if self._uses_concurrent_batches() and job_id not in self.store.waiting_requests:
+                if self._uses_concurrent_batches():
                     self._concurrent_cancel_locked(job)
             else:
                 self.store.jobs.pop(job_id, None)
@@ -423,6 +429,7 @@ class QueueService:
                     break
 
                 self._promote_waiting_locked()
+                self._settle_cancelled_active_locked()
                 # Coalescing window: until the batch is full or batch_wait_ms after the oldest new request arrived.
                 # A request that already waited through a running batch is past its window and starts at once.
                 remaining_s = self._batch_wait_remaining_s_locked()
@@ -439,11 +446,16 @@ class QueueService:
                     break
 
                 batch_plan = self._build_batch_plan_locked()
-                if not batch_plan:
-                    continue
-
-                batch_items, current_batch, involved_job_ids = self._reserve_batch_locked(batch_plan)
-                if not batch_items or current_batch is None:
+                if batch_plan:
+                    batch_items, current_batch, involved_job_ids = self._reserve_batch_locked(batch_plan)
+                if not batch_plan or not batch_items or current_batch is None:
+                    # Woken but nothing to plan (e.g. only a cancelled job whose first sentence is still in flight
+                    # elsewhere): wait for the next change instead of re-checking at once. wait_for() above returns
+                    # without yielding while its predicate holds, so a bare `continue` would starve the event loop.
+                    try:
+                        await asyncio.wait_for(self.store.job_condition.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
                     continue
 
                 anchor_request = batch_items[0].request
@@ -1230,6 +1242,23 @@ class QueueService:
             self.store.active_request_ids.append(job_id)
             job.queue_position = 0
             job.eta_ms = 0
+
+    def _settle_cancelled_active_locked(self) -> None:
+        """Finish active jobs whose cancel arrived while none of their sentences was in a batch.
+
+        cancel()/delete() only flag an active job; a batch result normally settles it. A job cancelled between its
+        batches never gets one, keeps its pending sentences and would stay active (and wake the worker) forever.
+        """
+        for job_id in list(self.store.active_request_ids):
+            job = self.store.jobs.get(job_id)
+            state = self.store.request_states.get(job_id)
+            if job is None or not job.cancel_requested:
+                continue
+            if state is not None and state.inflight_sentence_indices:
+                continue
+            self._mark_cancelled_locked(job, 'Cancelled during synthesis.')
+            self._recompute_positions_locked()
+            self.store.job_condition.notify_all()
 
     def _build_batch_plan_locked(self) -> list[tuple[str, int]]:
         anchor_job_id = next(

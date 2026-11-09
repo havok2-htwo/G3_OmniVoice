@@ -4,6 +4,16 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Fixed - Server hung after a client cancelled a job between two batches
+
+- A job cancelled (client Stop, closed stream, `DELETE`) while it was active but none of its sentences was rendering
+  was never finished. The queue worker then looped without ever yielding to the event loop, and the whole server
+  stopped answering: the port stayed open, connections were refused, synthesis hung. The worker now finishes such
+  jobs as cancelled and waits for the next change instead of re-checking at once. Affected the sequential batch loop
+  (OmniVoice, Phonon); the concurrent loop of Ming and Audio8 was not.
+- `DELETE` of a job that is still waiting ends it at once, like cancel; it used to stay queued as "cancelling" until
+  a slot freed up.
+
 ### Added - Audio8 engines
 
 - Four new engines, each with its own model card, presets, profile, voice seeds and live switch: `audio8_realistic`,

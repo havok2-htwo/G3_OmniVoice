@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import {
   apiFetch,
+  authSetup,
   changePassword,
   clearStoredAdminKey,
   createApiKey,
@@ -10,17 +12,18 @@ import {
   deleteApiKey,
   formatDate,
   formatMs,
+  formatNumber,
   formatRealtime,
   formatSeconds,
   listApiKeys,
   login,
   logout,
+  setUnauthorizedHandler,
   streamNdjson,
   streamSse,
   whoami,
   type ApiKeyInfo,
   type BenchmarkRunResponse,
-  type CreatedApiKey,
   type DashboardSnapshot,
   type EngineCapabilities,
   type EngineInfo,
@@ -62,8 +65,53 @@ import { DataGenerationPanel } from "./DataGenerationPanel";
 import { SettingsFields, pickFields } from "./EngineSettingsFields";
 import { ModelPicker } from "./ModelPicker";
 import { TrainingPanel } from "./TrainingPanel";
+import { ApiKeysPanel, type ApiKeyRow } from "../ApiKeysPanel";
+import { PerfPanel, clearPerfHistory, gpuTitle, usePerfFeed, usePerfLatest, type PerfSnapshot } from "../PerfPanel";
+import { ToastHost, toast } from "../Toasts";
 
-type AdminTab = "overview" | "finetune_data" | "finetune_train";
+const TABS = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "playground", label: "Playground" },
+  { id: "voices", label: "Voices" },
+  { id: "models", label: "Models" },
+  { id: "settings", label: "Settings" },
+  { id: "benchmark", label: "Benchmark" },
+  { id: "data-generation", label: "Data generation" },
+  { id: "training", label: "Training" },
+  { id: "history", label: "History" },
+  { id: "api-keys", label: "API keys" },
+  { id: "account", label: "Account" },
+] as const;
+type AdminTab = (typeof TABS)[number]["id"];
+const FINETUNE_TABS: AdminTab[] = ["data-generation", "training"];
+
+function tabFromHash(): AdminTab {
+  const id = window.location.hash.replace(/^#/, "");
+  return (TABS.find((tab) => tab.id === id)?.id ?? "dashboard") as AdminTab;
+}
+
+// Stable module-level notifiers (children keep them in useCallback deps without re-running effects).
+function setMessage(text: string) {
+  if (text) toast.ok(text);
+}
+function setError(text: string) {
+  if (text) toast.error(text);
+}
+function errorText(error: unknown, fallback: string) {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+const SETTINGS_NOT_COMPARED = new Set(["runtime_backend", "runtime_backend_pending", "attention_backend", "attention_backend_note"]);
+function settingsChanges(draft: ServerSettings | null, saved: ServerSettings | null): string[] {
+  if (!draft || !saved) return [];
+  const keys = new Set([...Object.keys(draft), ...Object.keys(saved)]);
+  return [...keys].filter((key) => {
+    if (SETTINGS_NOT_COMPARED.has(key)) return false;
+    const a = (draft as unknown as Record<string, unknown>)[key];
+    const b = (saved as unknown as Record<string, unknown>)[key];
+    return JSON.stringify(a ?? null) !== JSON.stringify(b ?? null);
+  });
+}
 
 function inferTaskType(modelId: string): TaskType {
   if (modelId.endsWith("VoiceDesign")) return "VoiceDesign";
@@ -135,11 +183,11 @@ function parseWerSeedInput(value: string): { randomSeed: number | null; seedValu
   const parts = trimmed.split(",").map((part) => part.trim());
   if (parts.length === 1) {
     if (!/^\d+$/.test(parts[0])) {
-      return { randomSeed: null, seedValues: null, error: "Seed muss eine ganze Zahl sein." };
+      return { randomSeed: null, seedValues: null, error: "The seed must be a whole number." };
     }
     const seed = Number(parts[0]);
     if (!Number.isSafeInteger(seed) || seed > MAX_TTS_SEED) {
-      return { randomSeed: null, seedValues: null, error: `Seed muss zwischen 0 und ${MAX_TTS_SEED} liegen.` };
+      return { randomSeed: null, seedValues: null, error: `The seed must be between 0 and ${MAX_TTS_SEED}.` };
     }
     return { randomSeed: seed, seedValues: null };
   }
@@ -147,11 +195,11 @@ function parseWerSeedInput(value: string): { randomSeed: number | null; seedValu
   const seen = new Set<number>();
   for (const part of parts) {
     if (!part || !/^\d+$/.test(part)) {
-      return { randomSeed: null, seedValues: null, error: "Seed-Liste bitte als ganze Zahlen mit Kommas eingeben, z.B. 8888,8890,2912." };
+      return { randomSeed: null, seedValues: null, error: "Enter the seed list as whole numbers separated by commas, for example 8888,8890,2912." };
     }
     const seed = Number(part);
     if (!Number.isSafeInteger(seed) || seed > MAX_TTS_SEED) {
-      return { randomSeed: null, seedValues: null, error: `Alle Seeds muessen zwischen 0 und ${MAX_TTS_SEED} liegen.` };
+      return { randomSeed: null, seedValues: null, error: `Every seed must be between 0 and ${MAX_TTS_SEED}.` };
     }
     if (!seen.has(seed)) {
       seeds.push(seed);
@@ -159,56 +207,55 @@ function parseWerSeedInput(value: string): { randomSeed: number | null; seedValu
     }
   }
   if (seeds.length > 1025) {
-    return { randomSeed: null, seedValues: null, error: "Seed-Liste darf maximal 1025 Werte enthalten." };
+    return { randomSeed: null, seedValues: null, error: "The seed list may hold at most 1025 values." };
   }
   return { randomSeed: seeds[0] ?? null, seedValues: seeds };
 }
 
 const ADMIN_HELP = {
-  adminSession: "Admin-Zugang laeuft ueber Login und httpOnly Session-Cookie.",
-  quickModel: "Modell fuer die schnelle Admin-Synthese.",
-  quickVoice: "Stimme fuer Quick Synthesis. Custom Voices laufen mit dem Base-Modell.",
-  quickText: "Text fuer den Streaming-Test. Der erste Satz bekommt einen Fast-Path, danach werden kompatible Saetze wieder gebatcht.",
-  quickLanguage: "Sprachhinweis fuer OmniVoice. Auto laesst das Modell die Sprache erkennen; eine feste Wahl kann Aussprache und Qualitaet leicht verbessern.",
-  quickLanguageTextOnly: "Diese Engine hat keinen Sprachparameter: die Sprache wirkt hier nur auf die Textoptimierung.",
-  quickInstructions: "Optionale Anweisung, die mit dem Request an die Engine geht.",
-  quickMingInstruction: "Ming: freie Anweisung zur Sprechweise (z.B. \"spricht ruhig und warm, leicht laechelnd\"). Nicht mit Emotion/Tempo/Tonhoehe/Lautstaerke kombinierbar; solange eines davon gesetzt ist, wird sie nicht gesendet.",
-  mingEmotion: "Ming: Emotion der Ausgabe. Geht zusammen mit Tempo/Tonhoehe/Lautstaerke als eine strukturierte Anweisung an das Modell.",
-  mingRate: "Ming: Sprechtempo. Ist einer von Tempo/Tonhoehe/Lautstaerke gesetzt, fuellt der Server die anderen mit 'mittel'.",
-  mingPitch: "Ming: Tonhoehe der Ausgabe.",
-  mingVolume: "Ming: Lautstaerke der Ausgabe.",
-  mingReferenceMode: "Ming: wie die Klon-Stimme genutzt wird. voll = Referenz-Audio + Transkript + Sprecher-Embedding (normales Klonen). nur Sprecher = nur das Sprecher-Embedding, damit die Sprechweise der Referenz die Anweisung nicht ueberdeckt. auto = nur Sprecher, sobald Emotion/Tempo/Tonhoehe/Lautstaerke gesetzt ist, sonst voll.",
-  mingTags: "Ming: fuegt einen Geraeusch-Tag an der Cursorposition im Text ein. Tags werden nicht vorgelesen; eine Engine ohne diesen Tag entfernt ihn.",
-  quickSeed: "Seed fuer reproduzierbarere Runs. Leer lassen fuer zufaellige Ausgabe.",
-  quickTextOptimization: "Textoptimierung fuer diesen Run: Datum, Uhrzeit, Zahlen, Einheiten, URLs und Markdown werden fuer Deutsch/Englisch ausgeschrieben. Default = Server-Einstellung. Vorschau zeigt den gesprochenen Text ohne Synthese (bei 'off' den Originaltext). Sprache Auto: Deutsch/Englisch wird an Schreibweise (24.09.2026, 14:30 Uhr, 3:30 PM) oder an typischen Woertern erkannt; andere Sprachen bleiben unveraendert.",
-  refreshVllmModels: "Liest die Modellliste aus dem konfigurierten vLLM Server neu aus.",
-  refreshRuntimeDevices: "Liest CPU/CUDA-Geraete neu ein.",
-  voiceName: "Name fuer die gespeicherte Clone-Stimme im Voice-Katalog.",
-  voiceRefText: "Exakter gesprochener Text des Samples. Die Klon-Modelle brauchen ihn fuer Voice Clone Prompts.",
-  voiceSample: "Audio-Sample der Stimme. Backend normalisiert es nach 24 kHz WAV.",
-  transcribeSample: "Schickt das Sample an den konfigurierten G3 Whisper Server und fuellt den Referenztext.",
-  voiceConsent: "Bestaetigt, dass diese Stimme gespeichert und fuer lokale Tests genutzt werden darf.",
-  benchmarkMode: "Traffic simuliert echte Nutzer-Requests mit zufaelligen Ankunftszeiten. Iterations ist der alte feste Paralleltest.",
-  benchmarkText: "Satzpool fuer Traffic. Das Benchmark waehlt pro Request zufaellig mehrere Saetze daraus aus.",
-  benchmarkDuration: "Traffic-Fenster, in dem neue Requests zufaellig eintreffen. Offene Generierungen duerfen danach noch bis zu 180s fertig laufen.",
-  benchmarkRpm: "Zielrate fuer Traffic: wie viele Nutzer-Requests pro Minute eintreffen.",
-  benchmarkSentenceRange: "Zufaellige Anzahl Saetze pro Nutzer-Request. Beispiel: mal 3, mal 5, mal 10 Saetze.",
-  benchmarkSeed: "Optionaler Seed fuer reproduzierbare Request-Verteilung und Satz-Auswahl.",
-  benchmarkIterations: "Gemessene Wiederholungen pro Case im Iterationsmodus. Warmups werden nicht in die Mittelwerte gerechnet.",
-  benchmarkWarmups: "Nicht gemessene Vorlaeufe zum Fuellen von Modell-, CUDA- und Prompt-Caches.",
-  benchmarkParallel: "Iterationsmodus: Anzahl gleichzeitig gestarteter Jobs. Trafficmodus ignoriert dieses Feld.",
-  werCount: "Anzahl zufaelliger Saetze, die vLLM erzeugt und die aktive Engine danach vertont.",
-  werLanguage: "Sprache fuer die von vLLM generierten Referenzsaetze. TTS laeuft weiter mit Auto-Language.",
-  werWords: "Wortbereich fuer vLLM-Saetze. Kuerzere Saetze machen Fehler leichter sichtbar.",
-  werTolerance: "Levenshtein-Toleranz pro Wort. Bis zu 2 Buchstaben Unterschied gelten als Schreibweise, Einfuegungen/Loeschungen bleiben Fehler.",
-  werTimeout: "Maximale Wartezeit pro TTS+Whisper Sample. Hilft, haengende Einzelrequests abzubrechen.",
-  werSeed: "TTS-Seed fuer den WER-Run. Einzelwert oder kommagetrennte Liste wie 8888,8890,2912. Bei einer Liste wird Seed range ignoriert.",
-  werSeedRange: "Wenn groesser 0, testet der WER-Benchmark alle Seeds von Seed bis Seed + Range. Wird ignoriert, wenn Seed eine kommagetrennte Liste ist.",
-  werVoice: "Stimme, mit der der WER-Benchmark rechnet. Standard = Stimme aus den Einstellungen. Nur eigene Stimmen (Klon-Profile) stehen zur Wahl.",
-  werCancel: "Stoppt den laufenden WER-Benchmark: laufende und wartende TTS-Jobs werden abgebrochen, der Lauf endet mit Status cancelled. Bereits fertige Ergebnisse bleiben sichtbar.",
-  voiceSeed: "Bester Seed dieser Stimme pro Engine (aus dem WER-Benchmark). Ohne eigenen Seed im Request und ohne Seed im WER-Benchmark nutzt die aktive Engine ihren Wert; ein Seed passt nur zu der Engine, auf der er gemessen wurde. Leer = kein Seed, dann zufaellig.",
-  werSaveSeed: "Speichert diesen Seed als besten Seed der Stimme des Runs, fuer die Engine, auf der der Run lief.",
-  werPrompt: "Optionaler eigener vLLM Prompt. Er sollte ein JSON-Array von Saetzen erzeugen.",
+  quickModel: "Model for this test synthesis.",
+  quickVoice: "Voice for the test. Custom voices run on the Base model.",
+  quickText: "Text for the streaming test. The first sentence takes a fast path; later compatible sentences are batched again.",
+  quickLanguage: "Language hint for the engine. Auto lets the model detect it; a fixed choice can improve pronunciation slightly.",
+  quickLanguageTextOnly: "This engine has no language parameter: the language only affects the text optimization.",
+  quickInstructions: "Optional instruction sent with the request to the engine.",
+  quickMingInstruction: "Ming: free instruction for the delivery (for example \"speaks calmly and warmly, slightly smiling\"). It cannot be combined with emotion, rate, pitch or volume; while one of them is set it is not sent.",
+  mingEmotion: "Ming: emotion of the output. Sent together with rate, pitch and volume as one structured instruction.",
+  mingRate: "Ming: speaking rate. When one of rate, pitch or volume is set, the server fills the others with 'medium'.",
+  mingPitch: "Ming: pitch of the output.",
+  mingVolume: "Ming: volume of the output.",
+  mingReferenceMode: "Ming: how the clone voice is used. full = reference audio + transcript + speaker embedding (normal cloning). speaker only = only the speaker embedding, so the reference's delivery does not override the instruction. auto = speaker only as soon as emotion, rate, pitch or volume is set, otherwise full.",
+  mingTags: "Ming: inserts a sound tag at the cursor. Tags are not read aloud; an engine without the tag removes it.",
+  quickSeed: "Seed for more reproducible runs. Leave empty for random output.",
+  quickTextOptimization: "Text optimization for this run: dates, times, numbers, units, URLs and Markdown are written out for German and English. Default = server setting. Preview shows the spoken text without synthesis (with 'off' the original text). With language Auto, German or English is detected from the spelling (24.09.2026, 14:30 Uhr, 3:30 PM) or typical words; other languages stay unchanged.",
+  refreshVllmModels: "Reads the model list from the configured vLLM server again.",
+  refreshRuntimeDevices: "Reads the CPU and CUDA devices again.",
+  voiceName: "Name of the saved clone voice in the voice catalog.",
+  voiceRefText: "Exact text spoken in the sample. The clone models need it for the voice prompt.",
+  voiceSample: "Audio sample of the voice. The server converts it to 24 kHz WAV.",
+  transcribeSample: "Sends the sample to the configured G3 Whisper server and fills in the reference text.",
+  voiceConsent: "Confirms that this voice may be stored and used for local tests.",
+  benchmarkMode: "Traffic simulates real users with random arrival times. Fixed iterations is the classic parallel test.",
+  benchmarkText: "Sentence pool for traffic mode. Each request picks several random sentences from it.",
+  benchmarkDuration: "Traffic window in which new requests arrive at random. Open generations may finish for up to 180 s afterwards.",
+  benchmarkRpm: "Target rate in traffic mode: user requests per minute.",
+  benchmarkSentenceRange: "Random number of sentences per user request, for example 3, 5 or 10.",
+  benchmarkSeed: "Optional seed for a reproducible request schedule and sentence choice.",
+  benchmarkIterations: "Measured repetitions per case in iteration mode. Warmups are not averaged.",
+  benchmarkWarmups: "Unmeasured runs that fill model, CUDA and prompt caches first.",
+  benchmarkParallel: "Iteration mode: jobs started at the same time. Traffic mode ignores it.",
+  werCount: "Number of random sentences vLLM writes and the active engine then speaks.",
+  werLanguage: "Language of the reference sentences from vLLM. TTS still runs with Auto language.",
+  werWords: "Word range of the vLLM sentences. Shorter sentences make errors easier to see.",
+  werTolerance: "Levenshtein tolerance per word. Up to this many letters of difference count as spelling; insertions and deletions stay errors.",
+  werTimeout: "Maximum wait per TTS + Whisper sample. Stops single requests that hang.",
+  werSeed: "TTS seed of the WER run: one value or a comma-separated list such as 8888,8890,2912. With a list the seed range is ignored.",
+  werSeedRange: "Above 0 the benchmark tests every seed from Seed to Seed + range. Ignored when Seed is a list.",
+  werVoice: "Voice the WER benchmark uses. Default = the voice from the settings. Only your own clone voices can be chosen.",
+  werCancel: "Stops the running WER benchmark: running and waiting TTS jobs are cancelled and the run ends as cancelled. Finished results stay visible.",
+  voiceSeed: "Best seed of this voice for the active engine (from the WER benchmark). Requests without their own seed use it; a seed only fits the engine it was measured on. Empty = no seed (random).",
+  werSaveSeed: "Saves this seed as the best seed of the run's voice for the engine the run used.",
+  werPrompt: "Optional custom vLLM prompt. It should produce a JSON array of sentences.",
 };
 
 const SEED_ENGINES: Array<{ id: SeedEngine; label: string }> = [
@@ -273,50 +320,15 @@ function applyOmniVoiceDefaults(settings: ServerSettings): ServerSettings {
   };
 }
 
-const SPARK_CHART = {
-  width: 260,
-  height: 112,
-  left: 42,
-  right: 10,
-  top: 10,
-  bottom: 24,
-} as const;
-
-function sparkY(value: number, max: number) {
-  const plotHeight = SPARK_CHART.height - SPARK_CHART.top - SPARK_CHART.bottom;
-  return SPARK_CHART.top + (1 - Math.max(0, value) / Math.max(max, 1)) * plotHeight;
-}
-
-function buildSparkPath(values: number[]) {
-  const max = Math.max(1, ...values.map((value) => Math.max(0, Number(value) || 0)));
-  const plotWidth = SPARK_CHART.width - SPARK_CHART.left - SPARK_CHART.right;
-  return values
-    .map((value, index) => {
-      const x = SPARK_CHART.left + (values.length <= 1 ? 0 : (index / (values.length - 1)) * plotWidth);
-      const y = sparkY(Math.max(0, Number(value) || 0), max);
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-    })
-    .join(" ");
-}
-
-function formatGraphValue(value: number | undefined, label: string, suffix: string) {
-  if (value === undefined || Number.isNaN(Number(value))) return "-";
-  const numeric = Number(value);
-  if (label.includes("Realtime")) return `${numeric.toFixed(numeric >= 10 ? 0 : 2)}x`;
-  if (suffix.trim() === "ms") return `${Math.round(numeric)} ms`;
-  if (suffix === "%") return `${Math.round(numeric)}%`;
-  return `${Math.round(numeric)}${suffix}`;
-}
-
 function formatPercent(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
   return `${(Number(value) * 100).toFixed(Number(value) >= 0.1 ? 1 : 2)}%`;
 }
 
 function fallbackRuntimeDevice(deviceId: string): RuntimeDeviceInfo {
   return {
     id: deviceId,
-    label: `${deviceId} - configured`,
+    label: `${deviceId} (configured)`,
     kind: deviceId.startsWith("cuda") ? "cuda" : "other",
     name: "Configured device",
     index: null,
@@ -324,43 +336,6 @@ function fallbackRuntimeDevice(deviceId: string): RuntimeDeviceInfo {
     available: false,
     selected: true,
   };
-}
-
-function MiniGraph({ label, values, color, suffix = "" }: { label: string; values: number[]; color: string; suffix?: string }) {
-  const chartValues = values.slice(-80).map((value) => Math.max(0, Number(value) || 0));
-  const max = Math.max(1, ...chartValues);
-  const path = buildSparkPath(chartValues);
-  const latest = values.at(-1);
-  const yTicks = [max, max / 2, 0];
-  const xTicks = [0, 0.5, 1];
-  return (
-    <article className="model-card">
-      <div className="metric-row">
-        <span>{label}</span>
-        <strong>{formatGraphValue(latest, label, suffix)}</strong>
-      </div>
-      <svg className="sparkline-graph" viewBox={`0 0 ${SPARK_CHART.width} ${SPARK_CHART.height}`} aria-label={label}>
-        {xTicks.map((tick) => {
-          const x = SPARK_CHART.left + tick * (SPARK_CHART.width - SPARK_CHART.left - SPARK_CHART.right);
-          return <line key={tick} x1={x} y1={SPARK_CHART.top} x2={x} y2={SPARK_CHART.height - SPARK_CHART.bottom} className="sparkline-grid vertical" />;
-        })}
-        {yTicks.map((tick) => {
-          const y = sparkY(tick, max);
-          return (
-            <g key={tick}>
-              <line x1={SPARK_CHART.left} y1={y} x2={SPARK_CHART.width - SPARK_CHART.right} y2={y} className="sparkline-grid" />
-              <text x={SPARK_CHART.left - 7} y={y + 3} textAnchor="end" className="sparkline-label">{formatGraphValue(tick, label, suffix)}</text>
-            </g>
-          );
-        })}
-        <line x1={SPARK_CHART.left} y1={SPARK_CHART.top} x2={SPARK_CHART.left} y2={SPARK_CHART.height - SPARK_CHART.bottom} className="sparkline-axis" />
-        <line x1={SPARK_CHART.left} y1={SPARK_CHART.height - SPARK_CHART.bottom} x2={SPARK_CHART.width - SPARK_CHART.right} y2={SPARK_CHART.height - SPARK_CHART.bottom} className="sparkline-axis" />
-        <text x={SPARK_CHART.left} y={SPARK_CHART.height - 5} className="sparkline-label">alt</text>
-        <text x={SPARK_CHART.width - SPARK_CHART.right} y={SPARK_CHART.height - 5} textAnchor="end" className="sparkline-label">jetzt</text>
-        {path ? <path d={path} fill="none" stroke={color} strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" className="sparkline-path" /> : null}
-      </svg>
-    </article>
-  );
 }
 
 export function AdminApp() {
@@ -373,22 +348,30 @@ export function AdminApp() {
   const [pwCurrent, setPwCurrent] = useState("");
   const [pwNew, setPwNew] = useState("");
   const [pwConfirm, setPwConfirm] = useState("");
-  const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([]);
-  const [newKeyAlias, setNewKeyAlias] = useState("");
-  const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
+  const [apiKeys, setApiKeys] = useState<ApiKeyInfo[] | null>(null);
+  const [apiKeysError, setApiKeysError] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState("");
+  const [liveReconnecting, setLiveReconnecting] = useState(false);
+  const [setupPending, setSetupPending] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  // The settings as the server last reported them: the base of the dirty check.
+  const savedSettingsRef = useRef<ServerSettings | null>(null);
+  const [savedSettings, setSavedSettings] = useState<ServerSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<ServerSettings | null>(null);
   const [presets, setPresets] = useState<SettingsPreset[]>([]);
   const [presetName, setPresetName] = useState("");
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [presetSaveName, setPresetSaveName] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [quickModel, setQuickModel] = useState("");
   const [quickVoice, setQuickVoice] = useState("");
   // True once the admin picked another model: only then a settings save may send default_model.
   const [defaultModelPicked, setDefaultModelPicked] = useState(false);
-  const [adminTab, setAdminTab] = useState<AdminTab>("overview");
-  const [quickText, setQuickText] = useState("Das neue Adminpanel nutzt dieselbe Streaming-Pipeline wie die offene Demo.");
+  const [adminTab, setAdminTabState] = useState<AdminTab>(() => tabFromHash());
+  const [quickText, setQuickText] = useState("Hallo! Das ist ein kurzer Test der Streaming-Ausgabe. Der zweite Satz kommt gleich hinterher.");
   const [quickLanguage, setQuickLanguage] = useState("Auto");
   const [quickInstructions, setQuickInstructions] = useState("");
   const [capabilities, setCapabilities] = useState<EngineCapabilities | null>(null);
@@ -410,7 +393,6 @@ export function AdminApp() {
   const [voiceUploadPreviewUrl, setVoiceUploadPreviewUrl] = useState("");
   const [jobAudioUrls, setJobAudioUrls] = useState<Record<string, string>>({});
   const [voiceAudioUrls, setVoiceAudioUrls] = useState<Record<string, string>>({});
-  const [overviewHistory, setOverviewHistory] = useState<Array<DashboardSnapshot["overview"] & { recorded_at: string }>>([]);
   const [benchmarks, setBenchmarks] = useState<BenchmarkRunResponse[]>([]);
   const [werBenchmarks, setWerBenchmarks] = useState<WerBenchmarkRunResponse[]>([]);
   const [modelDownloads, setModelDownloads] = useState<ModelDownloadStatus[]>([]);
@@ -422,7 +404,7 @@ export function AdminApp() {
   const [vllmModelsError, setVllmModelsError] = useState("");
   const [vllmModelsLoading, setVllmModelsLoading] = useState(false);
   const [benchmarkMode, setBenchmarkMode] = useState<"traffic" | "iterations">("traffic");
-  const [benchmarkText, setBenchmarkText] = useState("Satz eins fuer den Lasttest. Satz zwei ist etwas laenger und simuliert einen echten Nutzer. Satz drei prueft die Queue. Satz vier testet Batching. Satz fuenf ist kurz. Satz sechs ist wieder ein bisschen ausfuehrlicher. Satz sieben nutzt dieselbe Stimme. Satz acht kommt zufaellig rein. Satz neun macht den p99-Wert spannend. Satz zehn beendet den Pool.");
+  const [benchmarkText, setBenchmarkText] = useState("Satz eins für den Lasttest. Satz zwei ist etwas länger und simuliert einen echten Nutzer. Satz drei prüft die Queue. Satz vier testet Batching. Satz fünf ist kurz. Satz sechs ist wieder ein bisschen ausführlicher. Satz sieben nutzt dieselbe Stimme. Satz acht kommt zufällig rein. Satz neun macht den p99-Wert spannend. Satz zehn beendet den Pool.");
   const [benchmarkDuration, setBenchmarkDuration] = useState(60);
   const [benchmarkRequestsPerMinute, setBenchmarkRequestsPerMinute] = useState(30);
   const [benchmarkMinSentences, setBenchmarkMinSentences] = useState(3);
@@ -506,6 +488,12 @@ export function AdminApp() {
         setAdminKey("session");
       } catch {
         if (!cancelled) setAdminKey("");
+        try {
+          const setup = await authSetup();
+          if (!cancelled) setSetupPending(setup.setup_pending);
+        } catch {
+          // older server: no hint
+        }
       } finally {
         if (!cancelled) setBootLoading(false);
       }
@@ -515,28 +503,87 @@ export function AdminApp() {
     };
   }, []);
 
+  const loggedIn = adminKey === "session" && !mustChange;
+
   useEffect(() => {
-    if (adminKey !== "session" || mustChange) return;
+    if (!loggedIn) return;
     void refreshApiKeys();
-    void loadSnapshot(adminKey);
-  }, [adminKey, mustChange]);
+    void initialLoad();
+  }, [loggedIn]);
+
+  // Hash routing: #dashboard, #playground, ... (unknown -> dashboard).
+  useEffect(() => {
+    const onHash = () => setAdminTabState(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const setAdminTab = useCallback((tab: AdminTab) => {
+    setAdminTabState(tab);
+    if (window.location.hash !== `#${tab}`) window.history.replaceState(null, "", `#${tab}`);
+  }, []);
+
+  // Performance graph: one feed for the whole app, so the history keeps filling on every tab.
+  const fetchPerf = useCallback((signal: AbortSignal) => apiFetch<PerfSnapshot>("/api/admin/perf", { signal }), []);
+  usePerfFeed(fetchPerf, loggedIn);
+  const perfLatest = usePerfLatest();
+
+  // Clear everything that belongs to the session (perf history, toasts, created key via unmount) and show the login.
+  const resetSession = useCallback((expired: boolean) => {
+    clearStoredAdminKey();
+    clearPerfHistory();
+    toast.clear();
+    setAdminKey("");
+    setCurrentUser("");
+    setMustChange(false);
+    setSnapshot(null);
+    setSettingsDraft(null);
+    savedSettingsRef.current = null;
+    setSavedSettings(null);
+    setApiKeys(null);
+    setSnapshotError("");
+    setLiveReconnecting(false);
+    if (expired) toast.warn("Session expired. Please log in again.");
+  }, []);
+
+  useEffect(() => {
+    if (adminKey !== "session") return;
+    setUnauthorizedHandler(() => resetSession(true));
+    return () => setUnauthorizedHandler(null);
+  }, [adminKey, resetSession]);
 
   async function refreshApiKeys() {
     try {
       const result = await listApiKeys();
       setApiKeys(result.keys);
-    } catch {
-      // ignore (surfaced elsewhere)
+      setApiKeysError(null);
+    } catch (keyError) {
+      setApiKeysError(errorText(keyError, "Could not load the API keys."));
     }
   }
 
-  async function loadSnapshot(key: string) {
+  async function initialLoad() {
+    setSnapshotError("");
+    try {
+      await loadSnapshot(adminKey || "session", true);
+    } catch (loadError) {
+      setSnapshotError(errorText(loadError, "Could not load the dashboard."));
+    }
+  }
+
+  /** Reads the snapshot. The settings draft is replaced only when it has no unsaved edits (or `forceDraft`). */
+  async function loadSnapshot(key: string, forceDraft = false) {
     const data = await apiFetch<DashboardSnapshot>("/api/admin/snapshot", { adminKey: key });
+    const fresh = applyOmniVoiceDefaults(data.settings);
+    const previousSaved = savedSettingsRef.current;
     setSnapshot(data);
-    setSettingsDraft(applyOmniVoiceDefaults(data.settings));
-    setDefaultModelPicked(false);
+    setSettingsDraft((current) => {
+      if (forceDraft || !current || settingsChanges(current, previousSaved).length === 0) return fresh;
+      return current;
+    });
+    savedSettingsRef.current = fresh;
+    setSavedSettings(fresh);
+    if (forceDraft) setDefaultModelPicked(false);
     setQuickModel((current) => current || data.settings.default_model);
-    setOverviewHistory((current) => [...current.slice(-119), { ...data.overview, recorded_at: new Date().toISOString() }]);
     void loadBenchmarks(key);
     void loadWerBenchmarks(key);
     void loadModelDownloads(key, data.settings.model_directory);
@@ -618,7 +665,6 @@ export function AdminApp() {
 
   async function handleEngineSwitch(target: string) {
     if (!adminKey || !target || !engineList || target === engineList.active) return;
-    setError("");
     setEngineSwitchBusy(true);
     try {
       const started = await apiFetch<EngineListResponse>("/api/admin/runtime/backend", {
@@ -627,10 +673,10 @@ export function AdminApp() {
         body: { backend: target },
       });
       setEngineList(started);
-      setMessage(`Engine-Wechsel zu ${target} gestartet.`);
+      setMessage(`Switching the engine to ${target}.`);
     } catch (switchError) {
       setEngineSwitchBusy(false);
-      setError(switchError instanceof Error ? switchError.message : "Engine-Wechsel fehlgeschlagen.");
+      setError(`Could not switch the engine: ${errorText(switchError, "unknown error")}`);
     }
   }
 
@@ -643,7 +689,7 @@ export function AdminApp() {
     setPresetName("");
     setQuickNote(null);
     try {
-      await loadSnapshot(adminKey);
+      await loadSnapshot(adminKey, true);
     } catch {
       // The stale-draft effect below retries.
     }
@@ -651,13 +697,11 @@ export function AdminApp() {
     void loadPresets(adminKey);
     // The "started" line must not stand next to the error.
     if (result.switch.state === "failed") {
-      setMessage("");
-      setError(`Engine-Wechsel fehlgeschlagen: ${result.switch.error || "unbekannter Fehler"}`);
+      setError(`Could not switch the engine: ${result.switch.error || "unknown error"}`);
     } else if (result.switch.error) {
-      setMessage("");
       setError(result.switch.error);
     } else {
-      setMessage(result.switch.message || `Engine ${result.active} aktiv.`);
+      setMessage(result.switch.message || `Engine ${result.active} is active.`);
     }
   }
 
@@ -667,47 +711,55 @@ export function AdminApp() {
     try {
       const query = `?base_url=${encodeURIComponent(baseUrl)}`;
       const payload = await apiFetch<VllmModelsResponse>(`/api/admin/vllm/models${query}`, { adminKey: key });
+      // An empty vllm_model means "the first model" on the server too, so the draft stays untouched (not dirty).
       setVllmModels(payload.models || []);
       setVllmModelsError(payload.error || "");
-      setSettingsDraft((current) => {
-        if (!current || current.vllm_base_url !== baseUrl) return current;
-        if (current.vllm_model || !payload.models?.length) return current;
-        return { ...current, vllm_model: payload.models[0] };
-      });
     } catch (loadError) {
       setVllmModels([]);
-      setVllmModelsError(loadError instanceof Error ? loadError.message : "vLLM Modelle konnten nicht geladen werden.");
+      setVllmModelsError(errorText(loadError, "Could not load the vLLM models."));
     } finally {
       setVllmModelsLoading(false);
     }
   }
 
+  // Live dashboard stream. It reconnects after a disconnect (backend restart, network) with a 1, 2, 5, 10 s backoff.
   useEffect(() => {
-    if (!adminKey || mustChange) return;
+    if (!loggedIn) return;
     const controller = new AbortController();
-    void streamSse("/api/admin/dashboard/stream", {
-      adminKey,
-      signal: controller.signal,
-      onEvent: async (eventName, payload) => {
-        if (eventName === "dashboard.snapshot") {
-          const next = payload as DashboardSnapshot;
-          setSnapshot(next);
-          setSettingsDraft((current) => current ?? applyOmniVoiceDefaults(next.settings));
-          setOverviewHistory((current) => [...current.slice(-119), { ...next.overview, recorded_at: new Date().toISOString() }]);
+    const delays = [1000, 2000, 5000, 10000];
+    void (async () => {
+      let attempt = 0;
+      while (!controller.signal.aborted) {
+        try {
+          await streamSse("/api/admin/dashboard/stream", {
+            adminKey,
+            signal: controller.signal,
+            onEvent: async (eventName, payload) => {
+              if (eventName !== "dashboard.snapshot") return;
+              attempt = 0;
+              setLiveReconnecting(false);
+              const next = payload as DashboardSnapshot;
+              setSnapshot(next);
+              setSnapshotError("");
+              setSettingsDraft((current) => current ?? applyOmniVoiceDefaults(next.settings));
+            },
+          });
+        } catch (streamError) {
+          if (controller.signal.aborted) return;
+          if ((streamError as { status?: number }).status === 401) {
+            resetSession(true);
+            return;
+          }
         }
-      },
-    }).catch((streamError) => {
-      if (controller.signal.aborted) return;
-      if ((streamError as { status?: number }).status === 401) {
-        clearStoredAdminKey();
-        setAdminKey("");
-        setSnapshot(null);
-      } else {
-        setError(streamError instanceof Error ? streamError.message : "Dashboard-Stream getrennt.");
+        if (controller.signal.aborted) return;
+        setLiveReconnecting(true);
+        const delay = delays[Math.min(attempt, delays.length - 1)];
+        attempt += 1;
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
       }
-    });
+    })();
     return () => controller.abort();
-  }, [adminKey, mustChange]);
+  }, [loggedIn, adminKey, resetSession]);
 
   // Load benchmark/WER history + settings presets once when the key changes (e.g. on page reload).
   useEffect(() => {
@@ -865,8 +917,8 @@ export function AdminApp() {
   }, [snapshot?.selectable_models, snapshot?.settings.default_model]);
 
   useEffect(() => {
-    if (activeEngineId && !finetuneSupported) setAdminTab("overview");
-  }, [activeEngineId, finetuneSupported]);
+    if (activeEngineId && !finetuneSupported && FINETUNE_TABS.includes(adminTab)) setAdminTab("dashboard");
+  }, [activeEngineId, finetuneSupported, adminTab, setAdminTab]);
 
   useEffect(() => {
     if (!adminKey || mustChange || !activeEngineId) return;
@@ -922,69 +974,63 @@ export function AdminApp() {
     });
   }
 
-  async function handleAuthenticate() {
+  async function handleAuthenticate(event?: FormEvent) {
+    event?.preventDefault();
     setAuthLoading(true);
-    setError("");
+    setLoginError("");
     try {
       const me = await login(loginUsername.trim(), loginPassword);
       setCurrentUser(me.username);
       setMustChange(me.must_change_password);
       setLoginPassword("");
       setAdminKey("session");
-      setMessage("Adminpanel verbunden.");
     } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Login fehlgeschlagen.");
+      setLoginError(errorText(authError, "Login failed."));
     } finally {
       setAuthLoading(false);
     }
   }
 
-  async function handleChangePassword() {
-    setError("");
-    if (pwNew.length < 4) {
-      setError("Passwort muss mindestens 4 Zeichen haben.");
+  async function handleChangePassword(event?: FormEvent) {
+    event?.preventDefault();
+    setPwError("");
+    if (pwNew.length < 8) {
+      setPwError("The new password needs at least 8 characters.");
       return;
     }
     if (pwNew !== pwConfirm) {
-      setError("Passwoerter stimmen nicht ueberein.");
+      setPwError("The new passwords do not match.");
       return;
     }
+    setPwBusy(true);
     try {
       await changePassword(pwCurrent, pwNew);
       setPwCurrent("");
       setPwNew("");
       setPwConfirm("");
       setMustChange(false);
-      setMessage("Passwort aktualisiert.");
-    } catch (pwError) {
-      setError(pwError instanceof Error ? pwError.message : "Passwortwechsel fehlgeschlagen.");
+      setSetupPending(false);
+      setMessage("Password changed.");
+    } catch (pwChangeError) {
+      setPwError(errorText(pwChangeError, "Could not change the password."));
+    } finally {
+      setPwBusy(false);
     }
   }
 
-  async function handleCreateApiKey() {
-    setError("");
-    try {
-      const created = await createApiKey(newKeyAlias.trim());
-      setCreatedKey(created);
-      setNewKeyAlias("");
-      setMessage(`API-Key "${created.alias}" erstellt — jetzt kopieren, er wird nur einmal gezeigt.`);
-      await refreshApiKeys();
-    } catch (keyError) {
-      setError(keyError instanceof Error ? keyError.message : "API-Key konnte nicht erstellt werden.");
-    }
-  }
-
-  async function handleDeleteApiKey(id: string, alias: string) {
-    setError("");
-    try {
-      await deleteApiKey(id);
-      setCreatedKey((current) => (current?.id === id ? null : current));
-      setMessage(`API-Key "${alias}" geloescht.`);
-      await refreshApiKeys();
-    } catch (keyError) {
-      setError(keyError instanceof Error ? keyError.message : "API-Key konnte nicht geloescht werden.");
-    }
-  }
+  const apiKeyRows: ApiKeyRow[] | null = useMemo(
+    () =>
+      apiKeys?.map((key) => ({
+        id: key.id,
+        alias: key.alias,
+        hint: key.hint ?? null,
+        created_at: key.created_at,
+        last_used_at: key.usage.last_used_at,
+        requests: key.usage.request_count,
+        usage: key.usage.total_seconds_processed,
+      })) ?? null,
+    [apiKeys],
+  );
 
   // Mobile browsers (every iOS browser, Chrome included) only let an AudioContext start inside the tap that asked for
   // it; a resume() requested later never settles there. So the context is created and resumed synchronously in the
@@ -1058,10 +1104,9 @@ export function AdminApp() {
   }
 
   async function handleQuickOptimizePreview() {
-    setError("");
     if (quickOptimizationMode === "off") {
       // The run would speak the raw text: show that instead of a deterministic rewrite.
-      setQuickOptimizePreview({ text: quickText.trim(), applied_rules: [], language: null, binding_origin: "Textoptimierung aus", sentences: [] });
+      setQuickOptimizePreview({ text: quickText.trim(), applied_rules: [], language: null, binding_origin: "text optimization off", sentences: [] });
       return;
     }
     try {
@@ -1072,7 +1117,7 @@ export function AdminApp() {
       });
       setQuickOptimizePreview(preview);
     } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : "Textoptimierung fehlgeschlagen.");
+      setError(`Text optimization failed: ${errorText(previewError, "unknown error")}`);
     }
   }
 
@@ -1084,11 +1129,11 @@ export function AdminApp() {
       stopQuickPlayback();
       setQuickRunning(false);
       setQuickNote(null);
-      setMessage("Quick-Synthesis gestoppt.");
+      setMessage("Synthesis stopped.");
       return;
     }
     if (!quickModel || !quickVoice) {
-      setQuickNote({ error: true, text: "Keine passende Stimme fuer dieses Modell." });
+      setQuickNote({ error: true, text: "No voice fits this model. Add a voice on the Voices tab." });
       return;
     }
     let sampleRate = snapshot?.settings.output_sample_rate ?? snapshot?.settings.sample_rate ?? 24000;
@@ -1100,7 +1145,6 @@ export function AdminApp() {
     setQuickMetrics(null);
     setQuickNote(null);
     setQuickRunning(true);
-    setError("");
     const controller = new AbortController();
     const chunks: Int16Array[] = [];
     let completedJobId = "";
@@ -1151,7 +1195,7 @@ export function AdminApp() {
       if (controller.signal.aborted) return;
       // Blocked live playback (no tap reached the audio context) leaves the player below as the way to listen.
       const liveBlocked = chunks.length > 0 && audioContextRef.current?.state !== "running";
-      const liveNote = liveBlocked ? " Live-Wiedergabe hat der Browser blockiert, bitte im Player abspielen." : "";
+      const liveNote = liveBlocked ? " The browser blocked live playback; use the player below." : "";
       if (liveBlocked) setQuickNote({ error: false, text: liveNote.trim() });
       if (completedJobId) {
         try {
@@ -1162,29 +1206,27 @@ export function AdminApp() {
           if (controller.signal.aborted) return;
           setQuickAudioDownloadName(`${completedJobId}.mp3`);
           setQuickAudioUrl(URL.createObjectURL(mp3Blob));
-          setMessage(`Quick-Synthesis fertig. MP3 ist bereit.${liveNote}`);
+          setMessage(`Synthesis finished. The MP3 is ready.${liveNote}`);
         } catch (mp3Error) {
           if (controller.signal.aborted) return;
           if (chunks.length) {
             setQuickAudioDownloadName(`${completedJobId || "omnivoice-admin-quick"}.wav`);
             setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
           }
-          const mp3Message = mp3Error instanceof Error ? `MP3-Export fehlgeschlagen: ${mp3Error.message}` : "MP3-Export fehlgeschlagen.";
-          setError(mp3Message);
+          const mp3Message = `MP3 export failed: ${errorText(mp3Error, "unknown error")}`;
           setQuickNote({ error: true, text: `${mp3Message}${liveNote}` });
-          setMessage(`Quick-Synthesis fertig. WAV-Fallback ist bereit.${liveNote}`);
+          setMessage(`Synthesis finished. A WAV file is ready instead.${liveNote}`);
         }
       } else if (chunks.length) {
         setQuickAudioDownloadName("omnivoice-admin-quick.wav");
         setQuickAudioUrl(URL.createObjectURL(createWavBlobFromInt16Chunks(chunks, sampleRate)));
-        setMessage(`Quick-Synthesis fertig. WAV-Fallback ist bereit.${liveNote}`);
+        setMessage(`Synthesis finished. A WAV file is ready instead.${liveNote}`);
       } else {
-        setMessage("Quick-Synthesis fertig.");
+        setMessage("Synthesis finished.");
       }
     } catch (quickError) {
       if (!controller.signal.aborted) {
-        const quickMessage = quickError instanceof Error ? quickError.message : "Quick-Synthesis fehlgeschlagen.";
-        setError(quickMessage);
+        const quickMessage = `Synthesis failed: ${errorText(quickError, "unknown error")}`;
         setQuickNote({ error: true, text: quickMessage });
       }
     } finally {
@@ -1211,24 +1253,24 @@ export function AdminApp() {
     if (!preset || !settingsDraft) return;
     // Load preset values into the draft only; the user reviews and clicks Save to apply.
     setSettingsDraft(applyOmniVoiceDefaults({ ...settingsDraft, ...withoutEngine(preset.values) } as ServerSettings));
-    const note = preset.note ? ` Hinweis: ${preset.note}` : "";
-    setMessage(`Preset "${name}" geladen — zum Anwenden "Settings speichern" klicken.${note}`);
+    const note = preset.note ? ` Note: ${preset.note}` : "";
+    toast.info(`Preset "${name}" loaded into the form. Click "Save changes" to apply it.${note}`);
   }
 
-  async function handleSavePreset() {
-    const name = presetName.trim();
+  async function handleSavePreset(event?: FormEvent) {
+    event?.preventDefault();
+    const name = presetSaveName.trim();
     if (!adminKey || !settingsDraft || !activeEngine || !name) return;
     if (presets.some((preset) => preset.built_in && preset.name === name)) {
-      setError(`"${name}" ist ein eingebautes Preset; bitte unter einem anderen Namen speichern.`);
+      setError(`"${name}" is a built-in preset. Save under another name.`);
       return;
     }
     // The list shows the active engine only, so a same-named preset of another engine would be overwritten unseen.
     const foreign = presets.find((preset) => preset.name === name && preset.engine !== activeEngine.id);
     if (foreign) {
-      setError(`"${name}" gehoert zu ${foreign.engine}; bitte unter einem anderen Namen speichern.`);
+      setError(`"${name}" belongs to ${foreign.engine}. Save under another name.`);
       return;
     }
-    setError("");
     try {
       await apiFetch<SettingsPreset>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, {
         method: "PUT",
@@ -1236,23 +1278,25 @@ export function AdminApp() {
         body: { values: { ...pickFields(settingsDraft, activeEngine.settings_fields), runtime_backend: activeEngine.id } },
       });
       await loadPresets(adminKey);
-      setMessage(`Preset "${name}" gespeichert.`);
+      setPresetName(name);
+      setPresetSaveName("");
+      setMessage(`Preset "${name}" saved.`);
     } catch (presetError) {
-      setError(presetError instanceof Error ? presetError.message : "Preset konnte nicht gespeichert werden.");
+      setError(`Could not save the preset: ${errorText(presetError, "unknown error")}`);
     }
   }
 
   async function handleDeletePreset() {
     const name = presetName.trim();
     if (!adminKey || !name) return;
-    setError("");
+    if (!window.confirm(`Delete preset "${name}"?\n\nThe saved values are removed; the current settings stay.`)) return;
     try {
       await apiFetch<{ ok: boolean }>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, { method: "DELETE", adminKey });
       setPresetName("");
       await loadPresets(adminKey);
-      setMessage(`Preset "${name}" geloescht.`);
+      setMessage(`Preset "${name}" deleted.`);
     } catch (presetError) {
-      setError(presetError instanceof Error ? presetError.message : "Preset konnte nicht geloescht werden.");
+      setError(`Could not delete the preset: ${errorText(presetError, "unknown error")}`);
     }
   }
 
@@ -1260,37 +1304,47 @@ export function AdminApp() {
     if (!adminKey || !settingsDraft) return;
     const previousDevice = snapshot?.settings.preferred_device;
     const { default_model: defaultModel, ...values } = withoutEngine(settingsDraft);
-    setError("");
+    setSettingsSaving(true);
     try {
       const updated = await apiFetch<ServerSettings>("/api/admin/settings", {
         method: "PUT",
         adminKey,
         body: defaultModelPicked ? { ...values, default_model: defaultModel } : values,
       });
+      const adjusted = Object.keys(values).filter((key) => {
+        if (SETTINGS_NOT_COMPARED.has(key)) return false;
+        const sent = (values as Record<string, unknown>)[key];
+        const got = (updated as unknown as Record<string, unknown>)[key];
+        return sent !== undefined && sent !== null && got !== undefined && JSON.stringify(sent) !== JSON.stringify(got);
+      });
       setSettingsDraft(applyOmniVoiceDefaults(updated));
-      await loadSnapshot(adminKey);
+      await loadSnapshot(adminKey, true);
       await loadModelDownloads(adminKey, updated.model_directory);
       setMessage(
         previousDevice && previousDevice !== updated.preferred_device
-          ? "Settings gespeichert. GPU-Wechsel wird nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv."
-          : "Settings gespeichert.",
+          ? "Settings saved. The new GPU takes effect after a model reload, an engine switch or a server restart."
+          : "Settings saved.",
       );
+      if (adjusted.length) toast.info(`The server adjusted: ${adjusted.join(", ")}.`);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Settings konnten nicht gespeichert werden.");
+      setError(`Could not save settings: ${errorText(saveError, "unknown error")}`);
+    } finally {
+      setSettingsSaving(false);
     }
   }
 
   async function handleSetOpsModelAsDefault(modelId: string) {
     if (!adminKey || !modelId) return;
-    setError("");
     try {
       const updated = await apiFetch<ServerSettings>("/api/admin/settings", { method: "PUT", adminKey, body: { default_model: modelId } });
       // Only the model was saved: other unsaved edits stay in the draft.
       setDefaultModelPicked(false);
       patchDraft({ default_model: updated.default_model });
-      setMessage("Default-Modell gespeichert.");
+      setSavedSettings((current) => (current ? { ...current, default_model: updated.default_model } : current));
+      if (savedSettingsRef.current) savedSettingsRef.current = { ...savedSettingsRef.current, default_model: updated.default_model };
+      setMessage("Default model saved.");
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Default-Modell konnte nicht gespeichert werden.");
+      setError(`Could not save the default model: ${errorText(saveError, "unknown error")}`);
     }
   }
 
@@ -1300,7 +1354,6 @@ export function AdminApp() {
     const targetTaskType = inferTaskType(targetModel);
     const warmupVoice = (targetTaskType === "Base" ? customVoices[0]?.voice_id : undefined) || settingsDraft.default_voice || null;
     setModelOpsBusy(true);
-    setError("");
     try {
       const payload = await apiFetch<ModelOperationResponse>(`/api/admin/models/${kind}`, {
         method: "POST",
@@ -1316,7 +1369,7 @@ export function AdminApp() {
       await loadSnapshot(adminKey);
       setMessage(`${payload.model}: ${payload.message} (${formatMs(payload.warm_ms)})`);
     } catch (operationError) {
-      setError(operationError instanceof Error ? operationError.message : "Model operation failed.");
+      setError(`Model ${kind} failed: ${errorText(operationError, "unknown error")}`);
     } finally {
       setModelOpsBusy(false);
     }
@@ -1325,10 +1378,9 @@ export function AdminApp() {
   async function handleModelDownloadRefresh() {
     if (!adminKey) return;
     setModelDownloadAction({ kind: "refresh", modelId: "__refresh__" });
-    setError("");
     try {
-      await loadModelDownloads(adminKey, settingsDraft?.model_directory || "");
-      setMessage("Model cache aktualisiert.");
+      await loadModelDownloads(adminKey, savedSettings?.model_directory || settingsDraft?.model_directory || "");
+      setMessage("Model cache reloaded.");
     } finally {
       setModelDownloadAction(null);
     }
@@ -1338,21 +1390,20 @@ export function AdminApp() {
   async function startModelDownload(label: string, target: { model_id: string } | { engine: string }) {
     if (!adminKey || !settingsDraft) return;
     setModelDownloadAction({ kind: "download", modelId: label });
-    setError("");
     try {
       const payload = await apiFetch<ModelDownloadListResponse>("/api/admin/models/download", {
         method: "POST",
         adminKey,
         body: {
           ...target,
-          storage_path: settingsDraft.model_directory,
+          storage_path: savedSettings?.model_directory ?? settingsDraft.model_directory,
         },
       });
       setModelDownloads(payload.models || []);
       await loadEngines(adminKey);
-      setMessage(`Download fuer ${label} gestartet.`);
+      setMessage(`Download of ${label} started.`);
     } catch (downloadError) {
-      setError(downloadError instanceof Error ? downloadError.message : "Model-Download fehlgeschlagen.");
+      setError(`Could not start the download: ${errorText(downloadError, "unknown error")}`);
     } finally {
       setModelDownloadAction(null);
     }
@@ -1361,20 +1412,19 @@ export function AdminApp() {
   async function handleModelDelete(modelId: string) {
     if (!adminKey || !settingsDraft) return;
     setModelDownloadAction({ kind: "delete", modelId });
-    setError("");
     try {
       const payload = await apiFetch<ModelDownloadListResponse>("/api/admin/models/delete", {
         method: "POST",
         adminKey,
         body: {
           model_id: modelId,
-          storage_path: settingsDraft.model_directory,
+          storage_path: savedSettings?.model_directory ?? settingsDraft.model_directory,
         },
       });
       setModelDownloads(payload.models || []);
-      setMessage(payload.removed ? `Model-Cache fuer ${modelId} geloescht.` : `Kein lokaler Cache fuer ${modelId} gefunden.`);
+      setMessage(payload.removed ? `Cache of ${modelId} deleted.` : `No local cache of ${modelId} found.`);
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Model-Cache konnte nicht geloescht werden.");
+      setError(`Could not delete the cache: ${errorText(deleteError, "unknown error")}`);
     } finally {
       setModelDownloadAction(null);
     }
@@ -1383,19 +1433,16 @@ export function AdminApp() {
   async function handleFreeMemory() {
     if (!adminKey) return;
     setMemoryCleanupBusy(true);
-    setError("");
     try {
       const payload = await apiFetch<MemoryCleanupResponse>("/api/admin/runtime/free-memory", {
         method: "POST",
         adminKey,
       });
       await loadSnapshot(adminKey);
-      const released = payload.released_mb === null || payload.released_mb === undefined ? "unbekannt" : `${payload.released_mb} MB`;
-      const before = payload.memory_before_mb === null || payload.memory_before_mb === undefined ? "?" : `${payload.memory_before_mb} MB`;
-      const after = payload.memory_after_mb === null || payload.memory_after_mb === undefined ? "?" : `${payload.memory_after_mb} MB`;
-      setMessage(`${payload.message} VRAM: ${before} -> ${after}, frei: ${released}.`);
+      const gb = (mb?: number | null) => (mb === null || mb === undefined ? "—" : `${(mb / 1024).toFixed(1)} GB`);
+      setMessage(`${payload.message} Card VRAM: ${gb(payload.memory_before_mb)} → ${gb(payload.memory_after_mb)}, released ${gb(payload.released_mb)}.`);
     } catch (cleanupError) {
-      setError(cleanupError instanceof Error ? cleanupError.message : "VRAM Cleanup fehlgeschlagen.");
+      setError(`Could not free VRAM: ${errorText(cleanupError, "unknown error")}`);
     } finally {
       setMemoryCleanupBusy(false);
     }
@@ -1404,7 +1451,6 @@ export function AdminApp() {
   async function handleBenchmarkRun() {
     if (!adminKey || !settingsDraft) return;
     setBenchmarkBusy(true);
-    setError("");
     try {
       const taskType = inferTaskType(settingsDraft.default_model);
       const parsedBenchmarkSeed = benchmarkSeed.trim() ? Number(benchmarkSeed) : null;
@@ -1440,9 +1486,9 @@ export function AdminApp() {
         },
       });
       await loadBenchmarks(adminKey);
-      setMessage("Benchmark gestartet.");
+      setMessage("Benchmark started.");
     } catch (benchmarkError) {
-      setError(benchmarkError instanceof Error ? benchmarkError.message : "Benchmark konnte nicht gestartet werden.");
+      setError(`Could not start the benchmark: ${errorText(benchmarkError, "unknown error")}`);
     } finally {
       setBenchmarkBusy(false);
     }
@@ -1456,7 +1502,6 @@ export function AdminApp() {
 
   async function handleWerBenchmarkRun() {
     if (!adminKey || !settingsDraft) return;
-    setError("");
     const taskType = inferTaskType(settingsDraft.default_model);
     const parsedSeed = parseWerSeedInput(werSeed);
     if (parsedSeed.error) {
@@ -1498,9 +1543,9 @@ export function AdminApp() {
         },
       });
       await loadWerBenchmarks(adminKey);
-      setMessage("WER-Benchmark gestartet.");
+      setMessage("WER benchmark started.");
     } catch (werError) {
-      setError(werError instanceof Error ? werError.message : "WER-Benchmark konnte nicht gestartet werden.");
+      setError(`Could not start the WER benchmark: ${errorText(werError, "unknown error")}`);
     } finally {
       setWerBenchmarkBusy(false);
     }
@@ -1508,14 +1553,14 @@ export function AdminApp() {
 
   async function handleCancelWerBenchmark(runId: string) {
     if (!adminKey) return;
-    setError("");
+    if (!window.confirm("Stop the WER benchmark?\n\nRunning and waiting TTS jobs are cancelled; finished results stay.")) return;
     setWerCancelling(runId);
     try {
       await apiFetch<WerBenchmarkRunResponse>(`/api/admin/wer-benchmarks/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", adminKey });
-      setMessage("WER-Benchmark abgebrochen.");
+      setMessage("WER benchmark stopped.");
       await loadWerBenchmarks(adminKey);
     } catch (cancelError) {
-      setError(cancelError instanceof Error ? cancelError.message : "WER-Benchmark konnte nicht abgebrochen werden.");
+      setError(`Could not stop the WER benchmark: ${errorText(cancelError, "unknown error")}`);
     } finally {
       setWerCancelling("");
     }
@@ -1523,15 +1568,14 @@ export function AdminApp() {
 
   async function saveVoiceSeed(voice: VoiceItem, engine: SeedEngine, seed: number | null) {
     if (!adminKey) return false;
-    setError("");
     try {
       await apiFetch(`/api/admin/voices/${encodeURIComponent(voice.voice_id)}`, { method: "PATCH", adminKey, body: { seed, engine } });
       const label = seedEngineLabel(engine);
-      setMessage(seed === null ? `${label}-Seed fuer ${voice.name} entfernt.` : `Bester ${label}-Seed fuer ${voice.name}: ${seed}.`);
+      setMessage(seed === null ? `${label} seed of ${voice.name} removed.` : `Best ${label} seed of ${voice.name}: ${seed}.`);
       await loadSnapshot(adminKey);
       return true;
     } catch (seedError) {
-      setError(seedError instanceof Error ? seedError.message : "Seed konnte nicht gespeichert werden.");
+      setError(`Could not save the seed: ${errorText(seedError, "unknown error")}`);
       return false;
     }
   }
@@ -1544,7 +1588,7 @@ export function AdminApp() {
     if (raw !== "") {
       const parsed = Number(raw);
       if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2147483647) {
-        setError("Seed muss eine ganze Zahl zwischen 0 und 2147483647 sein.");
+        setError("The seed must be a whole number between 0 and 2147483647.");
         return;
       }
       seed = parsed;
@@ -1572,11 +1616,11 @@ export function AdminApp() {
   /** Leaderboard cell: save the row's seed as the best seed of the run's voice for the run's engine. */
   function renderSaveSeedCell(run: WerBenchmarkRunResponse, seed: number | null | undefined) {
     const runVoice = werRunVoice(run);
-    if (!runVoice || seed === null || seed === undefined) return "-";
-    if (voiceEngineSeed(runVoice, run.engine) === seed) return <span className="pill active">gespeichert</span>;
+    if (!runVoice || seed === null || seed === undefined) return "—";
+    if (voiceEngineSeed(runVoice, run.engine) === seed) return <span className="badge ok">Saved</span>;
     return (
       <button className="secondary-button" type="button" title={ADMIN_HELP.werSaveSeed} onClick={() => void saveVoiceSeed(runVoice, seedEngineKey(run.engine), seed)}>
-        Fuer {runVoice.name} ({seedEngineLabel(run.engine)}) speichern
+        Save for {runVoice.name} ({seedEngineLabel(run.engine)})
       </button>
     );
   }
@@ -1589,7 +1633,8 @@ export function AdminApp() {
     });
   }
 
-  async function handleUploadVoice() {
+  async function handleUploadVoice(event?: FormEvent) {
+    event?.preventDefault();
     if (!adminKey || !voiceFile || !voiceName.trim()) return;
     const form = new FormData();
     form.append("audio_sample", voiceFile);
@@ -1603,16 +1648,15 @@ export function AdminApp() {
       setVoiceConsent(false);
       handleVoiceFileChange(null);
       await loadSnapshot(adminKey);
-      setMessage("Voice gespeichert.");
+      setMessage("Voice saved.");
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Voice-Upload fehlgeschlagen.");
+      setError(`Could not save the voice: ${errorText(uploadError, "unknown error")}`);
     }
   }
 
   async function handleTranscribeVoice() {
     if (!adminKey || !voiceFile) return;
     setVoiceTranscribing(true);
-    setError("");
     const form = new FormData();
     form.append("file", voiceFile);
     try {
@@ -1622,51 +1666,70 @@ export function AdminApp() {
         body: form,
       });
       const transcript = (payload.transcription || payload.text || "").trim();
-      if (!transcript) throw new Error("Whisper hat keinen Text zurueckgegeben.");
+      if (!transcript) throw new Error("Whisper returned no text.");
       setVoiceRefText(transcript);
-      setMessage("Referenztext aus Whisper uebernommen.");
+      setMessage("Reference text filled in from Whisper.");
     } catch (transcribeError) {
-      setError(transcribeError instanceof Error ? transcribeError.message : "Whisper-Transkription fehlgeschlagen.");
+      setError(`Transcription failed: ${errorText(transcribeError, "unknown error")}`);
     } finally {
       setVoiceTranscribing(false);
     }
   }
 
-  async function handleDeleteVoice(voiceId: string) {
+  async function handleDeleteVoice(voice: VoiceItem) {
     if (!adminKey) return;
-    await apiFetch(`/api/admin/voices/${voiceId}`, { method: "DELETE", adminKey });
-    setVoiceAudioUrls((current) => {
-      const existing = current[voiceId];
-      if (existing) URL.revokeObjectURL(existing);
-      const next = { ...current };
-      delete next[voiceId];
-      return next;
-    });
-    await loadSnapshot(adminKey);
+    if (!window.confirm(`Delete voice "${voice.name}"?\n\nRequests that use it fail until it is added again.`)) return;
+    try {
+      await apiFetch(`/api/admin/voices/${encodeURIComponent(voice.voice_id)}`, { method: "DELETE", adminKey });
+      setVoiceAudioUrls((current) => {
+        const existing = current[voice.voice_id];
+        if (existing) URL.revokeObjectURL(existing);
+        const next = { ...current };
+        delete next[voice.voice_id];
+        return next;
+      });
+      setMessage(`Voice "${voice.name}" deleted.`);
+      await loadSnapshot(adminKey);
+    } catch (deleteError) {
+      setError(`Could not delete the voice: ${errorText(deleteError, "unknown error")}`);
+    }
   }
 
   async function handleLoadVoiceSample(voiceId: string) {
     if (!adminKey) return;
-    const blob = await apiFetch<Blob>(`/api/admin/voices/${encodeURIComponent(voiceId)}/audio`, { adminKey, responseType: "blob" });
-    setVoiceAudioUrls((current) => {
-      if (current[voiceId]) URL.revokeObjectURL(current[voiceId]);
-      return { ...current, [voiceId]: URL.createObjectURL(blob) };
-    });
+    try {
+      const blob = await apiFetch<Blob>(`/api/admin/voices/${encodeURIComponent(voiceId)}/audio`, { adminKey, responseType: "blob" });
+      setVoiceAudioUrls((current) => {
+        if (current[voiceId]) URL.revokeObjectURL(current[voiceId]);
+        return { ...current, [voiceId]: URL.createObjectURL(blob) };
+      });
+    } catch (loadError) {
+      setError(`Could not load the sample: ${errorText(loadError, "unknown error")}`);
+    }
   }
 
   async function handleLoadJobAudio(jobId: string) {
     if (!adminKey) return;
-    const blob = await apiFetch<Blob>(`/api/admin/jobs/${jobId}/audio?format=mp3`, { adminKey, responseType: "blob" });
-    setJobAudioUrls((current) => {
-      if (current[jobId]) URL.revokeObjectURL(current[jobId]);
-      return { ...current, [jobId]: URL.createObjectURL(blob) };
-    });
+    try {
+      const blob = await apiFetch<Blob>(`/api/admin/jobs/${encodeURIComponent(jobId)}/audio?format=mp3`, { adminKey, responseType: "blob" });
+      setJobAudioUrls((current) => {
+        if (current[jobId]) URL.revokeObjectURL(current[jobId]);
+        return { ...current, [jobId]: URL.createObjectURL(blob) };
+      });
+    } catch (loadError) {
+      setError(`Could not load the audio: ${errorText(loadError, "unknown error")}`);
+    }
   }
 
-  async function handleDeleteJob(jobId: string) {
+  async function handleDeleteJob(jobId: string, completed: boolean) {
     if (!adminKey) return;
-    await apiFetch(`/api/admin/jobs/${jobId}`, { method: "DELETE", adminKey });
-    await loadSnapshot(adminKey);
+    if (!completed && !window.confirm("Cancel this job?\n\nThe client waiting for it gets an error.")) return;
+    try {
+      await apiFetch(`/api/admin/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE", adminKey });
+      await loadSnapshot(adminKey);
+    } catch (deleteError) {
+      setError(`Could not ${completed ? "remove" : "cancel"} the job: ${errorText(deleteError, "unknown error")}`);
+    }
   }
 
   async function handleLogout() {
@@ -1675,695 +1738,873 @@ export function AdminApp() {
     } catch {
       // clear locally regardless
     }
-    clearStoredAdminKey();
-    setAdminKey("");
-    setCurrentUser("");
-    setMustChange(false);
-    setSnapshot(null);
+    resetSession(false);
   }
+
+  function onTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    const visible = visibleTabs;
+    const index = visible.findIndex((tab) => tab.id === adminTab);
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % visible.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + visible.length) % visible.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = visible.length - 1;
+    else return;
+    event.preventDefault();
+    const id = visible[next].id;
+    setAdminTab(id);
+    window.requestAnimationFrame(() => document.getElementById(`tab-${id}`)?.focus());
+  }
+
+  const visibleTabs = TABS.filter((tab) => finetuneSupported || !FINETUNE_TABS.includes(tab.id));
+  const settingsDirty = settingsChanges(settingsDraft, savedSettings);
+  const keyCount = apiKeys?.length ?? 0;
+  const serviceGpus = (perfLatest?.gpus ?? []).filter((gpu) => gpu.used_by_service);
 
   if (bootLoading) {
     return (
-      <main className="gate-shell">
-        <section className="gate-card">
-          <p className="widget-copy">Laedt...</p>
-        </section>
-      </main>
+      <div className="shell">
+        <div className="state" role="status"><span className="spinner" />Loading…</div>
+      </div>
     );
   }
 
   if (!adminKey) {
     return (
-      <main className="gate-shell">
-        <section className="gate-card">
-          <p className="eyebrow">Private Access</p>
-          <h1>G3_OmniVoice Adminpanel</h1>
-          <p className="widget-copy">
-            Login mit Benutzername und Passwort. Standardzugang <code>admin</code> / <code>admin</code> &ndash; das
-            Passwort muss beim ersten Login geaendert werden.
-          </p>
-          <label>
-            Benutzername
-            <input value={loginUsername} autoComplete="username" onChange={(event) => setLoginUsername(event.target.value)} placeholder="admin" />
-          </label>
-          <label>
-            Passwort
-            <input type="password" value={loginPassword} autoComplete="current-password" onChange={(event) => setLoginPassword(event.target.value)} placeholder="admin" />
-          </label>
-          <div className="button-row">
-            <button className="primary-button" type="button" onClick={handleAuthenticate} disabled={authLoading || !loginUsername.trim() || !loginPassword}>
-              {authLoading ? "Pruefe..." : "Anmelden"}
-            </button>
-          </div>
-          {error ? <div className="message error">{error}</div> : null}
-        </section>
-      </main>
+      <div className="gate-shell">
+        <ToastHost />
+        <main className="panel gate-panel" aria-labelledby="login-title">
+          <p className="eyebrow">G3 GPU service · Admin</p>
+          <h1 id="login-title">G3 OmniVoice</h1>
+          <form className="form-stack" onSubmit={(event) => void handleAuthenticate(event)}>
+            <label>
+              Username
+              <input value={loginUsername} autoComplete="username" onChange={(event) => setLoginUsername(event.target.value)} required />
+            </label>
+            <label>
+              Password
+              <input type="password" value={loginPassword} autoComplete="current-password" onChange={(event) => setLoginPassword(event.target.value)} required />
+            </label>
+            {setupPending ? (
+              <p className="hint">First start: log in with <code>admin</code> / <code>admin</code>, then choose a new password.</p>
+            ) : null}
+            {loginError ? <div className="banner danger" role="alert">{loginError}</div> : null}
+            <div className="button-row form-actions">
+              <button type="submit" disabled={authLoading || !loginUsername.trim() || !loginPassword} aria-busy={authLoading}>
+                {authLoading ? "Logging in…" : "Log in"}
+              </button>
+            </div>
+          </form>
+        </main>
+      </div>
     );
   }
 
   if (mustChange) {
     return (
-      <main className="gate-shell">
-        <section className="gate-card">
-          <p className="eyebrow">Security</p>
-          <h1>Passwort aendern</h1>
-          <p className="widget-copy">Angemeldet als {currentUser || "admin"}. Bitte ein neues Passwort setzen.</p>
-          <label>
-            Aktuelles Passwort
-            <input type="password" value={pwCurrent} autoComplete="current-password" onChange={(event) => setPwCurrent(event.target.value)} />
-          </label>
-          <label>
-            Neues Passwort
-            <input type="password" value={pwNew} autoComplete="new-password" onChange={(event) => setPwNew(event.target.value)} />
-          </label>
-          <label>
-            Neues Passwort bestaetigen
-            <input type="password" value={pwConfirm} autoComplete="new-password" onChange={(event) => setPwConfirm(event.target.value)} />
-          </label>
-          <div className="button-row">
-            <button className="primary-button" type="button" onClick={handleChangePassword} disabled={!pwCurrent || !pwNew || !pwConfirm}>
-              Speichern
-            </button>
-            <button className="ghost-button" type="button" onClick={handleLogout}>Abmelden</button>
-          </div>
-          {error ? <div className="message error">{error}</div> : null}
-        </section>
-      </main>
+      <div className="gate-shell">
+        <ToastHost />
+        <main className="panel gate-panel" aria-labelledby="pw-title">
+          <p className="eyebrow">G3 OmniVoice · Security</p>
+          <h1 id="pw-title">Change password</h1>
+          <p className="dim">Signed in as {currentUser || "admin"}. Choose a new password (at least 8 characters) to continue.</p>
+          <form className="form-stack" onSubmit={(event) => void handleChangePassword(event)}>
+            <input type="text" autoComplete="username" value={currentUser || "admin"} readOnly hidden />
+            <label>Current password<input type="password" value={pwCurrent} autoComplete="current-password" onChange={(event) => setPwCurrent(event.target.value)} required /></label>
+            <label>New password<input type="password" value={pwNew} autoComplete="new-password" minLength={8} onChange={(event) => setPwNew(event.target.value)} required /></label>
+            <label>Confirm new password<input type="password" value={pwConfirm} autoComplete="new-password" minLength={8} onChange={(event) => setPwConfirm(event.target.value)} required /></label>
+            {pwError ? <div className="banner danger" role="alert">{pwError}</div> : null}
+            <div className="button-row form-actions">
+              <button type="submit" disabled={pwBusy || !pwCurrent || !pwNew || !pwConfirm} aria-busy={pwBusy}>{pwBusy ? "Saving…" : "Change password"}</button>
+              <button className="ghost-button" type="button" onClick={() => void handleLogout()}>Log out</button>
+            </div>
+          </form>
+        </main>
+      </div>
     );
   }
 
   if (!snapshot || !settingsDraft) {
     return (
-      <main className="gate-shell">
-        <section className="gate-card">
-          <p className="widget-copy">Dashboard laedt...</p>
-          {error ? <div className="message error">{error}</div> : null}
-        </section>
-      </main>
+      <div className="shell">
+        <ToastHost />
+        {snapshotError ? (
+          <div className="banner danger" role="alert">
+            <span>Could not load the dashboard: {snapshotError}</span>
+            <span className="button-row">
+              <button className="secondary-button" type="button" onClick={() => void initialLoad()}>Retry</button>
+              <button className="ghost-button" type="button" onClick={() => void handleLogout()}>Log out</button>
+            </span>
+          </div>
+        ) : (
+          <div className="state" role="status"><span className="spinner" />Loading…</div>
+        )}
+      </div>
     );
   }
 
-  return (
-    <main className="app-shell admin-shell">
-      <section className="hero-card">
-        <div className="hero-copy">
-          <p className="eyebrow">Admin Panel</p>
-          <h1>G3_OmniVoice Runtime Control</h1>
-          <p>Ein Panel fuer Queue, Stimmen, Einstellungen, Models und History. Mehr braucht die App nicht.</p>
+  const overview = snapshot.overview;
+  const switchFailed = engineList?.switch.state === "failed";
+  const modelLoaded = activeEngine ? activeEngine.loaded : snapshot.models.some((model) => model.loaded);
+  const stateBadge = engineSwitchRunning
+    ? { cls: "warn", label: "Loading", title: "An engine switch or model load is running." }
+    : switchFailed
+      ? { cls: "danger", label: "Error", title: engineList?.switch.error || "The last engine switch failed." }
+      : modelLoaded
+        ? { cls: "ok", label: "Ready", title: "The model is loaded." }
+        : { cls: "plain", label: "Idle · model unloaded", title: "The model loads with the next request or with Preload." };
+  const gpuText = serviceGpus.length ? serviceGpus.map(gpuTitle).join(", ") : perfLatest ? "CPU" : "—";
+  const runtimeVram =
+    overview.gpu_memory_total_mb > 0
+      ? `This service ${overview.gpu_process_memory_mb != null ? `${(overview.gpu_process_memory_mb / 1024).toFixed(1)} GB` : "—"} · card ${(overview.gpu_memory_used_mb / 1024).toFixed(1)} / ${(overview.gpu_memory_total_mb / 1024).toFixed(1)} GB`
+      : "—";
+  const protectedRoutes = "POST /v1/audio/speech, /v1/jobs, /api/v1/synthesize(/stream), /api/v1/text/optimize and the model, voice, capability and job-audio routes";
+
+  const dashboardTab = (
+    <>
+      <div className="grid grid-auto">
+        <div className="card">
+          <span className="card-label">Model</span>
+          <span className="card-value small" title={overview.active_model || undefined}>{overview.active_model || "None"}</span>
+          <span className="card-sub">{activeEngine?.label ?? activeEngineId ?? "—"}</span>
         </div>
-        <div className="status-grid">
-          <div className="status-pill"><span>Model</span><strong>{snapshot.overview.active_model || "-"}</strong></div>
-          <div className="status-pill"><span>Queue</span><strong>{snapshot.overview.queue_depth}</strong></div>
-          <div className="status-pill"><span>Active requests</span><strong>{snapshot.overview.active_requests}</strong></div>
-          <div className="status-pill"><span>Realtime avg</span><strong>{formatRealtime(snapshot.overview.realtime_x_avg)}</strong></div>
+        <div className="card">
+          <span className="card-label">State</span>
+          <span><span className={`badge ${stateBadge.cls}`} title={stateBadge.title}>{stateBadge.label}</span></span>
+          <span className="card-sub">Queue {formatNumber(overview.queue_depth)} · active {formatNumber(overview.active_requests)}</span>
         </div>
-        <div className="button-row">
-          <a className="ghost-button" href="/">Landing</a>
-          <button className="ghost-button" type="button" onClick={handleLogout}>Logout</button>
+        <div className="card">
+          <span className="card-label">Requests</span>
+          <span className="card-value">{formatNumber(overview.jobs_total)}</span>
+          <span className="card-sub">since start · {formatSeconds(overview.audio_seconds_total)} audio</span>
         </div>
-      </section>
-
-      <section className="hero-card">
-        <div className="hero-copy" style={{ display: "grid", gap: "24px", gridTemplateColumns: "1fr 1.4fr" }}>
-          <div style={{ display: "grid", gap: "10px", alignContent: "start" }}>
-            <p className="eyebrow">Account</p>
-            <h2>Admin-Zugang</h2>
-            <p className="widget-copy">Angemeldet als <strong>{currentUser || "admin"}</strong>.</p>
-            <label>Aktuelles Passwort<input type="password" value={pwCurrent} onChange={(event) => setPwCurrent(event.target.value)} /></label>
-            <label>Neues Passwort<input type="password" value={pwNew} onChange={(event) => setPwNew(event.target.value)} /></label>
-            <label>Bestaetigen<input type="password" value={pwConfirm} onChange={(event) => setPwConfirm(event.target.value)} /></label>
-            <div className="button-row">
-              <button className="secondary-button" type="button" onClick={handleChangePassword} disabled={!pwCurrent || !pwNew || !pwConfirm}>Passwort aendern</button>
-            </div>
-          </div>
-          <div style={{ display: "grid", gap: "10px", alignContent: "start" }}>
-            <p className="eyebrow">API Keys</p>
-            <h2>Public API</h2>
-            <p className="widget-copy">Ohne Key ist die oeffentliche TTS-API offen. Sobald ein Key existiert, ist <code>X-API-Key</code> Pflicht. Erzeugte Sekunden werden pro Key gezaehlt.</p>
-            {createdKey ? (
-              <div className="message success" style={{ wordBreak: "break-all" }}>
-                <strong>{createdKey.alias}</strong> &ndash; jetzt kopieren (nur einmal sichtbar): <code>{createdKey.token}</code>
-              </div>
-            ) : null}
-            <div className="button-row">
-              <input value={newKeyAlias} onChange={(event) => setNewKeyAlias(event.target.value)} placeholder="Alias, z.B. Key fuer Projekt X" />
-              <button className="secondary-button" type="button" onClick={handleCreateApiKey} disabled={!newKeyAlias.trim()}>Key erstellen</button>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr><th>Alias</th><th>Erstellt</th><th>Audio (s)</th><th>Requests</th><th>Zuletzt</th><th></th></tr>
-                </thead>
-                <tbody>
-                  {apiKeys.length === 0 ? (
-                    <tr><td colSpan={6}>Keine API-Keys &ndash; oeffentliche API ist offen.</td></tr>
-                  ) : null}
-                  {apiKeys.map((key) => (
-                    <tr key={key.id}>
-                      <td>{key.alias}</td>
-                      <td>{formatDate(key.created_at)}</td>
-                      <td>{key.usage.total_seconds_processed.toFixed(1)}</td>
-                      <td>{key.usage.request_count}</td>
-                      <td>{formatDate(key.usage.last_used_at)}</td>
-                      <td><button className="ghost-button" type="button" onClick={() => handleDeleteApiKey(key.id, key.alias)}>Loeschen</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+        <div className="card">
+          <span className="card-label">Errors</span>
+          <span className="card-value">{formatNumber(overview.jobs_failed_total)}</span>
+          <span className="card-sub">failed jobs since start</span>
         </div>
-      </section>
+      </div>
 
-      <nav className="ft-tab-rail">
-        <button type="button" className={`ft-tab ${adminTab === "overview" ? "active" : ""}`} onClick={() => setAdminTab("overview")}>Overview</button>
-        {finetuneSupported ? (
-          <>
-            <button type="button" className={`ft-tab ${adminTab === "finetune_data" ? "active" : ""}`} onClick={() => setAdminTab("finetune_data")}>Data Generation</button>
-            <button type="button" className={`ft-tab ${adminTab === "finetune_train" ? "active" : ""}`} onClick={() => setAdminTab("finetune_train")}>Training</button>
-          </>
-        ) : null}
-      </nav>
+      <PerfPanel />
 
-      {message ? <div className="message success">{message}</div> : null}
-      {error ? <div className="message error">{error}</div> : null}
-
-      {adminTab === "finetune_data" ? (
-        <DataGenerationPanel adminKey={adminKey} voices={voices} onMessage={setMessage} onError={setError} />
-      ) : null}
-
-      {adminTab === "finetune_train" ? (
-        <TrainingPanel adminKey={adminKey} onMessage={setMessage} onError={setError} />
-      ) : null}
-
-      {adminTab === "overview" ? (
-      <section className="widget-grid">
-        <section className="widget span-6"><div className="widget-header"><h2>Live Queue</h2></div>
-          <div className="metric-list">
-            <div className="metric-row"><span>Worker</span><strong>{snapshot.overview.worker_state}</strong></div>
-            <div className="metric-row"><span>TTFA avg</span><strong>{formatMs(snapshot.overview.ttfa_ms_avg)}</strong></div>
-            <div className="metric-row"><span>Queue wait avg</span><strong>{formatMs(snapshot.overview.queue_wait_ms_avg)}</strong></div>
-            <div className="metric-row"><span>Audio total</span><strong>{formatSeconds(snapshot.overview.audio_seconds_total)}</strong></div>
-            <div className="metric-row"><span>GPU</span><strong>{snapshot.overview.gpu_utilization_pct}%</strong></div>
-          </div>
-          {snapshot.current_batch ? <div className="voice-card"><strong>{snapshot.current_batch.batch_id}</strong><div className="inline-pills"><span className="pill">{snapshot.current_batch.model_id}</span><span className="pill">{snapshot.current_batch.task_type}</span><span className="pill">size {snapshot.current_batch.size}</span></div></div> : null}
-          {snapshot.recent_batches.length ? (
-            <div className="job-list">
-              {snapshot.recent_batches.slice(-4).reverse().map((batch) => (
-                <article key={batch.batch_id} className="job-card">
-                  <strong>{batch.batch_id}</strong>
-                  <div className="inline-pills"><span className="pill">size {batch.size}</span><span className="pill">{batch.model_id}</span><span className="pill">{batch.task_type}</span></div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-        </section>
-
-        <section className="widget span-6"><div className="widget-header"><h2>Performance Graph</h2></div>
-          <div className="field-grid two">
-            <MiniGraph label="Durchsatz 30 s" values={overviewHistory.map((entry) => Number(entry.realtime_x_live || 0))} color="#90f0b7" suffix="x" />
-            <MiniGraph label="TTFA 30 s" values={overviewHistory.map((entry) => Number(entry.ttfa_ms_live || 0))} color="#ff9a46" suffix=" ms" />
-            <MiniGraph label="Queue" values={overviewHistory.map((entry) => Number(entry.queue_depth || 0))} color="#86c9ff" />
-            <MiniGraph label="GPU" values={overviewHistory.map((entry) => Number(entry.gpu_utilization_pct || 0))} color="#ff6e6e" suffix="%" />
-          </div>
-        </section>
-
-        <section className="widget span-12">
-          {engineList ? (
-            <ModelPicker
-              list={engineList}
-              target={engineTarget || engineList.active}
-              switchRunning={engineSwitchRunning}
-              downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
-              onSelect={setEngineTarget}
-              onLoad={(engineId) => void handleEngineSwitch(engineId)}
-              onDownload={(engine: EngineInfo) => void startModelDownload(engine.id, { engine: engine.id })}
-              onRefresh={() => void loadEngines(adminKey)}
-            />
-          ) : (
-            <>
-              <div className="widget-header"><h2>1. Modell</h2></div>
-              <p>Engine-Status wird geladen...</p>
-            </>
-          )}
-          {activeEngine ? (
-            <fieldset className="switch-lock" disabled={engineSwitchRunning}>
-              <ActiveModelPanel
-                engine={activeEngine}
-                snapshot={snapshot}
-                selectedModel={settingsDraft.default_model}
-                download={modelDownloads.find((download) => download.id === settingsDraft.default_model)}
-                deviceLabel={selectedRuntimeDeviceLabel}
-                busy={modelOpsBusy || modelDownloadAction?.kind === "delete"}
-                memoryBusy={memoryCleanupBusy}
-                cacheRefreshing={modelDownloadAction?.kind === "refresh"}
-                downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
-                onPickModel={patchDefaultModel}
-                onSetDefault={(modelId) => void handleSetOpsModelAsDefault(modelId)}
-                onOperation={(kind) => void handleModelOperation(kind)}
-                onDownload={(modelId) => void startModelDownload(modelId, { model_id: modelId })}
-                onDelete={(modelId) => void handleModelDelete(modelId)}
-                onRefreshCache={() => void handleModelDownloadRefresh()}
-                onFreeMemory={() => void handleFreeMemory()}
-              />
-            </fieldset>
-          ) : null}
-        </section>
-
-        <section className="widget span-12">
-          <div className="widget-header"><h2>2. Presets{activeEngine ? ` fuer ${activeEngine.label}` : ""}</h2></div>
-          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
-            <div className="button-row" style={{ flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
-              <select
-                value={selectedPreset ? selectedPreset.name : ""}
-                onChange={(event) => setPresetName(event.target.value)}
-                title={selectedPreset?.description || "Preset auswaehlen"}
-                style={{ maxWidth: "280px" }}
-              >
-                <option value="">{enginePresets.length ? "— Preset waehlen —" : "— Keine Presets fuer dieses Modell —"}</option>
-                {enginePresets.map((preset) => <option key={preset.name} value={preset.name} title={preset.description}>{preset.name}{preset.built_in ? " (eingebaut)" : ""}</option>)}
-              </select>
-              <button className="link-chip" type="button" onClick={() => selectedPreset && handleApplyPreset(selectedPreset.name)} disabled={!selectedPreset} title="Werte in den Entwurf uebernehmen; angewendet wird erst mit Settings speichern">In Entwurf laden</button>
-              <input
-                value={presetName}
-                onChange={(event) => setPresetName(event.target.value)}
-                placeholder="Preset-Name"
-                style={{ maxWidth: "170px" }}
-              />
-              <button className="link-chip" type="button" onClick={() => void handleSavePreset()} disabled={!presetName.trim() || Boolean(selectedPreset?.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets sind schreibgeschuetzt" : "Werte dieses Modells aus dem Entwurf als Preset speichern"}>Als Preset speichern</button>
-              <button className="link-chip" type="button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || Boolean(selectedPreset.built_in)} title={selectedPreset?.built_in ? "Eingebaute Presets koennen nicht geloescht werden" : "Gespeichertes Preset loeschen"}>Preset loeschen</button>
-              {selectedPreset?.built_in ? <span className="pill" title={selectedPreset.description}>eingebaut</span> : null}
-              {selectedPreset?.note ? <span className="pill" title={selectedPreset.note}>keine passende GPU</span> : null}
-            </div>
-            {selectedPreset?.description || selectedPreset?.note ? (
-              <p className="muted" style={{ margin: "4px 0 0" }}>{[selectedPreset.description, selectedPreset.note].filter(Boolean).join(" ")}</p>
-            ) : null}
-          </fieldset>
-        </section>
-
-        <section className="widget span-12">
-          <div className="widget-header"><h2>3. Einstellungen{activeEngine ? ` fuer ${activeEngine.label}` : ""}</h2></div>
-          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
-            {activeEngine ? (
-              <SettingsFields fields={activeEngine.settings_fields} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
-            ) : (
-              <p>Engine-Status wird geladen...</p>
-            )}
-            {activeEngine?.settings_fields.includes("preferred_device") ? (
-              <div className="inline-pills">
-                <button className="link-chip" type="button" title={ADMIN_HELP.refreshRuntimeDevices} onClick={() => void loadRuntimeDevices(adminKey)}>GPU-Liste aktualisieren</button>
-                <span className={`pill ${runtimeDeviceOptions.some((device) => device.id === settingsDraft.preferred_device && device.available) ? "active" : ""}`}>{selectedRuntimeDeviceLabel}</span>
-              </div>
-            ) : null}
-            <div className="button-row"><button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button></div>
-          </fieldset>
-        </section>
-
-        <section className="widget span-12">
-          <div className="widget-header"><h2>Serverweite Einstellungen</h2></div>
-          <fieldset className="switch-lock" disabled={engineSwitchRunning}>
-            <SettingsFields fields={engineList?.server_settings_fields ?? []} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
-            <div className="inline-pills">
-              <button className="link-chip" type="button" title={ADMIN_HELP.refreshVllmModels} onClick={() => void loadVllmModels(adminKey, settingsDraft.vllm_base_url)} disabled={vllmModelsLoading}>{vllmModelsLoading ? "vLLM laedt..." : "vLLM Modelle aktualisieren"}</button>
-              <span className={`pill ${vllmModels.length ? "active" : ""}`}>{vllmModels.length ? `${vllmModels.length} vLLM Modelle` : "keine vLLM Modelle"}</span>
-              {vllmModelsError ? <span className="pill">{vllmModelsError}</span> : null}
-            </div>
-            <div className="button-row"><button className="primary-button" type="button" onClick={handleSaveSettings}>Settings speichern</button></div>
-          </fieldset>
-        </section>
-
-        <section className="widget span-6"><div className="widget-header"><h2>Benchmark</h2></div>
-          <div className="field-grid two">
-            <label className="with-help" title={ADMIN_HELP.benchmarkText}>Satzpool<textarea value={benchmarkText} onChange={(event) => setBenchmarkText(event.target.value)} /></label>
-            <div className="field-grid">
-              <label className="with-help" title={ADMIN_HELP.benchmarkMode}>Mode<select value={benchmarkMode} onChange={(event) => setBenchmarkMode(event.target.value as "traffic" | "iterations")}>
-                <option value="traffic">Traffic simulation</option>
-                <option value="iterations">Fixed iterations</option>
-              </select></label>
-              <div className="field-grid two">
-                <label className="with-help" title={ADMIN_HELP.benchmarkDuration}>Duration sec<input type="number" min="1" max="3600" value={benchmarkDuration} onChange={(event) => setBenchmarkDuration(Number(event.target.value) || 1)} /></label>
-                <label className="with-help" title={ADMIN_HELP.benchmarkRpm}>Requests/min<input type="number" min="1" max="6000" value={benchmarkRequestsPerMinute} onChange={(event) => setBenchmarkRequestsPerMinute(Number(event.target.value) || 1)} /></label>
-                <label className="with-help" title={ADMIN_HELP.benchmarkSentenceRange}>Min Saetze<input type="number" min="1" max="100" value={benchmarkMinSentences} onChange={(event) => setBenchmarkMinSentences(Number(event.target.value) || 1)} /></label>
-                <label className="with-help" title={ADMIN_HELP.benchmarkSentenceRange}>Max Saetze<input type="number" min="1" max="100" value={benchmarkMaxSentences} onChange={(event) => setBenchmarkMaxSentences(Number(event.target.value) || 1)} /></label>
-                <label className="with-help" title={ADMIN_HELP.benchmarkWarmups}>Warmups<input type="number" min="0" max="20" value={benchmarkWarmups} onChange={(event) => setBenchmarkWarmups(Number(event.target.value) || 0)} /></label>
-                <label className="with-help" title={ADMIN_HELP.benchmarkSeed}>Seed<input type="number" min="0" max="2147483647" value={benchmarkSeed} onChange={(event) => setBenchmarkSeed(event.target.value)} placeholder="leer = random" /></label>
-              </div>
-              {benchmarkMode === "iterations" ? (
-                <div className="field-grid two">
-                  <label className="with-help" title={ADMIN_HELP.benchmarkIterations}>Iterations<input type="number" min="1" max="50" value={benchmarkIterations} onChange={(event) => setBenchmarkIterations(Number(event.target.value) || 1)} /></label>
-                  <label className="with-help" title={ADMIN_HELP.benchmarkParallel}>Parallel<input type="number" min="1" max="64" value={benchmarkParallel} onChange={(event) => setBenchmarkParallel(Number(event.target.value) || 1)} /></label>
-                </div>
-              ) : null}
-              <div className="button-row"><button className="primary-button" type="button" onClick={handleBenchmarkRun} disabled={benchmarkBusy}>Benchmark starten</button></div>
-            </div>
-          </div>
-          <div className="job-list scroll-list benchmark-results">
-            {benchmarks.length === 0 ? <p className="widget-copy">Noch keine Benchmark-Runs.</p> : null}
-            {benchmarks.map((run) => (
-              <article key={run.run_id} className="job-card">
-                <strong>{run.name}</strong>
-                <div className="inline-pills"><span className={`pill ${run.status === "completed" ? "active" : ""}`}>{run.status}</span><span className="pill">{run.mode}</span><span className="pill">{run.total_requests || run.iterations} requests</span><span className="pill">{run.duration_seconds}s window</span><span className="pill">{run.requests_per_minute}/min</span><span className="pill">{run.completion_timeout_seconds || 180}s timeout</span><span className="pill">{run.warmup_iterations} warmup</span></div>
-                {run.cases.map((item) => (
-                  <div key={item.label} className="metric-list">
-                    <div className="metric-row"><span>{item.label}</span><strong>{item.success_count}/{item.success_count + item.failure_count} ok</strong></div>
-                    <div className="metric-row"><span>TTFA avg / p99</span><strong>{formatMs(item.ttfa_ms_avg)} / {formatMs(item.ttfa_ms_p99)}</strong></div>
-                    <div className="metric-row"><span>TTFA best / worst</span><strong>{formatMs(item.ttfa_ms_min)} / {formatMs(item.ttfa_ms_max)}</strong></div>
-                    <div className="metric-row"><span>Wall p50 / p99</span><strong>{formatMs(item.job_wall_ms_p50)} / {formatMs(item.job_wall_ms_p99)}</strong></div>
-                    <div className="metric-row"><span>Queue p95 / p99</span><strong>{formatMs(item.queue_wait_ms_p95)} / {formatMs(item.queue_wait_ms_p99)}</strong></div>
-                    <div className="metric-row"><span>Realtime avg</span><strong>{formatRealtime(item.realtime_x_avg)}</strong></div>
-                  </div>
-                ))}
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="widget span-6"><div className="widget-header"><h2>WER Benchmark</h2></div>
-          <div className="metric-list">
-            <div className="metric-row"><span>vLLM</span><strong>{settingsDraft.vllm_model || "auto"} @ {settingsDraft.vllm_base_url}</strong></div>
-            <div className="metric-row"><span>Whisper</span><strong>{settingsDraft.whisper_base_url || "-"}</strong></div>
-            <div className="metric-row"><span>TTS / ASR concurrency</span><strong>{settingsDraft.wer_concurrency} / {settingsDraft.wer_transcription_concurrency}</strong></div>
-          </div>
-          <div className="field-grid two">
-            <label className="with-help" title={ADMIN_HELP.werCount}>Samples<input type="number" min="1" max="1000" value={werCount} onChange={(event) => setWerCount(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werLanguage}>Sprache<select value={werLanguage} onChange={(event) => setWerLanguage(event.target.value)}>
-              {WER_LANGUAGE_OPTIONS.map((language) => <option key={language} value={language}>{language}</option>)}
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.werWords}>Min words<input type="number" min="1" max="80" value={werMinWords} onChange={(event) => setWerMinWords(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werWords}>Max words<input type="number" min="1" max="120" value={werMaxWords} onChange={(event) => setWerMaxWords(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werTolerance}>Tolerance<input type="number" min="0" max="8" value={werTolerance} onChange={(event) => setWerTolerance(Number(event.target.value) || 0)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werTimeout}>Timeout sec<input type="number" min="1" max="3600" value={werTimeout} onChange={(event) => setWerTimeout(Number(event.target.value) || 1)} /></label>
-            <label className="with-help" title={ADMIN_HELP.werVoice}>Stimme<select value={werVoice} onChange={(event) => setWerVoice(event.target.value)}>
-              <option value="">Standard-Stimme aus den Einstellungen</option>
-              {customVoices.map((voice) => {
-                const seed = voiceEngineSeed(voice, activeSeedEngine);
-                return <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{seed != null ? ` (bester ${seedEngineLabel(activeSeedEngine)}-Seed ${seed})` : ` (ohne ${seedEngineLabel(activeSeedEngine)}-Seed)`}</option>;
-              })}
-            </select></label>
-            <label className="with-help" title={ADMIN_HELP.werSeed}>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="leer = bester Seed der Stimme, 8888 oder 8888,8890,2912" /></label>
-            <label className="with-help" title={ADMIN_HELP.werSeedRange}>Seed range<input type="number" min="0" max="1024" value={werSeedRange} onChange={(event) => setWerSeedRange(Number(event.target.value) || 0)} /></label>
-          </div>
-          <label className="with-help" title={ADMIN_HELP.werPrompt}>Optionaler vLLM Prompt<textarea value={werPrompt} onChange={(event) => setWerPrompt(event.target.value)} placeholder="Leer lassen fuer den eingebauten JSON-Satzgenerator." /></label>
-          <div className="button-row"><button className="primary-button" type="button" onClick={handleWerBenchmarkRun} disabled={werBenchmarkBusy}>WER Benchmark starten</button></div>
-          <div className="job-list scroll-list benchmark-results wer-results">
-            {werBenchmarks.length === 0 ? <p className="widget-copy">Noch keine WER-Benchmark-Runs.</p> : null}
-            {werBenchmarks.map((run) => (
-              <article key={run.run_id} className="job-card">
-                <strong>{run.name}</strong>
-                <div className="inline-pills">
-                  <span className={`pill ${run.status === "completed" ? "active" : ""}`}>{run.status}</span>
-                  <span className="pill">{run.summary.completed}/{run.summary.total} done</span>
-                  <span className="pill">WER avg {formatPercent(run.summary.wer_avg)}</span>
-                  <span className="pill">median {formatPercent(run.summary.wer_p50)}</span>
-                  <span className="pill">p95 {formatPercent(run.summary.wer_p95)}</span>
-                  <span className="pill">worst {formatPercent(run.summary.wer_max)}</span>
-                  <span className="pill">exact {formatPercent(run.summary.exact_rate)}</span>
-                  <span className={`pill ${run.sentence_cache_hit ? "active" : ""}`}>{run.sentence_cache_hit ? "cached sentences" : "new sentences"}</span>
-                  {run.fallback_sentence_count ? <span className="pill">{run.fallback_sentence_count} Vorlagen-Saetze (LLM lieferte zu wenige)</span> : null}
-                  <span className="pill">Stimme: {run.voice ? voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice : `Standard${werRunVoice(run) ? ` (${werRunVoice(run)?.name})` : ""}`}</span>
-                  <span className="pill">Engine: {seedEngineLabel(run.engine)}</span>
-                </div>
-                {isRunActive(run.status) ? (
-                  <div className="button-row">
-                    <button className="ghost-button danger-button" type="button" disabled={werCancelling === run.run_id} onClick={() => void handleCancelWerBenchmark(run.run_id)} title={ADMIN_HELP.werCancel}>
-                      {werCancelling === run.run_id ? "Breche ab..." : "WER-Benchmark abbrechen"}
-                    </button>
-                  </div>
+      <div className="grid grid-2">
+        <section className="panel" aria-labelledby="queue-title">
+          <div className="panel-head"><h2 id="queue-title">Live queue</h2></div>
+          <dl className="kv-list">
+            <div><dt>Worker</dt><dd>{overview.worker_state}</dd></div>
+            <div><dt>Queue depth</dt><dd>{formatNumber(overview.queue_depth)}</dd></div>
+            <div><dt>Active requests</dt><dd>{formatNumber(overview.active_requests)}</dd></div>
+            <div><dt>TTFA (average)</dt><dd>{formatMs(overview.ttfa_ms_avg)}</dd></div>
+            <div><dt>Queue wait (average)</dt><dd>{formatMs(overview.queue_wait_ms_avg)}</dd></div>
+            <div><dt>Job time (average)</dt><dd>{formatMs(overview.job_wall_ms_avg)}</dd></div>
+            <div><dt>Realtime factor (average)</dt><dd>{formatRealtime(overview.realtime_x_avg)}</dd></div>
+          </dl>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Batch</th><th>Model</th><th>Task</th><th className="num">Size</th></tr></thead>
+              <tbody>
+                {snapshot.current_batch ? (
+                  <tr className="row-selected">
+                    <td><span className="badge warn">Running</span> <span className="mono">{snapshot.current_batch.batch_id}</span></td>
+                    <td className="wrap-cell">{snapshot.current_batch.model_id}</td>
+                    <td>{snapshot.current_batch.task_type}</td>
+                    <td className="num">{snapshot.current_batch.size}</td>
+                  </tr>
                 ) : null}
-                {run.seed_leaderboard.length > 1 ? (
-                  <div className="table-wrap wer-leaderboard-wrap">
-                    <table className="downloads-table wer-leaderboard-table">
-                      <thead>
-                        <tr>
-                          <th>#</th>
-                          <th>Seed</th>
-                          <th>WER avg</th>
-                          <th>Median</th>
-                          <th>Worst</th>
-                          {run.seed_leaderboard.some((item) => item.failure_count > 0) ? <th>Fail</th> : null}
-                          <th>Bester Seed</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {run.seed_leaderboard.map((item, index) => (
-                          <tr key={item.seed ?? "random"}>
-                            <td>{index + 1}</td>
-                            <td>{item.seed ?? "random"}</td>
-                            <td>{formatPercent(item.wer_avg)}</td>
-                            <td>{formatPercent(item.wer_p50)}</td>
-                            <td>{formatPercent(item.wer_max)}</td>
-                            {run.seed_leaderboard.some((entry) => entry.failure_count > 0) ? <td>{item.failure_count}</td> : null}
-                            <td>{renderSaveSeedCell(run, item.seed)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                {snapshot.recent_batches.slice(-5).reverse().map((batch) => (
+                  <tr key={batch.batch_id}>
+                    <td><span className="mono">{batch.batch_id}</span></td>
+                    <td className="wrap-cell">{batch.model_id}</td>
+                    <td>{batch.task_type}</td>
+                    <td className="num">{batch.size}</td>
+                  </tr>
+                ))}
+                {!snapshot.current_batch && !snapshot.recent_batches.length ? (
+                  <tr><td colSpan={4} className="empty">No batches yet. Run a test on the Playground tab.</td></tr>
                 ) : null}
-                <div className="metric-list">
-                  <div className="metric-row"><span>Global WER avg / median</span><strong>{formatPercent(run.summary.wer_avg)} / {formatPercent(run.summary.wer_p50)}</strong></div>
-                  <div className="metric-row"><span>Global WER p95 / worst</span><strong>{formatPercent(run.summary.wer_p95)} / {formatPercent(run.summary.wer_max)}</strong></div>
-                  {run.summary.failure_count > 0 ? <div className="metric-row"><span>OK / Fail</span><strong>{run.summary.success_count} / {run.summary.failure_count}</strong></div> : null}
-                </div>
-                <div className="wer-sample-list">
-                  {deviationsFor(run.run_id).items.length < deviationsFor(run.run_id).total ? (
-                    <div className="button-row">
-                      <button className="secondary-button" type="button" onClick={() => void loadWerDeviations(run.run_id, true)}>
-                        Weitere laden ({deviationsFor(run.run_id).items.length}/{deviationsFor(run.run_id).total} Abweichungen, schlechteste zuerst)
-                      </button>
-                    </div>
-                  ) : null}
-                  {werDeviations?.runId === run.run_id && werDeviations.items.length === 0 ? (
-                    <p className="widget-copy">Keine WER-Abweichungen im aktuellen Run.</p>
-                  ) : null}
-                  {deviationsFor(run.run_id).items.map((item) => (
-                    <div key={`${item.seed ?? "random"}-${item.index}-${item.job_id ?? ""}`} className="wer-sample">
-                      <div className="metric-row">
-                        <span>{item.seed !== null && item.seed !== undefined ? `Seed ${item.seed} #${item.index}` : `#${item.index}`} WER</span>
-                        <strong>{item.success ? formatPercent(item.wer) : "failed"}</strong>
-                      </div>
-                      <div className="button-row compact">
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={!item.job_id}
-                          onClick={() => item.job_id && void handleLoadJobAudio(item.job_id)}
-                        >
-                          MP3
-                        </button>
-                      </div>
-                      {item.job_id && jobAudioUrls[item.job_id] ? (
-                        <>
-                          <audio controls src={jobAudioUrls[item.job_id]} />
-                          <div className="button-row compact">
-                            <a className="secondary-button" href={jobAudioUrls[item.job_id]} download={`${item.job_id}.mp3`}>MP3 herunterladen</a>
-                          </div>
-                        </>
-                      ) : null}
-                      <div className="inline-pills">
-                        <span className="pill">TTS {formatMs(item.synthesis_ms)}</span>
-                        <span className="pill">ASR {formatMs(item.transcription_ms)}</span>
-                        <span className="pill">Total {formatMs(item.total_ms)}</span>
-                      </div>
-                      <p><span>Ref</span>{item.source_text}</p>
-                      <p><span>ASR</span>{item.transcript || item.error_message || "-"}</p>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            ))}
+              </tbody>
+            </table>
           </div>
         </section>
 
-        <section className="widget span-6 audio-card"><div className="widget-header"><h2>Quick Synthesis</h2></div>
-          <div className="field-grid two">
-            {selectableModels.length > 1 ? (
-              <label className="with-help" title={ADMIN_HELP.quickModel}>Modell<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{selectableModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
-            ) : null}
-            <label className="with-help" title={ADMIN_HELP.quickVoice}>Stimme<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)}>{!quickVoices.length ? <option value="">Keine passende Stimme</option> : null}{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select></label>
-            {quickReadsLanguage ? (
-              <label className="with-help" title={quickHasLanguageChoice ? ADMIN_HELP.quickLanguage : ADMIN_HELP.quickLanguageTextOnly}>{quickHasLanguageChoice ? "Sprache" : "Sprache (Textoptimierung)"}<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
-            ) : null}
-            {quickReadsSeed ? (
-              <label className="with-help" title={ADMIN_HELP.quickSeed}>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="leer = zufaellig" /></label>
-            ) : null}
-          </div>
-          <label className="with-help" title={ADMIN_HELP.quickText}>Text<textarea ref={quickTextRef} value={quickText} onChange={(event) => setQuickText(event.target.value)} /></label>
-          {mingEngineActive ? (
-            <div className="tag-insert" title={ADMIN_HELP.mingTags}>
-              <div className="tag-insert-row">
-                <span className="tag-insert-label">Geraeusch einfuegen</span>
-                {MING_TAGS.filter((item) => item.common).map((item) => (
-                  <button key={item.tag} className="secondary-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
-                ))}
-              </div>
-              <details className="tag-insert-more">
-                <summary>mehr Laute</summary>
-                <div className="tag-insert-row">
-                  {MING_TAGS.filter((item) => !item.common).map((item) => (
-                    <button key={item.tag} className="secondary-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
-                  ))}
-                </div>
-              </details>
-            </div>
+        <section className="panel" aria-labelledby="runtime-title">
+          <div className="panel-head"><h2 id="runtime-title">Runtime</h2></div>
+          <dl className="kv-list">
+            <div><dt>Engine</dt><dd>{activeEngine?.label ?? activeEngineId ?? "—"}</dd></div>
+            <div><dt>Default model</dt><dd className="mono">{snapshot.settings.default_model || "—"}</dd></div>
+            <div><dt>Device</dt><dd>{selectedRuntimeDeviceLabel}</dd></div>
+            <div><dt>GPU</dt><dd>{gpuText}</dd></div>
+            <div><dt>VRAM</dt><dd>{runtimeVram}</dd></div>
+            <div><dt>GPU temperature</dt><dd>{overview.gpu_temperature_c != null ? `${overview.gpu_temperature_c} °C` : "—"}</dd></div>
+            <div><dt>Output sample rate</dt><dd>{formatNumber(snapshot.settings.output_sample_rate ?? snapshot.settings.sample_rate)} Hz</dd></div>
+            <div><dt>Voices</dt><dd>{formatNumber(customVoices.length)} custom</dd></div>
+          </dl>
+        </section>
+      </div>
+    </>
+  );
+
+  const playgroundTab = (
+    <section className="panel" aria-labelledby="quick-title">
+      <div className="panel-head">
+        <h2 id="quick-title">Quick synthesis</h2>
+        <p className="hint">Streams through the public API with your admin login (no API key needed). The first sentence plays while the rest is generated.</p>
+      </div>
+      <form className="form-stack" onSubmit={(event) => { event.preventDefault(); void handleQuickRun(); }}>
+        <div className="field-grid four">
+          {selectableModels.length > 1 ? (
+            <label>Model<select value={quickModel} onChange={(event) => setQuickModel(event.target.value)}>{selectableModels.map((model) => <option key={model} value={model}>{model}</option>)}</select><span className="hint">{ADMIN_HELP.quickModel}</span></label>
           ) : null}
-          {mingEngineActive ? (
-            <>
-              <fieldset className="ming-delivery">
-                <legend>Ming-Ausdruck</legend>
-                <p className="ming-delivery-hint">Emotion und Tempo wirken am staerksten, Tonhoehe und Lautstaerke kaum. Mit Emotion nutzt &quot;auto&quot; nur das Sprecher-Embedding: mehr Ausdruck, die Stimme klingt aber etwas weniger nach der Referenz.</p>
-                <div className="ming-delivery-grid">
-                <label className="with-help" title={ADMIN_HELP.mingEmotion}>Emotion
-                  <select value={quickMingDelivery.emotion} onChange={(event) => patchQuickMingDelivery({ emotion: event.target.value as MingDeliveryDraft["emotion"] })}>
-                    <option value="">keine</option>
-                    {MING_EMOTION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                </label>
-                <label className="with-help" title={ADMIN_HELP.mingRate}>Tempo
-                  <select value={quickMingDelivery.speaking_rate} onChange={(event) => patchQuickMingDelivery({ speaking_rate: event.target.value as MingDeliveryDraft["speaking_rate"] })}>
-                    <option value="">Standard</option>
-                    {MING_RATE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                </label>
-                <label className="with-help" title={ADMIN_HELP.mingPitch}>Tonhoehe
-                  <select value={quickMingDelivery.pitch} onChange={(event) => patchQuickMingDelivery({ pitch: event.target.value as MingDeliveryDraft["pitch"] })}>
-                    <option value="">Standard</option>
-                    {MING_PITCH_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                </label>
-                <label className="with-help" title={ADMIN_HELP.mingVolume}>Lautstaerke
-                  <select value={quickMingDelivery.volume} onChange={(event) => patchQuickMingDelivery({ volume: event.target.value as MingDeliveryDraft["volume"] })}>
-                    <option value="">Standard</option>
-                    {MING_VOLUME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                </label>
-                <label className="with-help" title={ADMIN_HELP.mingReferenceMode}>Referenzmodus
-                  <select value={quickMingDelivery.reference_mode === "auto" ? "" : quickMingDelivery.reference_mode} onChange={(event) => patchQuickMingDelivery({ reference_mode: event.target.value as MingDeliveryDraft["reference_mode"] })}>
-                    <option value="">auto ({resolvedReferenceMode(quickMingDelivery) === "speaker" ? "nur Sprecher" : "voll"})</option>
-                    {REFERENCE_MODE_OPTIONS.filter((option) => option.value !== "auto").map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                  </select>
-                </label>
-                </div>
-              <label className="with-help" title={ADMIN_HELP.quickMingInstruction}>Freie Anweisung (statt Emotion/Tempo)
-                <textarea
-                  value={quickInstructions}
-                  onChange={(event) => setQuickInstructions(event.target.value)}
-                  disabled={quickMingStructured}
-                  placeholder={quickMingStructured ? "Aus, solange Emotion/Tempo/Tonhoehe/Lautstaerke gesetzt ist." : "z.B. spricht ruhig und warm, leicht laechelnd"}
-                />
-              </label>
-              {quickMingStructured && quickInstructions.trim() ? (
-                <div className="message">Die freie Anweisung wird nicht gesendet, solange Emotion, Tempo, Tonhoehe oder Lautstaerke gesetzt ist.</div>
-              ) : null}
-              {hasStructuredMingControl(quickMingDelivery) || quickMingDelivery.reference_mode || quickInstructions ? (
-                <div className="button-row">
-                  <button className="secondary-button" type="button" onClick={() => setQuickMingDelivery(EMPTY_MING_DELIVERY)} disabled={!hasStructuredMingControl(quickMingDelivery) && !quickMingDelivery.reference_mode}>Ming-Steuerung zuruecksetzen</button>
-                  <button className="secondary-button" type="button" onClick={() => setQuickInstructions("")} disabled={!quickInstructions}>Freie Anweisung leeren</button>
-                </div>
-              ) : null}
-              </fieldset>
-            </>
-          ) : quickReadsInstructions ? (
-            <label className="with-help" title={ADMIN_HELP.quickInstructions}>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} /></label>
+          <label>Voice<select value={quickVoice} onChange={(event) => handleQuickVoiceChange(event.target.value)}>{!quickVoices.length ? <option value="">No matching voice</option> : null}{quickVoices.map((voice) => <option key={voice.voice_id} value={voice.source === "custom" ? voice.voice_id : voice.name}>{voice.name} ({voice.source})</option>)}</select><span className="hint">{ADMIN_HELP.quickVoice}</span></label>
+          {quickReadsLanguage ? (
+            <label>{quickHasLanguageChoice ? "Language" : "Language (text optimization)"}<select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value)}>{SYNTH_LANGUAGE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}</select><span className="hint">{quickHasLanguageChoice ? ADMIN_HELP.quickLanguage : ADMIN_HELP.quickLanguageTextOnly}</span></label>
           ) : null}
-          <label className="with-help" title={ADMIN_HELP.quickTextOptimization}>Textoptimierung<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
-            <option value="">Server-Default ({snapshot?.settings.text_optimization_default ?? "off"})</option>
+          {quickReadsSeed ? (
+            <label>Seed<input type="number" min="0" max="2147483647" value={quickSeed} onChange={(event) => setQuickSeed(event.target.value)} placeholder="Empty = random" /><span className="hint">{ADMIN_HELP.quickSeed}</span></label>
+          ) : null}
+          <label>Text optimization<select value={quickTextOptimization} onChange={(event) => setQuickTextOptimization(event.target.value as "" | TextOptimizationMode)}>
+            <option value="">Server default ({snapshot.settings.text_optimization_default ?? "off"})</option>
             <option value="off">off</option>
             <option value="deterministic">deterministic</option>
           </select></label>
-          <div className="button-row">
-            <button className="primary-button" type="button" onClick={handleQuickRun}>{quickRunning ? "Stoppen" : "Stream starten"}</button>
-            <button className="secondary-button" type="button" title={ADMIN_HELP.quickTextOptimization} onClick={() => void handleQuickOptimizePreview()}>Text-Vorschau</button>
-          </div>
-          {quickNote ? <div className={`message ${quickNote.error ? "error" : "success"}`} role="status">{quickNote.text}</div> : null}
-          {quickOptimizePreview ? (
-            <div className="metric-list" title="Gesprochener Text nach der Textoptimierung">
-              <div className="metric-row"><span>Sprache</span><strong>{quickOptimizePreview.language ?? "keine"} ({quickOptimizePreview.binding_origin})</strong></div>
-              <div className="metric-row"><span>Regeln</span><strong>{quickOptimizePreview.applied_rules.length ? quickOptimizePreview.applied_rules.join(", ") : "keine"}</strong></div>
-              <p style={{ whiteSpace: "pre-wrap", margin: "6px 0 0" }}>{quickOptimizePreview.text}</p>
+        </div>
+        <label>Text<textarea ref={quickTextRef} value={quickText} onChange={(event) => setQuickText(event.target.value)} /><span className="hint">{ADMIN_HELP.quickText}</span></label>
+        {mingEngineActive ? (
+          <div className="tag-insert">
+            <div className="button-row">
+              <span className="card-label">Insert sound</span>
+              {MING_TAGS.filter((item) => item.common).map((item) => (
+                <button key={item.tag} className="secondary-button small-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
+              ))}
             </div>
-          ) : null}
-          {quickAudioUrl ? (
-            <>
-              <audio controls src={quickAudioUrl} />
+            <details>
+              <summary className="dim">More sounds</summary>
               <div className="button-row">
-                <a className="secondary-button" href={quickAudioUrl} download={quickAudioDownloadName}>
-                  {quickAudioDownloadName.endsWith(".mp3") ? "MP3 herunterladen" : "WAV herunterladen"}
-                </a>
+                {MING_TAGS.filter((item) => !item.common).map((item) => (
+                  <button key={item.tag} className="secondary-button small-button" type="button" title={item.tag} onClick={() => insertQuickTag(item.tag)}>{item.label}</button>
+                ))}
               </div>
-            </>
-          ) : null}
-          {quickMetrics ? <div className="metric-list"><div className="metric-row"><span>TTFA</span><strong>{formatMs(quickMetrics.ttfa_ms)}</strong></div><div className="metric-row"><span>Realtime</span><strong>{formatRealtime(quickMetrics.realtime_x)}</strong></div><div className="metric-row"><span>Duration</span><strong>{formatSeconds((quickMetrics.audio_duration_ms || 0) / 1000)}</strong></div></div> : null}
-        </section>
-
-        <section className="widget span-6"><div className="widget-header"><h2>Voice Library</h2></div>
-          {activeEngine?.uses_voice_profiles ? (
-            <div className="field-grid">
-              <label className="with-help" title={ADMIN_HELP.voiceName}>Name<input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} /></label>
-              <label className="with-help" title={ADMIN_HELP.voiceRefText}>Referenztext<textarea value={voiceRefText} onChange={(event) => setVoiceRefText(event.target.value)} /></label>
-              <label className="with-help" title={ADMIN_HELP.voiceSample}>Sample<input type="file" accept="audio/*" onChange={(event) => handleVoiceFileChange(event.target.files?.[0] ?? null)} /></label>
-              <div className="voice-consent-preview">
-                <label className="checkbox-row with-help" title={ADMIN_HELP.voiceConsent}><input type="checkbox" checked={voiceConsent} onChange={(event) => setVoiceConsent(event.target.checked)} />Zustimmung bestaetigt</label>
-                {voiceUploadPreviewUrl ? <audio className="inline-audio" controls src={voiceUploadPreviewUrl} /> : null}
-              </div>
-              <div className="button-row"><button className="secondary-button" type="button" onClick={() => void handleTranscribeVoice()} disabled={!voiceFile || voiceTranscribing} title={ADMIN_HELP.transcribeSample}>{voiceTranscribing ? "Transkribiere..." : "Mit Whisper transkribieren"}</button><button className="primary-button" type="button" onClick={handleUploadVoice}>Voice speichern</button></div>
+            </details>
+            <p className="hint">{ADMIN_HELP.mingTags}</p>
+          </div>
+        ) : null}
+        {mingEngineActive ? (
+          <fieldset className="choice-group">
+            <legend>Ming delivery</legend>
+            <p className="hint">Emotion and rate have the strongest effect, pitch and volume hardly any. With an emotion, "auto" uses only the speaker embedding: more expression, but the voice sounds a little less like the reference.</p>
+            <div className="field-grid four">
+              <label>Emotion
+                <select value={quickMingDelivery.emotion} onChange={(event) => patchQuickMingDelivery({ emotion: event.target.value as MingDeliveryDraft["emotion"] })}>
+                  <option value="">none</option>
+                  {MING_EMOTION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <span className="hint">{ADMIN_HELP.mingEmotion}</span>
+              </label>
+              <label>Rate
+                <select value={quickMingDelivery.speaking_rate} onChange={(event) => patchQuickMingDelivery({ speaking_rate: event.target.value as MingDeliveryDraft["speaking_rate"] })}>
+                  <option value="">default</option>
+                  {MING_RATE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <span className="hint">{ADMIN_HELP.mingRate}</span>
+              </label>
+              <label>Pitch
+                <select value={quickMingDelivery.pitch} onChange={(event) => patchQuickMingDelivery({ pitch: event.target.value as MingDeliveryDraft["pitch"] })}>
+                  <option value="">default</option>
+                  {MING_PITCH_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <span className="hint">{ADMIN_HELP.mingPitch}</span>
+              </label>
+              <label>Volume
+                <select value={quickMingDelivery.volume} onChange={(event) => patchQuickMingDelivery({ volume: event.target.value as MingDeliveryDraft["volume"] })}>
+                  <option value="">default</option>
+                  {MING_VOLUME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <span className="hint">{ADMIN_HELP.mingVolume}</span>
+              </label>
+              <label>Reference mode
+                <select value={quickMingDelivery.reference_mode === "auto" ? "" : quickMingDelivery.reference_mode} onChange={(event) => patchQuickMingDelivery({ reference_mode: event.target.value as MingDeliveryDraft["reference_mode"] })}>
+                  <option value="">auto ({resolvedReferenceMode(quickMingDelivery) === "speaker" ? "speaker only" : "full"})</option>
+                  {REFERENCE_MODE_OPTIONS.filter((option) => option.value !== "auto").map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+                <span className="hint">{ADMIN_HELP.mingReferenceMode}</span>
+              </label>
             </div>
-          ) : null}
-          <div className="voice-list">
-            {libraryVoices.length === 0 ? <p className="widget-copy">{activeEngine && !activeEngine.uses_voice_profiles ? "Dieses Modell nutzt keine Stimmprofile." : "Noch keine Custom Voices gespeichert."}</p> : null}
-            {libraryVoices.map((voice) => (
-              <article key={voice.voice_id} className="voice-card">
+            <label>Free instruction (instead of emotion and rate)
+              <textarea
+                value={quickInstructions}
+                onChange={(event) => setQuickInstructions(event.target.value)}
+                disabled={quickMingStructured}
+                placeholder={quickMingStructured ? "Off while emotion, rate, pitch or volume is set." : "For example: speaks calmly and warmly, slightly smiling"}
+              />
+              <span className="hint">{ADMIN_HELP.quickMingInstruction}</span>
+            </label>
+            {quickMingStructured && quickInstructions.trim() ? (
+              <div className="banner info">The free instruction is not sent while emotion, rate, pitch or volume is set.</div>
+            ) : null}
+            {hasStructuredMingControl(quickMingDelivery) || quickMingDelivery.reference_mode || quickInstructions ? (
+              <div className="button-row">
+                <button className="ghost-button" type="button" onClick={() => setQuickMingDelivery(EMPTY_MING_DELIVERY)} disabled={!hasStructuredMingControl(quickMingDelivery) && !quickMingDelivery.reference_mode}>Reset Ming controls</button>
+                <button className="ghost-button" type="button" onClick={() => setQuickInstructions("")} disabled={!quickInstructions}>Clear free instruction</button>
+              </div>
+            ) : null}
+          </fieldset>
+        ) : quickReadsInstructions ? (
+          <label>Instructions<textarea value={quickInstructions} onChange={(event) => setQuickInstructions(event.target.value)} /><span className="hint">{ADMIN_HELP.quickInstructions}</span></label>
+        ) : null}
+        <p className="hint">{ADMIN_HELP.quickTextOptimization}</p>
+        <div className="button-row">
+          <button type="submit" className={quickRunning ? "danger-button" : undefined}>{quickRunning ? "Stop" : "Run synthesis"}</button>
+          <button className="secondary-button" type="button" onClick={() => void handleQuickOptimizePreview()}>Preview text</button>
+        </div>
+      </form>
+      {quickNote ? <div className={`banner ${quickNote.error ? "danger" : "info"}`} role="status">{quickNote.text}</div> : null}
+      {quickOptimizePreview ? (
+        <div className="card">
+          <span className="card-label">Spoken text after text optimization</span>
+          <dl className="kv-list">
+            <div><dt>Language</dt><dd>{quickOptimizePreview.language ?? "none"} ({quickOptimizePreview.binding_origin})</dd></div>
+            <div><dt>Rules</dt><dd>{quickOptimizePreview.applied_rules.length ? quickOptimizePreview.applied_rules.join(", ") : "none"}</dd></div>
+          </dl>
+          <p className="preview-text">{quickOptimizePreview.text}</p>
+        </div>
+      ) : null}
+      {quickAudioUrl ? (
+        <div className="button-row audio-row">
+          <audio controls src={quickAudioUrl} />
+          <a className="button-link secondary" href={quickAudioUrl} download={quickAudioDownloadName}>
+            {quickAudioDownloadName.endsWith(".mp3") ? "Download MP3" : "Download WAV"}
+          </a>
+        </div>
+      ) : null}
+      {quickMetrics ? (
+        <div className="grid grid-auto">
+          <div className="card"><span className="card-label">TTFA</span><span className="card-value">{formatMs(quickMetrics.ttfa_ms)}</span></div>
+          <div className="card"><span className="card-label">Realtime factor</span><span className="card-value">{formatRealtime(quickMetrics.realtime_x)}</span></div>
+          <div className="card"><span className="card-label">Audio</span><span className="card-value">{formatSeconds((quickMetrics.audio_duration_ms || 0) / 1000)}</span></div>
+        </div>
+      ) : null}
+    </section>
+  );
+
+  const voicesTab = (
+    <div className="grid grid-2 tab-grid">
+      {activeEngine?.uses_voice_profiles ? (
+        <section className="panel" aria-labelledby="voice-add-title">
+          <div className="panel-head"><h2 id="voice-add-title">Add voice</h2></div>
+          <form className="form-stack" onSubmit={(event) => void handleUploadVoice(event)}>
+            <label>Name<input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} required /><span className="hint">{ADMIN_HELP.voiceName}</span></label>
+            <label>Sample<input type="file" accept="audio/*" onChange={(event) => handleVoiceFileChange(event.target.files?.[0] ?? null)} /><span className="hint">{ADMIN_HELP.voiceSample}</span></label>
+            {voiceUploadPreviewUrl ? <audio controls src={voiceUploadPreviewUrl} /> : null}
+            <label>Reference text<textarea value={voiceRefText} onChange={(event) => setVoiceRefText(event.target.value)} /><span className="hint">{ADMIN_HELP.voiceRefText}</span></label>
+            <label className="checkbox-row"><input type="checkbox" checked={voiceConsent} onChange={(event) => setVoiceConsent(event.target.checked)} /><span className="checkbox-text">Consent confirmed<span className="hint">{ADMIN_HELP.voiceConsent}</span></span></label>
+            <div className="button-row">
+              <button type="submit" disabled={!voiceFile || !voiceName.trim()}>Save voice</button>
+              <button className="secondary-button" type="button" onClick={() => void handleTranscribeVoice()} disabled={!voiceFile || voiceTranscribing} aria-busy={voiceTranscribing} title={ADMIN_HELP.transcribeSample}>{voiceTranscribing ? "Transcribing…" : "Transcribe with Whisper"}</button>
+            </div>
+          </form>
+        </section>
+      ) : null}
+      <section className={`panel ${activeEngine?.uses_voice_profiles ? "" : "span-all"}`} aria-labelledby="voice-lib-title">
+        <div className="panel-head">
+          <h2 id="voice-lib-title">Voice library</h2>
+          <p className="hint">{ADMIN_HELP.voiceSeed}</p>
+        </div>
+        {libraryVoices.length === 0 ? (
+          <div className="state">{activeEngine && !activeEngine.uses_voice_profiles ? "This model uses no voice profiles." : "No custom voices yet. Add one with a short, clean sample."}</div>
+        ) : null}
+        <div className="voice-list">
+          {libraryVoices.map((voice) => {
+            const engine = SEED_ENGINES.find((item) => item.id === activeSeedEngine) ?? SEED_ENGINES[0];
+            const editKey = `${voice.voice_id}:${engine.id}`;
+            return (
+              <article key={voice.voice_id} className="card voice-card">
                 <div className="voice-card-head">
-                  <div className="voice-card-title">
-                    <strong>{voice.name}</strong>
-                    <div className="inline-pills">
-                      <span className="pill">{voice.source}</span>
-                      <span className="pill">{formatDate(voice.created_at)}</span>
-                      <span className="pill">{voice.filename || (voice.has_audio ? `${voice.voice_id}.wav` : "-")}</span>
-                    </div>
+                  <div>
+                    <h3>{voice.name}</h3>
+                    <p className="hint">{voice.source} · {formatDate(voice.created_at)} · <span className="mono">{voice.filename || (voice.has_audio ? `${voice.voice_id}.wav` : "—")}</span></p>
                   </div>
-                  <div className="voice-card-buttons">
-                    <button className="secondary-button" type="button" disabled={!voice.has_audio} onClick={() => void handleLoadVoiceSample(voice.voice_id)}>
-                      Original
-                    </button>
-                    <button className="ghost-button danger-button" type="button" onClick={() => void handleDeleteVoice(voice.voice_id)}>Delete</button>
+                  <div className="button-row">
+                    <button className="secondary-button small-button" type="button" disabled={!voice.has_audio} onClick={() => void handleLoadVoiceSample(voice.voice_id)}>Play sample</button>
+                    <button className="danger-button small-button" type="button" onClick={() => void handleDeleteVoice(voice)}>Delete</button>
                   </div>
                 </div>
-                <div className="voice-ref-text">
-                  <span>Referenztext</span>
-                  <p>{voice.ref_text || "-"}</p>
-                </div>
-                <div className="voice-seed-list">
-                  {SEED_ENGINES.filter((engine) => engine.id === activeSeedEngine).map((engine) => {
-                    const editKey = `${voice.voice_id}:${engine.id}`;
-                    return (
-                      <div key={engine.id} className="voice-seed-row">
-                        <label className="with-help" title={ADMIN_HELP.voiceSeed}>Bester Seed {engine.label}
-                          <input
-                            type="number"
-                            min="0"
-                            max="2147483647"
-                            placeholder="kein Seed"
-                            value={voiceSeedEdits[editKey] ?? (voiceEngineSeed(voice, engine.id) ?? "")}
-                            onChange={(event) => setVoiceSeedEdits((current) => ({ ...current, [editKey]: event.target.value }))}
-                          />
-                        </label>
-                        <button className="secondary-button" type="button" onClick={() => void handleSaveVoiceSeed(voice, engine.id)}>Seed speichern</button>
-                      </div>
-                    );
-                  })}
-                </div>
+                <p className="voice-ref-text"><span className="card-label">Reference text</span> {voice.ref_text || "—"}</p>
+                <form className="button-row" onSubmit={(event) => { event.preventDefault(); void handleSaveVoiceSeed(voice, engine.id); }}>
+                  <label className="inline-field">Best {engine.label} seed
+                    <input
+                      type="number"
+                      min="0"
+                      max="2147483647"
+                      placeholder="No seed"
+                      value={voiceSeedEdits[editKey] ?? (voiceEngineSeed(voice, engine.id) ?? "")}
+                      onChange={(event) => setVoiceSeedEdits((current) => ({ ...current, [editKey]: event.target.value }))}
+                    />
+                  </label>
+                  <button className="secondary-button small-button" type="submit">Save seed</button>
+                </form>
                 {voiceAudioUrls[voice.voice_id] ? <audio controls src={voiceAudioUrls[voice.voice_id]} /> : null}
               </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="widget span-12"><div className="widget-header"><h2>History</h2></div>
-          <div className="job-list">{snapshot.jobs.map((job) => <article key={job.job_id} className="job-card"><strong>{job.input_preview}</strong><div className="inline-pills"><span className={`pill ${job.status === "completed" ? "active" : ""}`}>{job.status}</span><span className="pill">{job.model || "-"}</span><span className="pill">{job.voice || "-"}</span><span className="pill">{formatMs(job.metrics.ttfa_ms)}</span></div><div className="button-row">{job.status === "completed" ? <button className="secondary-button" type="button" onClick={() => void handleLoadJobAudio(job.job_id)}>MP3</button> : null}<button className="ghost-button" type="button" onClick={() => void handleDeleteJob(job.job_id)}>{job.status === "completed" ? "Entfernen" : "Stornieren"}</button></div>{jobAudioUrls[job.job_id] ? <><audio controls src={jobAudioUrls[job.job_id]} /><div className="button-row"><a className="secondary-button" href={jobAudioUrls[job.job_id]} download={`${job.job_id}.mp3`}>MP3 herunterladen</a></div></> : null}</article>)}</div>
-        </section>
+            );
+          })}
+        </div>
       </section>
+    </div>
+  );
+
+  const modelsTab = (
+    <>
+      {engineList ? (
+        <ModelPicker
+          list={engineList}
+          target={engineTarget || engineList.active}
+          switchRunning={engineSwitchRunning}
+          downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
+          onSelect={setEngineTarget}
+          onLoad={(engineId) => void handleEngineSwitch(engineId)}
+          onDownload={(engine: EngineInfo) => void startModelDownload(engine.id, { engine: engine.id })}
+          onRefresh={() => void loadEngines(adminKey)}
+        />
+      ) : (
+        <section className="panel"><div className="state"><span className="spinner" />Loading engines…</div></section>
+      )}
+      {activeEngine ? (
+        <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+          <ActiveModelPanel
+            engine={activeEngine}
+            snapshot={snapshot}
+            selectedModel={settingsDraft.default_model}
+            download={modelDownloads.find((download) => download.id === settingsDraft.default_model)}
+            deviceLabel={selectedRuntimeDeviceLabel}
+            busy={modelOpsBusy || modelDownloadAction?.kind === "delete"}
+            memoryBusy={memoryCleanupBusy}
+            cacheRefreshing={modelDownloadAction?.kind === "refresh"}
+            downloadingId={modelDownloadAction?.kind === "download" ? modelDownloadAction.modelId : null}
+            onPickModel={patchDefaultModel}
+            onSetDefault={(modelId) => void handleSetOpsModelAsDefault(modelId)}
+            onOperation={(kind) => void handleModelOperation(kind)}
+            onDownload={(modelId) => void startModelDownload(modelId, { model_id: modelId })}
+            onDelete={(modelId) => void handleModelDelete(modelId)}
+            onRefreshCache={() => void handleModelDownloadRefresh()}
+            onFreeMemory={() => void handleFreeMemory()}
+          />
+        </fieldset>
       ) : null}
-    </main>
+    </>
+  );
+
+  const settingsTab = (
+    <div className="settings-tab">
+      <section className="panel" aria-labelledby="presets-title">
+        <div className="panel-head">
+          <h2 id="presets-title">Presets{activeEngine ? ` · ${activeEngine.label}` : ""}</h2>
+          <p className="hint">Loading a preset only fills the form below; nothing changes until you click "Save changes".</p>
+        </div>
+        <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+          <div className="button-row">
+            <label className="inline-field grow">Preset
+              <select value={selectedPreset ? selectedPreset.name : ""} onChange={(event) => setPresetName(event.target.value)}>
+                <option value="">{enginePresets.length ? "Choose a preset" : "No presets for this model"}</option>
+                {enginePresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}{preset.built_in ? " (built-in)" : ""}</option>)}
+              </select>
+            </label>
+            <button className="secondary-button" type="button" onClick={() => selectedPreset && handleApplyPreset(selectedPreset.name)} disabled={!selectedPreset}>Load into form</button>
+            <button className="danger-button" type="button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || Boolean(selectedPreset.built_in)} title={selectedPreset?.built_in ? "Built-in presets cannot be deleted." : undefined}>Delete</button>
+            {selectedPreset?.built_in ? <span className="badge info">Built-in</span> : null}
+            {selectedPreset?.note ? <span className="badge warn">No matching GPU</span> : null}
+          </div>
+          {selectedPreset?.description || selectedPreset?.note ? (
+            <p className="hint">{[selectedPreset.description, selectedPreset.note].filter(Boolean).join(" ")}</p>
+          ) : null}
+          <form className="button-row" onSubmit={(event) => void handleSavePreset(event)}>
+            <label className="inline-field grow">Save as<input value={presetSaveName} onChange={(event) => setPresetSaveName(event.target.value)} placeholder="New preset name" /></label>
+            <button className="secondary-button" type="submit" disabled={!presetSaveName.trim() || !activeEngine}>Save as preset</button>
+          </form>
+        </fieldset>
+      </section>
+
+      <section className="panel" aria-labelledby="engine-settings-title">
+        <div className="panel-head"><h2 id="engine-settings-title">Engine settings{activeEngine ? ` · ${activeEngine.label}` : ""}</h2></div>
+        <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+          {activeEngine ? (
+            <SettingsFields fields={activeEngine.settings_fields} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
+          ) : (
+            <div className="state"><span className="spinner" />Loading engine…</div>
+          )}
+          {activeEngine?.settings_fields.includes("preferred_device") ? (
+            <div className="button-row">
+              <button className="secondary-button small-button" type="button" title={ADMIN_HELP.refreshRuntimeDevices} onClick={() => void loadRuntimeDevices(adminKey)}>Reload GPU list</button>
+              <span className={`badge ${runtimeDeviceOptions.some((device) => device.id === settingsDraft.preferred_device && device.available) ? "ok" : "warn"}`}>{selectedRuntimeDeviceLabel}</span>
+            </div>
+          ) : null}
+        </fieldset>
+      </section>
+
+      <section className="panel" aria-labelledby="server-settings-title">
+        <div className="panel-head"><h2 id="server-settings-title">Server-wide settings</h2></div>
+        <fieldset className="switch-lock" disabled={engineSwitchRunning}>
+          <SettingsFields fields={engineList?.server_settings_fields ?? []} draft={settingsDraft} context={settingsFieldContext} onPatch={patchDraft} />
+          <div className="button-row">
+            <button className="secondary-button small-button" type="button" title={ADMIN_HELP.refreshVllmModels} onClick={() => void loadVllmModels(adminKey, settingsDraft.vllm_base_url)} disabled={vllmModelsLoading} aria-busy={vllmModelsLoading}>{vllmModelsLoading ? "Loading…" : "Reload vLLM models"}</button>
+            <span className={`badge ${vllmModels.length ? "ok" : "plain"}`}>{vllmModels.length ? `${vllmModels.length} vLLM model${vllmModels.length === 1 ? "" : "s"}` : "No vLLM models"}</span>
+            {vllmModelsError ? <span className="badge danger" title={vllmModelsError}>vLLM error</span> : null}
+          </div>
+          {vllmModelsError ? <p className="field-error">{vllmModelsError}</p> : null}
+        </fieldset>
+      </section>
+
+      <div className={`save-bar ${settingsDirty.length ? "dirty" : ""}`} role="region" aria-label="Unsaved settings">
+        <span className="save-bar-text">
+          {settingsDirty.length
+            ? `${settingsDirty.length} unsaved change${settingsDirty.length === 1 ? "" : "s"}`
+            : "All changes saved"}
+          {settingsDirty.length ? <span className="hint"> · {settingsDirty.slice(0, 4).join(", ")}{settingsDirty.length > 4 ? ", …" : ""}</span> : null}
+        </span>
+        <span className="button-row">
+          <button className="ghost-button" type="button" disabled={!settingsDirty.length || settingsSaving} onClick={() => { setSettingsDraft(savedSettings); setDefaultModelPicked(false); }}>Discard</button>
+          <button className="secondary-button" type="button" disabled={settingsSaving} onClick={() => void loadSnapshot(adminKey, true).catch((reloadError) => setError(`Could not reload settings: ${errorText(reloadError, "unknown error")}`))}>Reload</button>
+          <button type="button" disabled={!settingsDirty.length || settingsSaving || engineSwitchRunning} aria-busy={settingsSaving} onClick={() => void handleSaveSettings()}>{settingsSaving ? "Saving…" : "Save changes"}</button>
+        </span>
+      </div>
+    </div>
+  );
+
+  const benchmarkTab = (
+    <div className="grid grid-2 tab-grid">
+      <section className="panel" aria-labelledby="bench-title">
+        <div className="panel-head">
+          <h2 id="bench-title">Benchmark</h2>
+          <p className="hint">Runs exclusively: other requests wait while it measures. Uses the saved default model and voice.</p>
+        </div>
+        <form className="form-stack" onSubmit={(event) => { event.preventDefault(); void handleBenchmarkRun(); }}>
+          <label>Mode<select value={benchmarkMode} onChange={(event) => setBenchmarkMode(event.target.value as "traffic" | "iterations")}>
+            <option value="traffic">Traffic simulation</option>
+            <option value="iterations">Fixed iterations</option>
+          </select><span className="hint">{ADMIN_HELP.benchmarkMode}</span></label>
+          <label>Sentence pool<textarea value={benchmarkText} onChange={(event) => setBenchmarkText(event.target.value)} /><span className="hint">{ADMIN_HELP.benchmarkText}</span></label>
+          <div className="field-grid two">
+            <label>Duration (s)<input type="number" min="1" max="3600" value={benchmarkDuration} onChange={(event) => setBenchmarkDuration(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.benchmarkDuration}</span></label>
+            <label>Requests per minute<input type="number" min="1" max="6000" value={benchmarkRequestsPerMinute} onChange={(event) => setBenchmarkRequestsPerMinute(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.benchmarkRpm}</span></label>
+            <label>Min sentences<input type="number" min="1" max="100" value={benchmarkMinSentences} onChange={(event) => setBenchmarkMinSentences(Number(event.target.value) || 1)} /></label>
+            <label>Max sentences<input type="number" min="1" max="100" value={benchmarkMaxSentences} onChange={(event) => setBenchmarkMaxSentences(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.benchmarkSentenceRange}</span></label>
+            <label>Warmups<input type="number" min="0" max="20" value={benchmarkWarmups} onChange={(event) => setBenchmarkWarmups(Number(event.target.value) || 0)} /><span className="hint">{ADMIN_HELP.benchmarkWarmups}</span></label>
+            <label>Seed<input type="number" min="0" max="2147483647" value={benchmarkSeed} onChange={(event) => setBenchmarkSeed(event.target.value)} placeholder="Empty = random" /><span className="hint">{ADMIN_HELP.benchmarkSeed}</span></label>
+            {benchmarkMode === "iterations" ? (
+              <>
+                <label>Iterations<input type="number" min="1" max="50" value={benchmarkIterations} onChange={(event) => setBenchmarkIterations(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.benchmarkIterations}</span></label>
+                <label>Parallel<input type="number" min="1" max="64" value={benchmarkParallel} onChange={(event) => setBenchmarkParallel(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.benchmarkParallel}</span></label>
+              </>
+            ) : null}
+          </div>
+          <div className="button-row"><button type="submit" disabled={benchmarkBusy} aria-busy={benchmarkBusy}>{benchmarkBusy ? "Starting…" : "Run benchmark"}</button></div>
+        </form>
+        {benchmarks.length === 0 ? <div className="state">No benchmark runs yet.</div> : null}
+        {benchmarks.map((run) => (
+          <article key={run.run_id} className="card">
+            <div className="voice-card-head">
+              <h3>{run.name}</h3>
+              <span className={`badge ${run.status === "completed" ? "ok" : run.status === "failed" ? "danger" : "warn"}`}>{run.status}</span>
+            </div>
+            <p className="hint">{run.mode} · {run.total_requests || run.iterations} requests · {run.duration_seconds} s window · {run.requests_per_minute}/min · {run.completion_timeout_seconds || 180} s timeout · {run.warmup_iterations} warmup</p>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Case</th><th className="num">OK</th><th className="num">TTFA avg / p99</th><th className="num">TTFA best / worst</th><th className="num">Job p50 / p99</th><th className="num">Queue p95 / p99</th><th className="num">Realtime</th></tr></thead>
+                <tbody>
+                  {run.cases.map((item) => (
+                    <tr key={item.label}>
+                      <td className="wrap-cell">{item.label}</td>
+                      <td className="num">{item.success_count}/{item.success_count + item.failure_count}</td>
+                      <td className="num">{formatMs(item.ttfa_ms_avg)} / {formatMs(item.ttfa_ms_p99)}</td>
+                      <td className="num">{formatMs(item.ttfa_ms_min)} / {formatMs(item.ttfa_ms_max)}</td>
+                      <td className="num">{formatMs(item.job_wall_ms_p50)} / {formatMs(item.job_wall_ms_p99)}</td>
+                      <td className="num">{formatMs(item.queue_wait_ms_p95)} / {formatMs(item.queue_wait_ms_p99)}</td>
+                      <td className="num">{formatRealtime(item.realtime_x_avg)}</td>
+                    </tr>
+                  ))}
+                  {!run.cases.length ? <tr><td colSpan={7} className="empty">No results yet.</td></tr> : null}
+                </tbody>
+              </table>
+            </div>
+          </article>
+        ))}
+      </section>
+
+      <section className="panel" aria-labelledby="wer-title">
+        <div className="panel-head">
+          <h2 id="wer-title">WER benchmark</h2>
+          <p className="hint">vLLM writes sentences, the active engine speaks them, G3 Whisper transcribes them back; the word error rate compares both.</p>
+        </div>
+        <dl className="kv-list">
+          <div><dt>vLLM</dt><dd className="mono">{settingsDraft.vllm_model || "auto"} @ {settingsDraft.vllm_base_url || "—"}</dd></div>
+          <div><dt>Whisper</dt><dd className="mono">{settingsDraft.whisper_base_url || "—"}</dd></div>
+          <div><dt>TTS / ASR concurrency</dt><dd>{settingsDraft.wer_concurrency} / {settingsDraft.wer_transcription_concurrency}</dd></div>
+        </dl>
+        <form className="form-stack" onSubmit={(event) => { event.preventDefault(); void handleWerBenchmarkRun(); }}>
+          <div className="field-grid two">
+            <label>Samples<input type="number" min="1" max="1000" value={werCount} onChange={(event) => setWerCount(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.werCount}</span></label>
+            <label>Language<select value={werLanguage} onChange={(event) => setWerLanguage(event.target.value)}>
+              {WER_LANGUAGE_OPTIONS.map((language) => <option key={language} value={language}>{language}</option>)}
+            </select><span className="hint">{ADMIN_HELP.werLanguage}</span></label>
+            <label>Min words<input type="number" min="1" max="80" value={werMinWords} onChange={(event) => setWerMinWords(Number(event.target.value) || 1)} /></label>
+            <label>Max words<input type="number" min="1" max="120" value={werMaxWords} onChange={(event) => setWerMaxWords(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.werWords}</span></label>
+            <label>Tolerance (letters)<input type="number" min="0" max="8" value={werTolerance} onChange={(event) => setWerTolerance(Number(event.target.value) || 0)} /><span className="hint">{ADMIN_HELP.werTolerance}</span></label>
+            <label>Timeout (s)<input type="number" min="1" max="3600" value={werTimeout} onChange={(event) => setWerTimeout(Number(event.target.value) || 1)} /><span className="hint">{ADMIN_HELP.werTimeout}</span></label>
+            <label>Voice<select value={werVoice} onChange={(event) => setWerVoice(event.target.value)}>
+              <option value="">Default voice from the settings</option>
+              {customVoices.map((voice) => {
+                const seed = voiceEngineSeed(voice, activeSeedEngine);
+                return <option key={voice.voice_id} value={voice.voice_id}>{voice.name}{seed != null ? ` (best ${seedEngineLabel(activeSeedEngine)} seed ${seed})` : ` (no ${seedEngineLabel(activeSeedEngine)} seed)`}</option>;
+              })}
+            </select><span className="hint">{ADMIN_HELP.werVoice}</span></label>
+            <label>Seed<input type="text" value={werSeed} onChange={(event) => setWerSeed(event.target.value)} placeholder="Empty = voice's best seed" /><span className="hint">{ADMIN_HELP.werSeed}</span></label>
+            <label>Seed range<input type="number" min="0" max="1024" value={werSeedRange} onChange={(event) => setWerSeedRange(Number(event.target.value) || 0)} /><span className="hint">{ADMIN_HELP.werSeedRange}</span></label>
+          </div>
+          <label>Custom vLLM prompt<textarea value={werPrompt} onChange={(event) => setWerPrompt(event.target.value)} placeholder="Empty = the built-in JSON sentence generator" /><span className="hint">{ADMIN_HELP.werPrompt}</span></label>
+          <div className="button-row"><button type="submit" disabled={werBenchmarkBusy} aria-busy={werBenchmarkBusy}>{werBenchmarkBusy ? "Starting…" : "Run WER benchmark"}</button></div>
+        </form>
+        {werBenchmarks.length === 0 ? <div className="state">No WER benchmark runs yet.</div> : null}
+        {werBenchmarks.map((run) => (
+          <article key={run.run_id} className="card">
+            <div className="voice-card-head">
+              <h3>{run.name}</h3>
+              <span className={`badge ${run.status === "completed" ? "ok" : run.status === "failed" ? "danger" : "warn"}`}>{run.status}</span>
+            </div>
+            <p className="hint">
+              {run.summary.completed}/{run.summary.total} done · {run.sentence_cache_hit ? "cached sentences" : "new sentences"}
+              {run.fallback_sentence_count ? ` · ${run.fallback_sentence_count} template sentences (the LLM returned too few)` : ""}
+              {" · voice "}{run.voice ? voices.find((voice) => voice.voice_id === run.voice)?.name ?? run.voice : `default${werRunVoice(run) ? ` (${werRunVoice(run)?.name})` : ""}`}
+              {" · engine "}{seedEngineLabel(run.engine)}
+            </p>
+            <div className="grid grid-auto">
+              <div className="card"><span className="card-label">WER average</span><span className="card-value">{formatPercent(run.summary.wer_avg)}</span></div>
+              <div className="card"><span className="card-label">Median</span><span className="card-value">{formatPercent(run.summary.wer_p50)}</span></div>
+              <div className="card"><span className="card-label">p95</span><span className="card-value">{formatPercent(run.summary.wer_p95)}</span></div>
+              <div className="card"><span className="card-label">Worst</span><span className="card-value">{formatPercent(run.summary.wer_max)}</span></div>
+              <div className="card"><span className="card-label">Exact</span><span className="card-value">{formatPercent(run.summary.exact_rate)}</span></div>
+              {run.summary.failure_count > 0 ? <div className="card"><span className="card-label">OK / failed</span><span className="card-value">{run.summary.success_count} / {run.summary.failure_count}</span></div> : null}
+            </div>
+            {isRunActive(run.status) ? (
+              <div className="button-row">
+                <button className="danger-button" type="button" disabled={werCancelling === run.run_id} aria-busy={werCancelling === run.run_id} onClick={() => void handleCancelWerBenchmark(run.run_id)} title={ADMIN_HELP.werCancel}>
+                  {werCancelling === run.run_id ? "Stopping…" : "Stop WER benchmark"}
+                </button>
+              </div>
+            ) : null}
+            {run.seed_leaderboard.length > 1 ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="num">#</th>
+                      <th className="num">Seed</th>
+                      <th className="num">WER avg</th>
+                      <th className="num">Median</th>
+                      <th className="num">Worst</th>
+                      {run.seed_leaderboard.some((item) => item.failure_count > 0) ? <th className="num">Failed</th> : null}
+                      <th className="actions">Best seed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {run.seed_leaderboard.map((item, index) => (
+                      <tr key={item.seed ?? "random"}>
+                        <td className="num">{index + 1}</td>
+                        <td className="num">{item.seed ?? "random"}</td>
+                        <td className="num">{formatPercent(item.wer_avg)}</td>
+                        <td className="num">{formatPercent(item.wer_p50)}</td>
+                        <td className="num">{formatPercent(item.wer_max)}</td>
+                        {run.seed_leaderboard.some((entry) => entry.failure_count > 0) ? <td className="num">{item.failure_count}</td> : null}
+                        <td className="actions">{renderSaveSeedCell(run, item.seed)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            <details open={deviationsFor(run.run_id).items.length > 0 && deviationsFor(run.run_id).items.length <= 5}>
+              <summary className="dim">Deviations ({deviationsFor(run.run_id).items.length}/{deviationsFor(run.run_id).total}, worst first)</summary>
+              {werDeviations?.runId === run.run_id && werDeviations.items.length === 0 ? <div className="state">No WER deviations in this run.</div> : null}
+              <div className="wer-sample-list">
+                {deviationsFor(run.run_id).items.map((item) => (
+                  <div key={`${item.seed ?? "random"}-${item.index}-${item.job_id ?? ""}`} className="card wer-sample">
+                    <div className="voice-card-head">
+                      <strong>{item.seed !== null && item.seed !== undefined ? `Seed ${item.seed} #${item.index}` : `#${item.index}`}</strong>
+                      <span className={`badge ${item.success ? "warn" : "danger"}`}>{item.success ? `WER ${formatPercent(item.wer)}` : "Failed"}</span>
+                    </div>
+                    <p className="hint">TTS {formatMs(item.synthesis_ms)} · ASR {formatMs(item.transcription_ms)} · total {formatMs(item.total_ms)}</p>
+                    <p><span className="card-label">Reference</span> {item.source_text}</p>
+                    <p><span className="card-label">Whisper</span> {item.transcript || item.error_message || "—"}</p>
+                    <div className="button-row">
+                      <button className="secondary-button small-button" type="button" disabled={!item.job_id} onClick={() => item.job_id && void handleLoadJobAudio(item.job_id)}>Load MP3</button>
+                      {item.job_id && jobAudioUrls[item.job_id] ? (
+                        <>
+                          <audio controls src={jobAudioUrls[item.job_id]} />
+                          <a className="button-link secondary small-button" href={jobAudioUrls[item.job_id]} download={`${item.job_id}.mp3`}>Download</a>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {deviationsFor(run.run_id).items.length < deviationsFor(run.run_id).total ? (
+                <div className="button-row">
+                  <button className="secondary-button" type="button" onClick={() => void loadWerDeviations(run.run_id, true)}>Load more</button>
+                </div>
+              ) : null}
+            </details>
+          </article>
+        ))}
+      </section>
+    </div>
+  );
+
+  const historyTab = (
+    <section className="panel" aria-labelledby="history-title">
+      <div className="panel-head">
+        <h2 id="history-title">History</h2>
+        <p className="hint">The 24 latest jobs (updates live). Finished audio is kept for a while and can be played here.</p>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Text</th><th>Status</th><th>Model</th><th>Voice</th><th className="num">TTFA</th><th>Created</th><th className="actions"><span className="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            {snapshot.jobs.map((job) => (
+              <tr key={job.job_id}>
+                <td className="wrap-cell">
+                  {job.input_preview}
+                  {job.error_message ? <div className="field-error">{job.error_message}</div> : null}
+                  {jobAudioUrls[job.job_id] ? <audio controls src={jobAudioUrls[job.job_id]} /> : null}
+                </td>
+                <td><span className={`badge ${job.status === "completed" ? "ok" : job.status === "failed" ? "danger" : job.status === "cancelled" ? "plain" : "warn"}`}>{job.status}</span></td>
+                <td className="wrap-cell">{job.model || "—"}</td>
+                <td>{job.voice || "—"}</td>
+                <td className="num">{formatMs(job.metrics.ttfa_ms)}</td>
+                <td>{formatDate(job.created_at)}</td>
+                <td className="actions">
+                  {job.status === "completed" ? (
+                    jobAudioUrls[job.job_id] ? (
+                      <a className="button-link secondary" href={jobAudioUrls[job.job_id]} download={`${job.job_id}.mp3`}>Download</a>
+                    ) : (
+                      <button className="secondary-button" type="button" onClick={() => void handleLoadJobAudio(job.job_id)}>Load MP3</button>
+                    )
+                  ) : null}
+                  <button className={job.status === "completed" || job.status === "failed" || job.status === "cancelled" ? "ghost-button" : "danger-button"} type="button" onClick={() => void handleDeleteJob(job.job_id, ["completed", "failed", "cancelled"].includes(job.status))}>
+                    {["completed", "failed", "cancelled"].includes(job.status) ? "Remove" : "Cancel"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {!snapshot.jobs.length ? <tr><td colSpan={7} className="empty">No jobs yet. Run a test on the Playground tab or send a request to /v1/audio/speech.</td></tr> : null}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+
+  const apiKeysTab = (
+    <ApiKeysPanel
+      keys={apiKeyRows}
+      loadError={apiKeysError}
+      usageLabel="Audio (s)"
+      formatUsage={(value) => formatNumber(value, 1)}
+      baseUrl={window.location.origin}
+      exampleCurl={(key) =>
+        `curl -X POST ${window.location.origin}/v1/audio/speech \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "${snapshot.settings.default_model}", "input": "Hello", "voice": "${snapshot.settings.default_voice || "Auto Voice"}", "response_format": "wav"}' \\\n  -o speech.wav`
+      }
+      routesText={protectedRoutes}
+      onCreate={async (alias) => createApiKey(alias)}
+      onRevoke={async (id) => { await deleteApiKey(id); }}
+      onChanged={() => void refreshApiKeys()}
+    />
+  );
+
+  const accountTab = (
+    <div className="grid grid-2 tab-grid">
+      <section className="panel" aria-labelledby="account-title">
+        <div className="panel-head"><h2 id="account-title">Account</h2></div>
+        <dl className="kv-list">
+          <div><dt>Signed in as</dt><dd>{currentUser || "admin"}</dd></div>
+          <div><dt>Session</dt><dd>httpOnly cookie, valid for 7 days</dd></div>
+        </dl>
+        <div className="button-row"><button className="ghost-button" type="button" onClick={() => void handleLogout()}>Log out</button></div>
+      </section>
+      <section className="panel" aria-labelledby="change-pw-title">
+        <div className="panel-head"><h2 id="change-pw-title">Change password</h2><p className="hint">At least 8 characters. Other sessions of this account are logged out.</p></div>
+        <form className="form-stack" onSubmit={(event) => void handleChangePassword(event)}>
+          <input type="text" autoComplete="username" value={currentUser || "admin"} readOnly hidden />
+          <label>Current password<input type="password" autoComplete="current-password" value={pwCurrent} onChange={(event) => setPwCurrent(event.target.value)} required /></label>
+          <label>New password<input type="password" autoComplete="new-password" minLength={8} value={pwNew} onChange={(event) => setPwNew(event.target.value)} required /></label>
+          <label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} value={pwConfirm} onChange={(event) => setPwConfirm(event.target.value)} required /></label>
+          {pwError ? <div className="banner danger" role="alert">{pwError}</div> : null}
+          <div className="button-row form-actions">
+            <button type="submit" disabled={pwBusy || !pwCurrent || !pwNew || !pwConfirm} aria-busy={pwBusy}>{pwBusy ? "Saving…" : "Change password"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+
+  return (
+    <>
+      <ToastHost />
+      <div className="shell">
+        <header className="app-header">
+          <div className="titles">
+            <p className="eyebrow">G3 GPU service · Admin</p>
+            <h1>G3 OmniVoice</h1>
+            <div className="status-strip">
+              <span className={`badge ${stateBadge.cls}`} title={stateBadge.title}>{stateBadge.label}</span>
+              <span className="chip"><span className="card-label">Model</span><span className="value" title={overview.active_model || undefined}>{overview.active_model || "None"}</span></span>
+              <span className="chip"><span className="card-label">GPU</span><span className="value" title={gpuText}>{gpuText}</span></span>
+              <button type="button" className="chip chip-button" onClick={() => setAdminTab("api-keys")} title="Manage API keys">
+                <span className="card-label">API</span>
+                <span className={`badge ${keyCount ? "ok" : "warn"}`}>{apiKeys === null ? "—" : keyCount ? "Protected" : "Open"}</span>
+              </button>
+            </div>
+          </div>
+          <div className="actions">
+            <a className="button-link ghost" href="/docs" target="_blank" rel="noreferrer">API docs</a>
+            <button className="ghost-button" type="button" onClick={() => void handleLogout()}>Log out</button>
+          </div>
+        </header>
+
+        <nav className="tab-bar" role="tablist" aria-label="Sections">
+          {visibleTabs.map((tab) => {
+            const selected = tab.id === adminTab;
+            return (
+              <button
+                key={tab.id}
+                id={`tab-${tab.id}`}
+                type="button"
+                role="tab"
+                className="tab-button"
+                aria-selected={selected}
+                aria-controls={`panel-${tab.id}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => setAdminTab(tab.id)}
+                onKeyDown={onTabKeyDown}
+              >
+                {tab.label}
+                {tab.id === "settings" && settingsDirty.length ? <span className="tab-dot" aria-label="unsaved changes" /> : null}
+              </button>
+            );
+          })}
+        </nav>
+
+        {liveReconnecting ? <div className="banner warn" role="status">Live updates reconnecting…</div> : null}
+
+        <main className="tab-main" role="tabpanel" id={`panel-${adminTab}`} aria-labelledby={`tab-${adminTab}`}>
+          {adminTab === "dashboard" ? dashboardTab : null}
+          {adminTab === "playground" ? playgroundTab : null}
+          {adminTab === "voices" ? voicesTab : null}
+          {adminTab === "models" ? modelsTab : null}
+          {adminTab === "settings" ? settingsTab : null}
+          {adminTab === "benchmark" ? benchmarkTab : null}
+          {adminTab === "data-generation" && finetuneSupported ? <DataGenerationPanel adminKey={adminKey} voices={voices} onMessage={setMessage} onError={setError} /> : null}
+          {adminTab === "training" && finetuneSupported ? <TrainingPanel adminKey={adminKey} onMessage={setMessage} onError={setError} /> : null}
+          {adminTab === "history" ? historyTab : null}
+          {adminTab === "api-keys" ? apiKeysTab : null}
+          {adminTab === "account" ? accountTab : null}
+        </main>
+      </div>
+    </>
   );
 }

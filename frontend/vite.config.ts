@@ -17,9 +17,10 @@ export default defineConfig({
     port: 5181,
     strictPort: true,
     proxy: {
+      // Keep the browser's Host so the backend's same-origin check on admin writes matches the Origin header.
       '/api': {
         target: 'http://127.0.0.1:8091',
-        changeOrigin: true
+        changeOrigin: false
       },
       '/v1': {
         target: 'http://127.0.0.1:8091',

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { apiFetch } from "../shared/api";
+import { apiFetch, formatSeconds } from "../shared/api";
 
 interface DatasetVoiceSummary { voice: string; clips: number; seconds: number }
 interface DatasetSummaryResponse { voices: DatasetVoiceSummary[]; total_clips: number }
@@ -59,12 +59,12 @@ export function TrainingPanel({ adminKey, onMessage, onError }: Props) {
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await apiFetch<DatasetSummaryResponse>("/api/admin/finetune/dataset/summary", { adminKey })); }
-    catch (e) { fail(e, "Dataset-Übersicht fehlgeschlagen."); }
+    catch (e) { fail(e, "Could not load the dataset summary."); }
   }, [adminKey, fail]);
 
   const loadCheckpoints = useCallback(async () => {
     try { setCheckpoints((await apiFetch<CheckpointListResponse>("/api/admin/finetune/checkpoints", { adminKey })).checkpoints); }
-    catch (e) { fail(e, "Checkpoints konnten nicht geladen werden."); }
+    catch (e) { fail(e, "Could not load the checkpoints."); }
   }, [adminKey, fail]);
 
   const loadStatus = useCallback(async () => {
@@ -98,15 +98,16 @@ export function TrainingPanel({ adminKey, onMessage, onError }: Props) {
         },
       });
       setRun(res);
-      onMessage("Training gestartet (Preprocess → Trainer als Subprozess).");
-    } catch (e) { fail(e, "Training konnte nicht gestartet werden."); }
+      onMessage("Training started (preprocess, then the trainer as a subprocess).");
+    } catch (e) { fail(e, "Could not start the training."); }
     finally { setBusy(""); }
   }
 
   async function handleCancel() {
     if (!run) return;
+    if (!window.confirm("Stop the training run?\n\nThe current step is lost; saved checkpoints stay.")) return;
     try { await apiFetch(`/api/admin/finetune/train/${run.run_id}/cancel`, { adminKey, method: "POST" }); }
-    catch (e) { fail(e, "Abbruch fehlgeschlagen."); }
+    catch (e) { fail(e, "Could not stop the training."); }
   }
 
   async function handlePromote() {
@@ -118,121 +119,140 @@ export function TrainingPanel({ adminKey, onMessage, onError }: Props) {
       });
       setPromoteName("");
       await loadCheckpoints();
-      onMessage(`Modell promotet: ${item.model_id}. Im Overview-Tab unter Model Control auswählbar (Reload lädt es).`);
-    } catch (e) { fail(e, "Promotion fehlgeschlagen."); }
+      onMessage(`Model promoted: ${item.model_id}. Pick it on the Models tab (Reload loads it).`);
+    } catch (e) { fail(e, "Could not promote the checkpoint."); }
     finally { setBusy(""); }
   }
 
   async function handleDeleteCheckpoint(id: string) {
+    const item = checkpoints.find((c) => c.checkpoint_id === id);
+    if (!window.confirm(`Delete custom model "${item?.name ?? id}"?\n\nIts checkpoint folder is removed from disk.`)) return;
     try { await apiFetch(`/api/admin/finetune/checkpoints/${id}`, { adminKey, method: "DELETE" }); await loadCheckpoints(); }
-    catch (e) { fail(e, "Checkpoint konnte nicht gelöscht werden."); }
+    catch (e) { fail(e, "Could not delete the checkpoint."); }
   }
 
   const runActive = run && !RUN_TERMINAL.includes(run.status);
   const lossMax = Math.max(1e-6, ...(run?.loss_curve || [1]));
 
   return (
-    <section className="widget-grid">
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Datensatz</h2>
-          <div className="button-row compact"><button className="secondary-button" type="button" onClick={() => void loadSummary()}>Aktualisieren</button></div>
+    <div className="grid grid-2 tab-grid">
+      <section className="panel" aria-labelledby="tr-dataset">
+        <div className="panel-head">
+          <h2 id="tr-dataset">Dataset</h2>
+          <button className="secondary-button" type="button" onClick={() => void loadSummary()}>Reload</button>
         </div>
-        <div className="metric-list"><div className="metric-row"><span>Clips gesamt</span><strong>{summary.total_clips}</strong></div></div>
-        <div className="job-list" style={{ marginTop: 8 }}>
-          {summary.voices.map((v) => (
-            <article key={v.voice} className="job-card"><strong>{v.voice}</strong><div className="inline-pills"><span className="pill">{v.clips} Clips</span><span className="pill">{v.seconds.toFixed(0)}s</span></div></article>
-          ))}
-          {!summary.voices.length ? <p className="widget-copy">Noch kein Material — erst im Data-Generation-Tab Clips erzeugen.</p> : null}
+        <p className="hint">{summary.total_clips} clips in total.</p>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Voice</th><th className="num">Clips</th><th className="num">Audio</th></tr></thead>
+            <tbody>
+              {summary.voices.map((v) => (
+                <tr key={v.voice}><td>{v.voice}</td><td className="num">{v.clips}</td><td className="num">{formatSeconds(v.seconds)}</td></tr>
+              ))}
+              {!summary.voices.length ? <tr><td colSpan={3} className="empty">No material yet. Create clips on the Data generation tab first.</td></tr> : null}
+            </tbody>
+          </table>
         </div>
       </section>
 
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Training-Konfiguration</h2></div>
-        <p className="widget-copy">Voll-Finetune vom Basismodell (sdpa, bf16, niedrige LR). Preprocess (Audio→Codec-Token-Cache) läuft automatisch davor.</p>
-        <div className="field-grid two">
+      <section className="panel" aria-labelledby="tr-config">
+        <div className="panel-head">
+          <h2 id="tr-config">Training configuration</h2>
+          <p className="hint">Full finetune from the base model (sdpa, bf16, low learning rate). The preprocess step (audio to codec-token cache) runs first automatically.</p>
+        </div>
+        <form className="field-grid two" onSubmit={(e) => { e.preventDefault(); void handleStart(); }}>
           <label>Name<input value={name} onChange={(e) => setName(e.target.value)} /></label>
-          <label>Epochen<input type="number" min={1} max={100} value={epochs} onChange={(e) => setEpochs(Number(e.target.value))} /></label>
-          <label>Steps (überschreibt Epochen, 0=aus)<input type="number" min={0} value={stepsOverride} onChange={(e) => setStepsOverride(Number(e.target.value))} /></label>
-          <label>Learning Rate<input type="number" step={0.00001} min={0} value={learningRate} onChange={(e) => setLearningRate(Number(e.target.value))} /></label>
-          <label>Dev-Anteil<input type="number" step={0.01} min={0} max={0.5} value={devFraction} onChange={(e) => setDevFraction(Number(e.target.value))} /></label>
+          <label>Epochs<input type="number" min={1} max={100} value={epochs} onChange={(e) => setEpochs(Number(e.target.value))} /></label>
+          <label>Steps<input type="number" min={0} value={stepsOverride} onChange={(e) => setStepsOverride(Number(e.target.value))} /><span className="hint">Overrides the epochs; 0 = off.</span></label>
+          <label>Learning rate<input type="number" step={0.00001} min={0} value={learningRate} onChange={(e) => setLearningRate(Number(e.target.value))} /></label>
+          <label>Dev share<input type="number" step={0.01} min={0} max={0.5} value={devFraction} onChange={(e) => setDevFraction(Number(e.target.value))} /></label>
           <label>batch_tokens<input type="number" min={512} value={batchTokens} onChange={(e) => setBatchTokens(Number(e.target.value))} /></label>
           <label>max_batch_size<input type="number" min={1} value={maxBatchSize} onChange={(e) => setMaxBatchSize(Number(e.target.value))} /></label>
           <label>grad_accum<input type="number" min={1} value={gradAccum} onChange={(e) => setGradAccum(Number(e.target.value))} /></label>
           <label>Attention
             <select value={attn} onChange={(e) => setAttn(e.target.value as typeof attn)}>
-              <option value="sdpa">sdpa (Windows-sicher)</option>
-              <option value="flex_attention">flex_attention (schneller, Kernel nötig)</option>
+              <option value="sdpa">sdpa (safe on Windows)</option>
+              <option value="flex_attention">flex_attention (faster, needs kernels)</option>
             </select>
           </label>
           <label>keep_last_n<input type="number" min={1} max={20} value={keepLastN} onChange={(e) => setKeepLastN(Number(e.target.value))} /></label>
-        </div>
-        <div className="button-row" style={{ marginTop: 12 }}>
-          <button className="primary-button" type="button" disabled={busy === "start" || !!runActive} onClick={() => void handleStart()}>Training starten</button>
-          {runActive ? <button className="ghost-button danger-button" type="button" onClick={() => void handleCancel()}>Stoppen</button> : null}
-        </div>
+          <div className="button-row span-all">
+            <button type="submit" disabled={busy === "start" || !!runActive} aria-busy={busy === "start"}>{busy === "start" ? "Starting…" : "Start training"}</button>
+            {runActive ? <button className="danger-button" type="button" onClick={() => void handleCancel()}>Stop</button> : null}
+          </div>
+        </form>
       </section>
 
-      <section className="widget span-12">
-        <div className="widget-header"><h2>Trainingslauf</h2></div>
-        {!run ? <p className="widget-copy">Noch kein Trainingslauf gestartet.</p> : (
+      <section className="panel span-all" aria-labelledby="tr-run">
+        <div className="panel-head"><h2 id="tr-run">Training run</h2></div>
+        {!run ? <div className="state">No training run started yet.</div> : (
           <>
-            <div className="field-grid four">
-              <div className="metric-row"><span>Status</span><strong>{run.status} · {run.phase}</strong></div>
-              <div className="metric-row"><span>Step</span><strong>{run.current_step}/{run.total_steps}</strong></div>
-              <div className="metric-row"><span>Loss</span><strong>{run.loss != null ? run.loss.toFixed(4) : "-"}</strong></div>
-              <div className="metric-row"><span>Eval-Loss</span><strong>{run.eval_loss != null ? run.eval_loss.toFixed(4) : "-"}</strong></div>
-              <div className="metric-row"><span>LR</span><strong>{run.lr != null ? run.lr.toExponential(1) : "-"}</strong></div>
-              <div className="metric-row"><span>Steps/s</span><strong>{run.steps_per_sec != null ? run.steps_per_sec.toFixed(2) : "-"}</strong></div>
-              <div className="metric-row"><span>ETA</span><strong>{run.eta_ms != null ? `${Math.round(run.eta_ms / 1000)}s` : "-"}</strong></div>
-              <div className="metric-row"><span>Train/Dev</span><strong>{run.train_count}/{run.dev_count}</strong></div>
+            <div className="grid grid-auto">
+              <div className="card"><span className="card-label">Status</span><span className="card-value small">{run.status} · {run.phase}</span></div>
+              <div className="card"><span className="card-label">Step</span><span className="card-value">{run.current_step}/{run.total_steps}</span></div>
+              <div className="card"><span className="card-label">Loss</span><span className="card-value">{run.loss != null ? run.loss.toFixed(4) : "—"}</span></div>
+              <div className="card"><span className="card-label">Eval loss</span><span className="card-value">{run.eval_loss != null ? run.eval_loss.toFixed(4) : "—"}</span></div>
+              <div className="card"><span className="card-label">Learning rate</span><span className="card-value">{run.lr != null ? run.lr.toExponential(1) : "—"}</span></div>
+              <div className="card"><span className="card-label">Steps/s</span><span className="card-value">{run.steps_per_sec != null ? run.steps_per_sec.toFixed(2) : "—"}</span></div>
+              <div className="card"><span className="card-label">ETA</span><span className="card-value">{run.eta_ms != null ? formatSeconds(run.eta_ms / 1000) : "—"}</span></div>
+              <div className="card"><span className="card-label">Train / dev</span><span className="card-value">{run.train_count}/{run.dev_count}</span></div>
             </div>
-            <div className="ft-progress" style={{ marginTop: 10 }}><div className="ft-progress-fill" style={{ width: `${run.pct}%` }} /></div>
+            <div className="bar" role="progressbar" aria-valuenow={run.pct} aria-valuemin={0} aria-valuemax={100}><span className="seg-service" style={{ width: `${run.pct}%` }} /></div>
             {run.loss_curve.length ? (
-              <svg viewBox="0 0 300 60" style={{ width: "100%", height: 60, marginTop: 10 }} aria-label="Loss-Kurve">
-                <polyline fill="none" stroke="#ff9a46" strokeWidth="2"
-                  points={run.loss_curve.map((v, i) => `${(i / Math.max(1, run.loss_curve.length - 1)) * 300},${60 - (v / lossMax) * 56 - 2}`).join(" ")} />
-              </svg>
+              <figure className="perf-chart loss-chart">
+                <figcaption className="perf-chart-head"><span className="perf-chart-title">Training loss</span><span className="hint">max {lossMax.toFixed(4)}</span></figcaption>
+                <svg viewBox="0 0 300 60" preserveAspectRatio="none" role="img" aria-label="Training loss curve">
+                  <polyline fill="none" stroke="var(--series-service)" strokeWidth="2" vectorEffect="non-scaling-stroke"
+                    points={run.loss_curve.map((v, i) => `${(i / Math.max(1, run.loss_curve.length - 1)) * 300},${60 - (v / lossMax) * 56 - 2}`).join(" ")} />
+                </svg>
+              </figure>
             ) : null}
-            {run.error_message ? <div className="message error" style={{ marginTop: 8 }}>{run.error_message}</div> : null}
+            {run.error_message ? <div className="banner danger">{run.error_message}</div> : null}
             {run.checkpoint_dir ? (
-              <div className="voice-card" style={{ marginTop: 10 }}>
-                <strong>Checkpoint bereit</strong>
-                <p className="widget-copy mono">{run.checkpoint_dir}</p>
-                <div className="button-row">
-                  <input placeholder="Modellname" value={promoteName} onChange={(e) => setPromoteName(e.target.value)} />
-                  <button className="primary-button" type="button" disabled={busy === "promote" || !promoteName.trim()} onClick={() => void handlePromote()}>Als Modell übernehmen</button>
-                </div>
+              <div className="card">
+                <span className="card-label">Checkpoint ready</span>
+                <code className="mono">{run.checkpoint_dir}</code>
+                <form className="button-row" onSubmit={(e) => { e.preventDefault(); void handlePromote(); }}>
+                  <label className="sr-only" htmlFor="promote-name">Model name</label>
+                  <input id="promote-name" className="grow" placeholder="Model name" value={promoteName} onChange={(e) => setPromoteName(e.target.value)} />
+                  <button type="submit" disabled={busy === "promote" || !promoteName.trim()} aria-busy={busy === "promote"}>Promote to model</button>
+                </form>
               </div>
             ) : null}
             {run.log_tail.length ? (
-              <details style={{ marginTop: 10 }}>
-                <summary>Log ({run.log_tail.length} Zeilen)</summary>
-                <pre className="mono" style={{ maxHeight: 220, overflow: "auto", fontSize: 12 }}>{run.log_tail.join("\n")}</pre>
+              <details>
+                <summary className="dim">Log ({run.log_tail.length} lines)</summary>
+                <pre className="log-pre">{run.log_tail.join("\n")}</pre>
               </details>
             ) : null}
           </>
         )}
       </section>
 
-      <section className="widget span-12">
-        <div className="widget-header"><h2>Custom-Modelle</h2>
-          <div className="button-row compact"><button className="secondary-button" type="button" onClick={() => void loadCheckpoints()}>Aktualisieren</button></div>
+      <section className="panel span-all" aria-labelledby="tr-models">
+        <div className="panel-head">
+          <h2 id="tr-models">Custom models</h2>
+          <button className="secondary-button" type="button" onClick={() => void loadCheckpoints()}>Reload</button>
+          <p className="hint">Promoted checkpoints appear on the Models tab and load with Reload.</p>
         </div>
-        <p className="widget-copy">Promotete Checkpoints erscheinen im Overview-Tab unter „Model Control" und werden per Reload geladen.</p>
-        <div className="job-list">
-          {checkpoints.map((c) => (
-            <article key={c.checkpoint_id} className="job-card">
-              <div className="inline-pills" style={{ justifyContent: "space-between" }}>
-                <strong>{c.name}</strong>
-                <span className="pill">{c.exists ? c.model_id : "fehlt auf Disk"}</span>
-              </div>
-              <div className="inline-pills"><span className="pill">{c.steps} Steps</span><span className="pill mono">{c.dirname}</span></div>
-              <div className="button-row compact"><button className="ghost-button danger-button" type="button" onClick={() => void handleDeleteCheckpoint(c.checkpoint_id)}>Löschen</button></div>
-            </article>
-          ))}
-          {!checkpoints.length ? <p className="widget-copy">Noch keine Custom-Modelle.</p> : null}
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Model id</th><th className="num">Steps</th><th>Folder</th><th className="actions"><span className="sr-only">Actions</span></th></tr></thead>
+            <tbody>
+              {checkpoints.map((c) => (
+                <tr key={c.checkpoint_id}>
+                  <td>{c.name}</td>
+                  <td>{c.exists ? <span className="mono">{c.model_id}</span> : <span className="badge danger">Missing on disk</span>}</td>
+                  <td className="num">{c.steps}</td>
+                  <td><span className="mono">{c.dirname}</span></td>
+                  <td className="actions"><button className="danger-button" type="button" onClick={() => void handleDeleteCheckpoint(c.checkpoint_id)}>Delete</button></td>
+                </tr>
+              ))}
+              {!checkpoints.length ? <tr><td colSpan={5} className="empty">No custom models yet. Promote a finished training run above.</td></tr> : null}
+            </tbody>
+          </table>
         </div>
       </section>
-    </section>
+    </div>
   );
 }

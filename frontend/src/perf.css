@@ -1,0 +1,29 @@
+/* G3 shared performance graph styles. Copy verbatim to frontend/src/perf.css; import after g3-base.css. */
+.perf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4); }
+.perf-grid > * { min-width: 0; }
+.perf-chart {
+  margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); min-width: 0;
+  padding: var(--sp-3) var(--sp-4) var(--sp-2);
+  border-radius: var(--r-card); background: var(--surface); border: 1px solid var(--line);
+}
+.perf-chart-head { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
+.perf-chart-title { color: var(--text-strong); font-size: var(--fs-sm); font-weight: var(--fw-bold); }
+.perf-legend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); flex-basis: 100%; font-size: var(--fs-xs); color: var(--text-dim); }
+.perf-legend-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.perf-legend-item i { width: 10px; height: 10px; border-radius: var(--r-swatch); display: inline-block; }
+.perf-legend-item b { color: var(--text-strong); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+.perf-plot { position: relative; width: 100%; min-width: 0; overflow: hidden; } /* never let the SVG widen its own box */
+.perf-plot svg { display: block; touch-action: pan-y; }
+.perf-grid-line { stroke: var(--line); stroke-width: 1; }
+.perf-crosshair { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 3; }
+.perf-tick { fill: var(--text-dim); font-size: var(--fs-2xs); font-family: var(--font-body); font-variant-numeric: tabular-nums; }
+.perf-empty { fill: var(--text-dim); font-size: var(--fs-xs); }
+.perf-tooltip {
+  position: absolute; top: 4px; width: 176px; pointer-events: none; z-index: 2;
+  display: grid; gap: 2px; padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-tip); background: var(--panel); border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: var(--fs-xs); color: var(--text-dim);
+}
+.perf-tooltip .perf-legend-item { white-space: normal; }
+.perf-tooltip-time { color: var(--text-strong); font-weight: var(--fw-bold); }
+@media (max-width: 900px) { .perf-grid { grid-template-columns: minmax(0, 1fr); } }

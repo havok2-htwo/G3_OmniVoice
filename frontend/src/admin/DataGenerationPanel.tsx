@@ -85,14 +85,14 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
     try {
       const data = await apiFetch<DomainListResponse>("/api/admin/finetune/domains", { adminKey });
       setDomains(data.domains);
-    } catch (e) { fail(e, "Domänen konnten nicht geladen werden."); }
+    } catch (e) { fail(e, "Could not load the domains."); }
   }, [adminKey, fail]);
 
   const loadClips = useCallback(async (voice = clipFilter) => {
     try {
       const query = voice ? `?voice=${encodeURIComponent(voice)}` : "";
       setClips(await apiFetch<ClipListResponse>(`/api/admin/finetune/clips${query}`, { adminKey }));
-    } catch (e) { fail(e, "Clips konnten nicht geladen werden."); }
+    } catch (e) { fail(e, "Could not load the clips."); }
   }, [adminKey, clipFilter, fail]);
 
   useEffect(() => { void loadDomains(); void loadClips(""); }, [loadDomains, loadClips]);
@@ -103,7 +103,7 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
     void (async () => {
       try {
         setDomainDetail(await apiFetch<DomainItem>(`/api/admin/finetune/domains/${selectedDomainId}`, { adminKey }));
-      } catch (e) { fail(e, "Domänendetails konnten nicht geladen werden."); }
+      } catch (e) { fail(e, "Could not load the domain."); }
     })();
   }, [selectedDomainId, adminKey, fail]);
 
@@ -134,8 +134,8 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
         });
         setNewDomainName(""); setNewDomainDesc("");
         await loadDomains();
-        onMessage("Domäne angelegt.");
-      } catch (e) { fail(e, "Domäne konnte nicht angelegt werden."); }
+        onMessage("Domain added.");
+      } catch (e) { fail(e, "Could not add the domain."); }
     });
   }
 
@@ -146,19 +146,21 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
           adminKey, method: "POST", body: { count: domainGenCount, language },
         });
         await loadDomains();
-        onMessage(`${res.created.length} Domänen erzeugt (${res.skipped_duplicates} Duplikate übersprungen).`);
-      } catch (e) { fail(e, "LLM-Domänengenerierung fehlgeschlagen."); }
+        onMessage(`${res.created.length} domains created (${res.skipped_duplicates} duplicates skipped).`);
+      } catch (e) { fail(e, "Could not generate domains with the LLM."); }
     });
   }
 
   async function handleDeleteDomain(id: string) {
+    const domain = domains.find((item) => item.domain_id === id);
+    if (!window.confirm(`Delete domain "${domain?.name ?? id}"?\n\nIts ${domain?.sentence_count ?? 0} sentences are deleted too.`)) return;
     await withBusy(`del-domain-${id}`, async () => {
       try {
         await apiFetch(`/api/admin/finetune/domains/${id}`, { adminKey, method: "DELETE" });
         if (selectedDomainId === id) setSelectedDomainId("");
         setRunDomainIds((cur) => cur.filter((d) => d !== id));
         await loadDomains();
-      } catch (e) { fail(e, "Domäne konnte nicht gelöscht werden."); }
+      } catch (e) { fail(e, "Could not delete the domain."); }
     });
   }
 
@@ -171,8 +173,8 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
         });
         setDomainDetail(await apiFetch<DomainItem>(`/api/admin/finetune/domains/${selectedDomainId}`, { adminKey }));
         await loadDomains();
-        onMessage(`${res.added} Sätze hinzugefügt (${res.skipped_duplicates} Duplikate).`);
-      } catch (e) { fail(e, "Satzgenerierung fehlgeschlagen."); }
+        onMessage(`${res.added} sentences added (${res.skipped_duplicates} duplicates skipped).`);
+      } catch (e) { fail(e, "Could not generate sentences."); }
     });
   }
 
@@ -184,8 +186,8 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
   }
 
   async function handleStartRun() {
-    if (!runDomainIds.length) { onError("Bitte mindestens eine Domäne für den Lauf auswählen."); return; }
-    if (voiceMode !== "auto" && !selectedVoiceIds.length) { onError("Bitte mindestens eine Stimme auswählen (oder AutoVoice-Modus)."); return; }
+    if (!runDomainIds.length) { onError("Select at least one domain for the run."); return; }
+    if (voiceMode !== "auto" && !selectedVoiceIds.length) { onError("Select at least one voice (or use the AutoVoice mode)."); return; }
     await withBusy("start-run", async () => {
       try {
         const res = await apiFetch<DatagenRunResponse>("/api/admin/finetune/generate", {
@@ -203,15 +205,16 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
           },
         });
         setRun(res);
-        onMessage(`Generierung gestartet: ${res.planned} Clips geplant.`);
-      } catch (e) { fail(e, "Generierung konnte nicht gestartet werden."); }
+        onMessage(`Generation started: ${res.planned} clips planned.`);
+      } catch (e) { fail(e, "Could not start the generation."); }
     });
   }
 
   async function handleCancelRun() {
     if (!run) return;
+    if (!window.confirm("Stop the data generation run?\n\nClips accepted so far stay.")) return;
     try { await apiFetch(`/api/admin/finetune/generate/${run.run_id}/cancel`, { adminKey, method: "POST" }); }
-    catch (e) { fail(e, "Abbruch fehlgeschlagen."); }
+    catch (e) { fail(e, "Could not stop the run."); }
   }
 
   async function handlePlayClip(clipId: string) {
@@ -219,10 +222,12 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
     try {
       const blob = await apiFetch<Blob>(`/api/admin/finetune/clips/${clipId}/audio`, { adminKey, responseType: "blob" });
       setClipAudioUrls((cur) => ({ ...cur, [clipId]: URL.createObjectURL(blob) }));
-    } catch (e) { fail(e, "Clip konnte nicht geladen werden."); }
+    } catch (e) { fail(e, "Could not load the clip."); }
   }
 
   async function handleDeleteClip(clipId: string) {
+    const clip = clips.clips.find((item) => item.clip_id === clipId);
+    if (!window.confirm(`Delete clip "${clip?.filename ?? clipId}"?\n\nThe audio and its transcript are removed from the dataset.`)) return;
     try {
       await apiFetch(`/api/admin/finetune/clips/${clipId}`, { adminKey, method: "DELETE" });
       setClipAudioUrls((cur) => {
@@ -230,166 +235,169 @@ export function DataGenerationPanel({ adminKey, voices, onMessage, onError }: Pr
         const next = { ...cur }; delete next[clipId]; return next;
       });
       await loadClips();
-    } catch (e) { fail(e, "Clip konnte nicht gelöscht werden."); }
+    } catch (e) { fail(e, "Could not delete the clip."); }
   }
 
   const runActive = run && !RUN_TERMINAL.includes(run.status);
 
   return (
-    <section className="widget-grid">
-      {/* Domain list */}
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Domänen</h2>
-          <div className="button-row compact">
-            <input type="number" min={1} max={200} value={domainGenCount} onChange={(e) => setDomainGenCount(Number(e.target.value))} style={{ width: 72 }} />
-            <button className="secondary-button" type="button" disabled={busy === "gen-domains"} onClick={() => void handleGenerateDomains()}>{busy === "gen-domains" ? "..." : "N per LLM"}</button>
+    <div className="grid grid-2 tab-grid">
+      <section className="panel" aria-labelledby="dg-domains">
+        <div className="panel-head">
+          <h2 id="dg-domains">Domains</h2>
+          <p className="hint">Topics the model stumbles on (for example "sentences with GmbH"). Add them by hand or let the LLM suggest new ones (no duplicates).</p>
+        </div>
+        <form className="field-grid two" onSubmit={(e) => { e.preventDefault(); void handleAddDomain(); }}>
+          <label>Name<input value={newDomainName} onChange={(e) => setNewDomainName(e.target.value)} placeholder="Sentences with GmbH" /></label>
+          <label>Description<input value={newDomainDesc} onChange={(e) => setNewDomainDesc(e.target.value)} placeholder="German sentences with the abbreviation GmbH" /></label>
+          <div className="button-row span-all">
+            <button type="submit" disabled={busy === "add-domain" || !newDomainName.trim()} aria-busy={busy === "add-domain"}>Add domain</button>
           </div>
+        </form>
+        <div className="button-row">
+          <label className="inline-field">Count<input type="number" min={1} max={200} value={domainGenCount} onChange={(e) => setDomainGenCount(Number(e.target.value))} /></label>
+          <button className="secondary-button" type="button" disabled={busy === "gen-domains"} aria-busy={busy === "gen-domains"} onClick={() => void handleGenerateDomains()}>{busy === "gen-domains" ? "Generating…" : "Generate with LLM"}</button>
         </div>
-        <p className="widget-copy">Themen, an denen das Modell strauchelt (z. B. „Sätze mit GmbH"). Manuell oder per LLM (ohne Duplikate).</p>
-        <div className="field-grid two">
-          <label>Name<input value={newDomainName} onChange={(e) => setNewDomainName(e.target.value)} placeholder="Sätze mit GmbH" /></label>
-          <label>Beschreibung<input value={newDomainDesc} onChange={(e) => setNewDomainDesc(e.target.value)} placeholder="Deutsche Sätze mit der Abkürzung GmbH" /></label>
-        </div>
-        <div className="button-row"><button className="primary-button" type="button" disabled={busy === "add-domain" || !newDomainName.trim()} onClick={() => void handleAddDomain()}>Domäne hinzufügen</button></div>
-        <div className="job-list" style={{ marginTop: 12 }}>
-          {domains.map((d) => (
-            <article key={d.domain_id} className={`job-card ${selectedDomainId === d.domain_id ? "active" : ""}`}>
-              <div className="inline-pills" style={{ justifyContent: "space-between" }}>
-                <strong>{d.name}</strong>
-                <span className="pill">{d.sentence_count} Sätze</span>
-              </div>
-              {d.description ? <p className="widget-copy">{d.description}</p> : null}
-              <div className="button-row compact">
-                <label className="pill" style={{ cursor: "pointer" }}>
-                  <input type="checkbox" checked={runDomainIds.includes(d.domain_id)} onChange={() => toggleRunDomain(d.domain_id)} /> Im Lauf
-                </label>
-                <button className="link-chip" type="button" onClick={() => setSelectedDomainId(d.domain_id)}>Sätze</button>
-                <button className="ghost-button danger-button" type="button" disabled={busy === `del-domain-${d.domain_id}`} onClick={() => void handleDeleteDomain(d.domain_id)}>Löschen</button>
-              </div>
-            </article>
-          ))}
-          {!domains.length ? <p className="widget-copy">Noch keine Domänen.</p> : null}
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Domain</th><th className="num">Sentences</th><th>In run</th><th className="actions"><span className="sr-only">Actions</span></th></tr></thead>
+            <tbody>
+              {domains.map((d) => (
+                <tr key={d.domain_id} className={selectedDomainId === d.domain_id ? "row-selected" : ""}>
+                  <td><strong>{d.name}</strong>{d.description ? <div className="hint">{d.description}</div> : null}</td>
+                  <td className="num">{d.sentence_count}</td>
+                  <td><input type="checkbox" aria-label={`Use ${d.name} in the run`} checked={runDomainIds.includes(d.domain_id)} onChange={() => toggleRunDomain(d.domain_id)} /></td>
+                  <td className="actions">
+                    <button className="secondary-button" type="button" onClick={() => setSelectedDomainId(d.domain_id)}>Sentences</button>
+                    <button className="danger-button" type="button" disabled={busy === `del-domain-${d.domain_id}`} onClick={() => void handleDeleteDomain(d.domain_id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+              {!domains.length ? <tr><td colSpan={4} className="empty">No domains yet. Add one above or generate some with the LLM.</td></tr> : null}
+            </tbody>
+          </table>
         </div>
       </section>
 
-      {/* Sentences for selected domain */}
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Sätze {domainDetail ? `· ${domainDetail.name}` : ""}</h2>
-          <div className="button-row compact">
-            <input type="number" min={1} max={2000} value={sentenceGenCount} onChange={(e) => setSentenceGenCount(Number(e.target.value))} style={{ width: 80 }} />
-            <button className="secondary-button" type="button" disabled={!selectedDomainId || busy === "gen-sentences"} onClick={() => void handleGenerateSentences()}>{busy === "gen-sentences" ? "..." : "Sätze erzeugen"}</button>
-          </div>
+      <section className="panel" aria-labelledby="dg-sentences">
+        <div className="panel-head">
+          <h2 id="dg-sentences">Sentences{domainDetail ? ` · ${domainDetail.name}` : ""}</h2>
         </div>
-        {!domainDetail ? <p className="widget-copy">Wähle links eine Domäne („Sätze"), um ihre Sätze zu sehen und per LLM zu erweitern.</p> : (
+        <div className="button-row">
+          <label className="inline-field">Count<input type="number" min={1} max={2000} value={sentenceGenCount} onChange={(e) => setSentenceGenCount(Number(e.target.value))} /></label>
+          <button className="secondary-button" type="button" disabled={!selectedDomainId || busy === "gen-sentences"} aria-busy={busy === "gen-sentences"} onClick={() => void handleGenerateSentences()}>{busy === "gen-sentences" ? "Generating…" : "Generate sentences"}</button>
+        </div>
+        {!domainDetail ? <div className="state">Pick "Sentences" on a domain to see its sentences and extend them with the LLM.</div> : (
           <>
-            <div className="metric-list"><div className="metric-row"><span>Gespeichert</span><strong>{domainDetail.sentence_count}</strong></div></div>
-            <div className="scroll-list" style={{ maxHeight: 320, overflowY: "auto", marginTop: 8 }}>
-              {(domainDetail.sentences || []).map((s, i) => (
-                <div key={i} className="metric-row"><span style={{ opacity: 0.5 }}>{i + 1}</span><span style={{ textAlign: "left", flex: 1 }}>{s}</span></div>
-              ))}
-            </div>
+            <p className="hint">{domainDetail.sentence_count} sentences saved.</p>
+            <ol className="sentence-list">
+              {(domainDetail.sentences || []).map((s, i) => <li key={i}>{s}</li>)}
+            </ol>
           </>
         )}
       </section>
 
-      {/* Run config */}
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Datengenerierung starten</h2></div>
+      <section className="panel" aria-labelledby="dg-run">
+        <div className="panel-head"><h2 id="dg-run">Start data generation</h2></div>
         <div className="field-grid two">
-          <label>Stimm-Modus
+          <label>Voice mode
             <select value={voiceMode} onChange={(e) => setVoiceMode(e.target.value as typeof voiceMode)}>
-              <option value="clone">Geklonte Stimmen</option>
+              <option value="clone">Cloned voices</option>
               <option value="auto">AutoVoice</option>
-              <option value="both">Beides</option>
+              <option value="both">Both</option>
             </select>
           </label>
-          <label>Sprache
+          <label>Language
             <select value={language} onChange={(e) => setLanguage(e.target.value)}>
               {SYNTH_LANGUAGE_OPTIONS.filter((o) => o !== "Auto").map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
-          <label>WER-Schwelle<input type="number" step={0.01} min={0} max={1} value={werThreshold} onChange={(e) => setWerThreshold(Number(e.target.value))} /></label>
-          <label>Max. Versuche<input type="number" min={1} max={50} value={maxAttempts} onChange={(e) => setMaxAttempts(Number(e.target.value))} /></label>
-          <label>TTS-Parallelität<input type="number" min={1} max={64} value={ttsConcurrency} onChange={(e) => setTtsConcurrency(Number(e.target.value))} /></label>
-          <label>ASR-Parallelität<input type="number" min={1} max={64} value={asrConcurrency} onChange={(e) => setAsrConcurrency(Number(e.target.value))} /></label>
-          <label>WER-Toleranz (Buchst./Wort)<input type="number" min={0} max={8} value={tolerance} onChange={(e) => setTolerance(Number(e.target.value))} /></label>
+          <label>WER threshold<input type="number" step={0.01} min={0} max={1} value={werThreshold} onChange={(e) => setWerThreshold(Number(e.target.value))} /><span className="hint">Clips above this word error rate are rejected (0 = only exact).</span></label>
+          <label>Max attempts<input type="number" min={1} max={50} value={maxAttempts} onChange={(e) => setMaxAttempts(Number(e.target.value))} /></label>
+          <label>TTS concurrency<input type="number" min={1} max={64} value={ttsConcurrency} onChange={(e) => setTtsConcurrency(Number(e.target.value))} /></label>
+          <label>ASR concurrency<input type="number" min={1} max={64} value={asrConcurrency} onChange={(e) => setAsrConcurrency(Number(e.target.value))} /></label>
+          <label>WER tolerance (letters per word)<input type="number" min={0} max={8} value={tolerance} onChange={(e) => setTolerance(Number(e.target.value))} /></label>
         </div>
         {voiceMode !== "auto" ? (
-          <div style={{ marginTop: 8 }}>
-            <span className="field-label">Stimmen ({selectedVoiceIds.length} gewählt)</span>
-            <div className="inline-pills" style={{ flexWrap: "wrap" }}>
+          <fieldset className="choice-group">
+            <legend>Voices ({selectedVoiceIds.length} selected)</legend>
+            <div className="button-row">
               {customVoices.map((v) => (
-                <label key={v.voice_id} className={`pill ${selectedVoiceIds.includes(v.voice_id) ? "active" : ""}`} style={{ cursor: "pointer" }}>
+                <label key={v.voice_id} className={`choice-chip ${selectedVoiceIds.includes(v.voice_id) ? "selected" : ""}`}>
                   <input type="checkbox" checked={selectedVoiceIds.includes(v.voice_id)} onChange={() => toggleVoice(v.voice_id)} /> {v.name}
                 </label>
               ))}
-              {!customVoices.length ? <span className="widget-copy">Keine gespeicherten Stimmen — lege im Overview-Tab welche an oder nutze AutoVoice.</span> : null}
+              {!customVoices.length ? <span className="hint">No saved voices. Add some on the Voices tab or use AutoVoice.</span> : null}
             </div>
-          </div>
+          </fieldset>
         ) : null}
-        <div className="button-row" style={{ marginTop: 12 }}>
-          <button className="primary-button" type="button" disabled={busy === "start-run" || !!runActive} onClick={() => void handleStartRun()}>Lauf starten ({runDomainIds.length} Domänen)</button>
-          {runActive ? <button className="ghost-button danger-button" type="button" onClick={() => void handleCancelRun()}>Stoppen</button> : null}
+        <div className="button-row">
+          <button type="button" disabled={busy === "start-run" || !!runActive} aria-busy={busy === "start-run"} onClick={() => void handleStartRun()}>Start run ({runDomainIds.length} domain{runDomainIds.length === 1 ? "" : "s"})</button>
+          {runActive ? <button className="danger-button" type="button" onClick={() => void handleCancelRun()}>Stop</button> : null}
         </div>
       </section>
 
-      {/* Run progress */}
-      <section className="widget span-6">
-        <div className="widget-header"><h2>Lauf-Fortschritt</h2></div>
-        {!run ? <p className="widget-copy">Noch kein Lauf gestartet.</p> : (
+      <section className="panel" aria-labelledby="dg-progress">
+        <div className="panel-head"><h2 id="dg-progress">Run progress</h2></div>
+        {!run ? <div className="state">No run started yet.</div> : (
           <>
-            <div className="metric-list">
-              <div className="metric-row"><span>Status</span><strong>{run.status} · {run.phase}</strong></div>
-              <div className="metric-row"><span>Fortschritt</span><strong>{run.pct}% ({run.accepted + run.rejected}/{run.planned})</strong></div>
-              <div className="metric-row"><span>Akzeptiert</span><strong>{run.accepted}</strong></div>
-              <div className="metric-row"><span>Verworfen</span><strong>{run.rejected}</strong></div>
-              <div className="metric-row"><span>Versuche gesamt</span><strong>{run.attempts}</strong></div>
-              {run.current ? <div className="metric-row"><span>Aktuell</span><strong style={{ fontWeight: 400 }}>{run.current}</strong></div> : null}
-              {run.error_message ? <div className="metric-row"><span>Fehler</span><strong>{run.error_message}</strong></div> : null}
-            </div>
-            <div className="ft-progress" style={{ marginTop: 10 }}><div className="ft-progress-fill" style={{ width: `${run.pct}%` }} /></div>
-            <div className="job-list" style={{ marginTop: 10 }}>
-              {run.voices.map((v) => (
-                <article key={v.voice} className="job-card">
-                  <strong>{v.voice}</strong>
-                  <div className="inline-pills"><span className="pill">{v.accepted}/{v.planned} ok</span><span className="pill">{v.rejected} verworfen</span><span className="pill">{v.attempts} Versuche</span></div>
-                </article>
-              ))}
+            <dl className="kv-list">
+              <div><dt>Status</dt><dd>{run.status} · {run.phase}</dd></div>
+              <div><dt>Progress</dt><dd>{run.pct}% ({run.accepted + run.rejected}/{run.planned})</dd></div>
+              <div><dt>Accepted</dt><dd>{run.accepted}</dd></div>
+              <div><dt>Rejected</dt><dd>{run.rejected}</dd></div>
+              <div><dt>Attempts</dt><dd>{run.attempts}</dd></div>
+              {run.current ? <div><dt>Current</dt><dd>{run.current}</dd></div> : null}
+            </dl>
+            {run.error_message ? <div className="banner danger">{run.error_message}</div> : null}
+            <div className="bar" role="progressbar" aria-valuenow={run.pct} aria-valuemin={0} aria-valuemax={100}><span className="seg-service" style={{ width: `${run.pct}%` }} /></div>
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Voice</th><th className="num">Accepted</th><th className="num">Rejected</th><th className="num">Attempts</th></tr></thead>
+                <tbody>
+                  {run.voices.map((v) => (
+                    <tr key={v.voice}><td>{v.voice}</td><td className="num">{v.accepted}/{v.planned}</td><td className="num">{v.rejected}</td><td className="num">{v.attempts}</td></tr>
+                  ))}
+                  {!run.voices.length ? <tr><td colSpan={4} className="empty">No voice has started yet.</td></tr> : null}
+                </tbody>
+              </table>
             </div>
           </>
         )}
       </section>
 
-      {/* Human-eval clip browser */}
-      <section className="widget span-12">
-        <div className="widget-header"><h2>Clip-Browser (Human-Eval)</h2>
-          <div className="button-row compact">
-            <select value={clipFilter} onChange={(e) => { setClipFilter(e.target.value); void loadClips(e.target.value); }}>
-              <option value="">Alle Stimmen</option>
+      <section className="panel span-all" aria-labelledby="dg-clips">
+        <div className="panel-head">
+          <h2 id="dg-clips">Clip review</h2>
+          <div className="button-row">
+            <select aria-label="Filter by voice" value={clipFilter} onChange={(e) => { setClipFilter(e.target.value); void loadClips(e.target.value); }}>
+              <option value="">All voices</option>
               {clips.voices.map((v) => <option key={v} value={v}>{v}</option>)}
             </select>
-            <button className="secondary-button" type="button" onClick={() => void loadClips()}>Aktualisieren</button>
+            <button className="secondary-button" type="button" onClick={() => void loadClips()}>Reload</button>
           </div>
+          <p className="hint">Listen and delete clips that sound wrong; that removes the audio and its transcript (.txt). {clips.total} clips.</p>
         </div>
-        <p className="widget-copy">Anhören und falsch klingende Clips löschen — das entfernt Audio + Transkript (.txt). {clips.total} Clips.</p>
-        <div className="job-list">
-          {clips.clips.map((clip) => (
-            <article key={clip.clip_id} className="job-card">
-              <div className="inline-pills" style={{ justifyContent: "space-between" }}>
-                <strong>{clip.voice} · {clip.filename}</strong>
-                <span className="pill">{clip.wer != null ? `WER ${(clip.wer * 100).toFixed(0)}%` : "WER -"}</span>
-              </div>
-              <p style={{ textAlign: "left" }}>{clip.text}</p>
-              {clipAudioUrls[clip.clip_id] ? <audio controls src={clipAudioUrls[clip.clip_id]} /> : null}
-              <div className="button-row compact">
-                {!clipAudioUrls[clip.clip_id] ? <button className="secondary-button" type="button" onClick={() => void handlePlayClip(clip.clip_id)}>Abspielen</button> : null}
-                <button className="ghost-button danger-button" type="button" onClick={() => void handleDeleteClip(clip.clip_id)}>Löschen</button>
-              </div>
-            </article>
-          ))}
-          {!clips.clips.length ? <p className="widget-copy">Noch keine Clips erzeugt.</p> : null}
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Clip</th><th>Text</th><th className="num">WER</th><th className="actions"><span className="sr-only">Actions</span></th></tr></thead>
+            <tbody>
+              {clips.clips.map((clip) => (
+                <tr key={clip.clip_id}>
+                  <td><strong>{clip.voice}</strong><div className="hint mono">{clip.filename}</div></td>
+                  <td className="wrap-cell">{clip.text}{clipAudioUrls[clip.clip_id] ? <audio controls src={clipAudioUrls[clip.clip_id]} /> : null}</td>
+                  <td className="num">{clip.wer != null ? `${(clip.wer * 100).toFixed(0)}%` : "—"}</td>
+                  <td className="actions">
+                    {!clipAudioUrls[clip.clip_id] ? <button className="secondary-button" type="button" onClick={() => void handlePlayClip(clip.clip_id)}>Play</button> : null}
+                    <button className="danger-button" type="button" onClick={() => void handleDeleteClip(clip.clip_id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+              {!clips.clips.length ? <tr><td colSpan={4} className="empty">No clips yet. Start a data generation run above.</td></tr> : null}
+            </tbody>
+          </table>
         </div>
       </section>
-    </section>
+    </div>
   );
 }

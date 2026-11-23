@@ -245,12 +245,18 @@ export interface DashboardSnapshot {
     realtime_x_live?: number | null;
     ttfa_ms_live?: number | null;
     jobs_total: number;
+    /** Jobs that ended with an error since the server started (older servers: missing). */
+    jobs_failed_total?: number | null;
     audio_seconds_total: number;
     gpu_name: string;
     gpu_memory_used_mb: number;
     gpu_memory_total_mb: number;
     gpu_utilization_pct: number;
     gpu_temperature_c?: number | null;
+    /** This service's memory on the card (MiB); null when unknown. */
+    gpu_process_memory_mb?: number | null;
+    /** nvidia-smi number of the card ("GPU <n>"). */
+    gpu_index?: number | null;
   };
   settings: ServerSettings;
   models: ModelInfo[];
@@ -579,6 +585,20 @@ function errorDetail(payload: unknown): string | null {
   return lines.length ? lines.join("; ") : null;
 }
 
+let unauthorizedHandler: (() => void) | null = null;
+
+/** Called once per 401 from an admin route (expired session): the app clears its state and shows the login. */
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
+function reportUnauthorized(url: string, status: number) {
+  if (status !== 401 || !unauthorizedHandler) return;
+  const path = url.split("?")[0];
+  if (!path.startsWith("/api/admin/") || path.startsWith("/api/admin/auth/")) return;
+  unauthorizedHandler();
+}
+
 export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"> & { adminKey?: string; responseType?: "json" | "blob" | "text"; body?: unknown } = {}): Promise<T> {
   const { adminKey, responseType = "json", headers = {}, body, ...rest } = options;
   const nextHeaders = buildHeaders(adminKey, headers);
@@ -606,6 +626,7 @@ export async function apiFetch<T>(url: string, options: Omit<RequestInit, "body"
     } catch {
       // keep raw text
     }
+    reportUnauthorized(url, response.status);
     throw new ApiError(message, response.status, payload);
   }
 
@@ -695,7 +716,13 @@ export async function streamSse(
   const response = await fetch(url, { credentials: "include", headers, signal: options.signal });
   if (!response.ok) {
     const text = await response.text();
-    throw new ApiError(text || "SSE request failed", response.status);
+    let message = text || "Live update request failed";
+    try {
+      message = errorDetail(text ? JSON.parse(text) : undefined) ?? message;
+    } catch {
+      // keep raw text
+    }
+    throw new ApiError(message, response.status);
   }
   if (!response.body) {
     throw new Error("SSE response does not include a readable body.");
@@ -779,38 +806,60 @@ export function createWavBlobFromInt16Chunks(chunks: Int16Array[], sampleRate: n
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+/** "2026-11-23 21:04" in local time; "—" when missing. */
 export function formatDate(value?: string | null) {
   if (!value) {
-    return "-";
+    return "—";
   }
-  return new Intl.DateTimeFormat("de-DE", {
-    year: "2-digit",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
+const numberFormat = (decimals: number) => new Intl.NumberFormat("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+
+function missing(value?: number | null): value is null | undefined {
+  return value === null || value === undefined || Number.isNaN(Number(value));
+}
+
+/** Latency: 1 decimal below 10 ms, integer ms up to 9,999 ms, then seconds with 1 decimal. */
 export function formatMs(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "-";
-  }
-  return `${Math.round(Number(value))} ms`;
+  if (missing(value)) return "—";
+  const ms = Number(value);
+  if (Math.abs(ms) < 10) return `${numberFormat(1).format(ms)} ms`;
+  if (Math.abs(ms) < 10000) return `${numberFormat(0).format(Math.round(ms))} ms`;
+  return `${numberFormat(1).format(ms / 1000)} s`;
 }
 
+/** Durations: "12.4 s", "3 min 4 s", "1 h 12 min". */
 export function formatSeconds(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "-";
-  }
-  return `${Number(value).toFixed(1)} s`;
+  if (missing(value)) return "—";
+  const seconds = Number(value);
+  if (seconds < 60) return `${numberFormat(1).format(seconds)} s`;
+  const whole = Math.round(seconds);
+  if (whole < 3600) return `${Math.floor(whole / 60)} min ${whole % 60} s`;
+  return `${Math.floor(whole / 3600)} h ${Math.floor((whole % 3600) / 60)} min`;
 }
 
+/** Realtime factor "12.3×" (two decimals below 10×). */
 export function formatRealtime(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "-";
-  }
-  return `${Number(value).toFixed(Number(value) >= 10 ? 0 : 2)}x`;
+  if (missing(value)) return "—";
+  const factor = Number(value);
+  return `${numberFormat(factor >= 10 ? 1 : 2).format(factor)}×`;
+}
+
+/** en-US number with fixed decimals ("1,234.5"); "—" when missing. */
+export function formatNumber(value?: number | null, decimals = 0) {
+  if (missing(value)) return "—";
+  return numberFormat(decimals).format(Number(value));
+}
+
+/** MiB -> "3.7 GB" (MiB / 1024, like nvidia-smi); "—" when missing. */
+export function formatMibAsGb(value?: number | null) {
+  if (missing(value)) return "—";
+  return `${numberFormat(1).format(Number(value) / 1024)} GB`;
 }
 
 export const ADMIN_KEY_STORAGE = "g3-omnivoice-admin-key";
@@ -856,6 +905,8 @@ export interface ApiKeyUsage {
 export interface ApiKeyInfo {
   id: string;
   alias: string;
+  /** Masked preview "omnivoice_tts_AbCd…wXyZ"; null for keys created before hints existed. */
+  hint?: string | null;
   created_at: string | null;
   usage: ApiKeyUsage;
 }
@@ -863,8 +914,13 @@ export interface ApiKeyInfo {
 export interface CreatedApiKey {
   id: string;
   alias: string;
+  hint?: string | null;
   created_at: string;
   token: string;
+}
+
+export async function authSetup() {
+  return apiFetch<{ setup_pending: boolean }>("/api/admin/auth/setup", { method: "GET" });
 }
 
 export async function login(username: string, password: string) {

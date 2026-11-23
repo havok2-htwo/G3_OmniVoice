@@ -39,7 +39,7 @@ Frontend routes served by the backend when `frontend/dist` exists:
 Open/public routes:
 
 - no API key required until at least one client API key exists
-- once client API keys exist, public synthesis callers send `X-API-Key`
+- once client API keys exist, public callers send `Authorization: Bearer <key>` (OpenAI SDKs do this) or `X-API-Key: <key>`; this covers synthesis, `/v1/jobs`, `/v1/jobs/{id}/audio`, the model and voice listings and the capabilities routes (`/health` and `/v1/audio/languages` stay open)
 - intended for local demo, compatibility clients, and performance testing
 
 Protected admin routes:

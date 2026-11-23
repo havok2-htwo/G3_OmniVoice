@@ -3,7 +3,7 @@
 Windows-first OmniVoice TTS server using the active G3 control-room shape:
 
 - FastAPI backend for synthesis, queueing, admin auth, stats, settings, model ops, and benchmarks
-- React/Vite landing page, public demo, and private admin panel
+- React/Vite landing page and private admin panel
 - Username/password admin login with httpOnly session cookies
 - Admin-managed client API keys for public synthesis endpoints
 - OmniVoice runtime adapter for `k2-fsa/OmniVoice` (default engine), plus more engines behind the
@@ -66,7 +66,6 @@ windows:
 Open:
 
 - `http://127.0.0.1:8091/`
-- `http://127.0.0.1:8091/demo`
 - `http://127.0.0.1:8091/admin`
 
 Admin access uses username/password login at `/admin`. On first run the default
@@ -314,7 +313,7 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
 
 ## Notes
 
-- Public demo and synthesis endpoints stay open until at least one client API key exists. Once keys exist, callers send `X-API-Key`.
+- The public API (synthesis, jobs, job audio, model/voice listings, capabilities) stays open until at least one client API key exists. Once keys exist, callers send `Authorization: Bearer <key>` or `X-API-Key: <key>`; the logged-in admin UI needs no key. An unreadable key store makes these routes answer 503 instead of opening them.
 - Admin endpoints use the browser login session from `/api/admin/auth/login`.
 - On OmniVoice, streaming is simulated PCM chunking after sentence/batch generation because OmniVoice does not expose an official native streaming hook. Ming, Audio8 and Phonon stream natively.
 - Non-streaming output can be downloaded as WAV or MP3.

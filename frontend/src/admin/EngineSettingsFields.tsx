@@ -3,13 +3,13 @@ import { Fragment } from "react";
 import type { RuntimeDeviceInfo, ServerSettings, VoiceItem } from "../shared/api";
 
 // Mirrors backend capacity.py so the VRAM estimate updates live as the budget is edited.
-// Batch seconds count generated audio plus each item's clone prompt (SonjaV2 8.2 s).
+// Batch seconds count generated audio plus each item's clone prompt (a typical 8.2 s reference).
 const VRAM_BASE_MB = 2700;
 const VRAM_MB_PER_AUDIO_S = 15.5;
 const VRAM_EST_S_PER_CHAR = 0.07;
 const VRAM_MB_PER_SEQUENCE_S = 42;
 const VRAM_CHUNK_PROMPT_ALLOWANCE_S = 15;
-const VRAM_TYPICAL_ITEM_S = 110 * VRAM_EST_S_PER_CHAR + 8.2; // ~110-char sentence with SonjaV2
+const VRAM_TYPICAL_ITEM_S = 110 * VRAM_EST_S_PER_CHAR + 8.2; // ~110-char sentence with an 8.2 s reference
 function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; chars: number; items: number } | null {
   if (!budgetMb || budgetMb <= 0) return null;
   const budgetS = Math.max(15, (budgetMb - VRAM_BASE_MB) / VRAM_MB_PER_AUDIO_S);
@@ -19,7 +19,7 @@ function vramEstimate(budgetMb: number): { peakGb: string; budgetS: number; char
   return { peakGb: ((VRAM_BASE_MB + budgetS * VRAM_MB_PER_AUDIO_S) / 1024).toFixed(1), budgetS: Math.round(budgetS), chars, items };
 }
 
-const VRAM_ESTIMATE_HELP = "Geschaetzter VRAM-Peak und die abgeleiteten Limits (Audio-Sekunden pro Batch, Zeichen pro Chunk) aus dem aktuellen VRAM-Budget. Faustformel (gemessen auf der RTX 5090): ~2,7 GB Modell + ~15,5 MB pro Sekunde Audio im Batch, wobei jeder Batch-Eintrag sein erzeugtes Audio plus den Referenz-Prompt der Stimme mitbringt (SonjaV2 8,2 s, Sonja 14,4 s). \"Saetze\" = Batch-Eintraege mit ~110 Zeichen und SonjaV2.";
+const VRAM_ESTIMATE_HELP = "Estimated VRAM peak and the derived limits (audio seconds per batch, characters per chunk) from the VRAM budget. Rule of thumb: about 2.7 GB model + about 15.5 MB per second of audio in the batch; every batch item brings its generated audio plus the voice's reference prompt. \"Sentences\" = batch items of about 110 characters.";
 
 type SettingKey = keyof ServerSettings;
 
@@ -35,105 +35,105 @@ type FieldDef = { label: string; help: string } & (
 // Label, help and input of every settings field. Which of them show comes from the backend's lists
 // (settings_fields of the active engine, server_settings_fields), never from this table.
 const FIELDS: Partial<Record<SettingKey, FieldDef>> = {
-  default_voice: { kind: "voice", label: "Default voice", help: "Default-Stimme passend zum Default-Modell. Base braucht eine gespeicherte Custom Voice." },
-  preferred_device: { kind: "device", label: "GPU", help: "CUDA-Geraet fuer die aktive Engine (OmniVoice, Ming und Audio8; Phonon und Audio8 ONNX laufen auf der CPU). Windows-GPU-Nummern und CUDA-Nummern koennen sich unterscheiden; relevant ist der NVIDIA/CUDA-Name. Erst nach Model Reload, Engine-Wechsel oder Server-Neustart aktiv." },
-  model_directory: { kind: "text", label: "Model directory", help: "Lokaler Ordner fuer OmniVoice-Modelldateien und Hugging-Face-Cache." },
-  allow_model_downloads: { kind: "toggle", label: "Model-Downloads erlauben", help: "Erlaubt dem Backend, k2-fsa/OmniVoice aus Hugging Face in das lokale models-Verzeichnis zu laden.", fallback: false },
-  max_parallel_requests: { kind: "number", label: "Active requests", help: "Maximale Anzahl paralleler Worker-Requests. Hoeher kann Durchsatz steigern, kostet aber RAM/VRAM.", fallback: 1 },
-  max_batch_size: { kind: "number", label: "Batch size", help: "Maximale Anzahl kompatibler Saetze/Requests pro echtem generate(text=[...]) Batch.", fallback: 1 },
-  batch_wait_ms: { kind: "number", label: "Batch wait ms", help: "Wartezeit, um kompatible Queue-Items fuer einen groesseren Batch zu sammeln.", fallback: 0 },
-  vram_budget_mb: { kind: "number", label: "VRAM budget MB", help: "Ziel-VRAM-Budget in MB. Daraus werden max. Audio-Sekunden pro Batch und max. Zeichen pro Sequenz abgeleitet, damit grosse Batches/lange Texte nicht ins OOM laufen. 0 = aus (unbegrenzt). Obergrenze fuer den VRAM dieses Prozesses. Default: 7000 (Batch 8 passt; gemessen ~5 GB Peak mit Sonja, SonjaV2 braucht weniger); 5000 fuer Batch 4 auf geteilten 24-GB-Karten. Ab Batch 4 steigt der Durchsatz mit Klon-Stimmen kaum noch (~35x Echtzeit).", fallback: 0, min: 0, step: 1000 },
-  stream_chunk_ms: { kind: "number", label: "Stream chunk ms", help: "Laenge eines Audio-Chunks im Stream. Kleiner liefert feiner, kostet aber mehr Overhead.", fallback: 140, min: 20, max: 1000 },
-  stream_prebuffer_ms: { kind: "number", label: "Stream prebuffer ms", help: "Audio-Puffer vor dem ersten Playback-Chunk. Hoeher stabilisiert Playback, erhoeht aber Latenz.", fallback: 0 },
+  default_voice: { kind: "voice", label: "Default voice", help: "Voice used when a request names none; it must fit the default model. Base needs a saved custom voice." },
+  preferred_device: { kind: "device", label: "GPU", help: "CUDA device of the active engine (OmniVoice, Ming and Audio8; Phonon and Audio8 ONNX run on the CPU). Numbered like nvidia-smi. Takes effect after a model reload, an engine switch or a server restart." },
+  model_directory: { kind: "text", label: "Model directory", help: "Local folder for the OmniVoice model files and the Hugging Face cache." },
+  allow_model_downloads: { kind: "toggle", label: "Allow model downloads", help: "Lets the server download k2-fsa/OmniVoice from Hugging Face into the local model directory.", fallback: false },
+  max_parallel_requests: { kind: "number", label: "Active requests", help: "Maximum number of requests the worker runs in parallel. Higher can raise throughput but costs RAM and VRAM.", fallback: 1 },
+  max_batch_size: { kind: "number", label: "Batch size", help: "Maximum number of compatible sentences or requests per real generate(text=[...]) batch.", fallback: 1 },
+  batch_wait_ms: { kind: "number", label: "Batch wait (ms)", help: "How long to wait for compatible queue items to build a larger batch.", fallback: 0 },
+  vram_budget_mb: { kind: "number", label: "VRAM budget (MB)", help: "Target VRAM of this process in MB. Limits audio seconds per batch and characters per sequence so large batches and long texts do not run out of memory. 0 = off (no limit). Default 7000 (batch 8 fits); 5000 for batch 4 on a shared 24 GB card. Above batch 4 the throughput with clone voices hardly grows.", fallback: 0, min: 0, step: 1000 },
+  stream_chunk_ms: { kind: "number", label: "Stream chunk (ms)", help: "Length of one audio chunk in the stream. Smaller is finer but costs more overhead.", fallback: 140, min: 20, max: 1000 },
+  stream_prebuffer_ms: { kind: "number", label: "Stream prebuffer (ms)", help: "Audio buffered before the first playback chunk. Higher is steadier but adds latency.", fallback: 0 },
   torch_dtype: {
     kind: "select",
     label: "Dtype",
-    help: "Torch dtype beim Modell-Laden: fp16 meist schnell, bf16 oft stabil, fp32 langsam und speicherhungrig. fp8 = experimentell (RTX 50xx fp8-Tensor-Cores, weniger VRAM); faellt bei Fehler automatisch auf bf16 zurueck. Erst nach Reload aktiv; Audioqualitaet unbedingt per WER-Benchmark pruefen.",
+    help: "Torch dtype when loading: fp16 is usually fast, bf16 often stable, fp32 slow and memory hungry. fp8 is experimental (fp8 tensor cores, less VRAM) and falls back to bf16 on error. Takes effect after a reload; check the audio quality with the WER benchmark.",
     fallback: "bfloat16",
     options: [
       { value: "float16", label: "fp16" },
       { value: "bfloat16", label: "bf16" },
       { value: "float32", label: "fp32" },
-      { value: "fp8", label: "fp8 (experimentell)" },
+      { value: "fp8", label: "fp8 (experimental)" },
     ],
   },
-  num_step: { kind: "optional-number", label: "Num step", help: "OmniVoice Diffusion-/Sampling-Schritte. Mehr kann Qualitaet verbessern, kostet Zeit. Default: 25." },
-  guidance_scale: { kind: "optional-number", label: "Guidance", help: "Guidance Scale fuer die Steuerstaerke. Hoeher folgt Prompts staerker, kann aber Artefakte erzeugen. Default: 2.0.", step: 0.1 },
-  duration: { kind: "optional-number", label: "Duration", help: "Optionale Ziel-Dauer in Sekunden. Leer lassen fuer OmniVoice-Automatik. Default: auto.", step: 0.1, placeholder: "auto" },
-  t_shift: { kind: "optional-number", label: "T shift", help: "OmniVoice Zeitverschiebungsparameter. Nur aendern, wenn du gezielt Sampling-Verhalten testest. Default: 0.1.", step: 0.1 },
-  position_temperature: { kind: "optional-number", label: "Position temp", help: "Temperatur fuer die Positionsauswahl beim Token-Unmasking. Default: 5.0.", step: 0.1 },
-  class_temperature: { kind: "optional-number", label: "Class temp", help: "Temperatur fuer die Token-Klassenwahl. 0 bedeutet greedy. Default: 0.0.", step: 0.1 },
-  audio_chunk_duration: { kind: "optional-number", label: "Audio chunk sec", help: "Interne OmniVoice-Ziellaenge fuer lange Audio-Chunks in Sekunden. Default: 30.1.", step: 0.1 },
-  audio_chunk_threshold: { kind: "optional-number", label: "Chunk threshold sec", help: "Ab welcher geschaetzten Dauer (Sek.) OmniVoice intern in Stuecke schneidet. Fuer Hoerbuecher hoch setzen (z.B. 1800), damit der Text als EINE durchgehende Sequenz mit Betonung erzeugt wird. Grenze ist der VRAM (~7-9 min am Stueck). Default: 30.", step: 0.1 },
-  compile_model: { kind: "toggle", label: "torch.compile fuer llm", help: "Aktiviert torch.compile fuer das LLM im OmniVoice-Modell. Erst nach Reload/Restart wirksam.", fallback: false },
-  sdpa_prefer_cudnn: { kind: "toggle", label: "cuDNN-Attention bevorzugen", help: "Setzt cuDNN an die erste Stelle der SDPA-Kernelwahl (sonst mem-efficient). Auf der RTX 5090 etwa 15-22 % schneller, Audio numerisch minimal anders. Erst nach Reload/Restart wirksam.", fallback: true },
-  packed_cfg: { kind: "toggle", label: "CFG gepackt (ohne Padding)", help: "Rechnet pro Item eine Zeile [mit Stimme | ohne Stimme] statt zwei aufgefuellter Zeilen, spart die Fuell-Tokens der CFG. Auf der RTX 5090 etwa 20-33 % schneller, Audio numerisch minimal anders. Erst nach Reload/Restart wirksam.", fallback: true },
-  stream_first_preempt: { kind: "toggle", label: "Stream-Start vorziehen (Aufspringen)", help: "Kommt eine Streaming-Anfrage, waehrend ein Batch rechnet, wird ihr erster Satz am naechsten Diffusionsschritt solo dazwischengeschoben statt nach dem Batch. Erstes Audio deutlich frueher, der laufende Batch bleibt bitgleich und pausiert nur kurz.", fallback: true },
-  cudagraph_skip_dynamic_graphs: { kind: "toggle", label: "CUDAGraph dynamic shapes skippen", help: "Laesst Inductor dynamische CUDAGraph-Shapes ueberspringen und unterdrueckt viele Shape-Warnungen.", fallback: false },
-  cuda_memory_trim_after_batch: { kind: "toggle", label: "Auto VRAM trim wenn Queue leer", help: "Leert den PyTorch CUDA Cache, sobald die Queue nach einem Batch leer ist (nicht mehr nach jedem Batch, das kostete 8-11 ms pro Batch). Gibt VRAM nach einer Lastphase an die anderen Dienste zurueck.", fallback: true },
-  warmup_on_startup: { kind: "toggle", label: "Warmup beim Start", help: "Fuehrt beim Start automatisch Warmup aus. Gut fuer erste Latenz, verlaengert Startup.", fallback: false },
-  denoise: { kind: "toggle", label: "Denoise", help: "Fuegt den OmniVoice-Denoise-Token in die Generierung ein. Default: an.", fallback: false },
-  preprocess_prompt: { kind: "toggle", label: "Preprocess prompt", help: "Bereitet Referenzprompt und Clone-Audio vor dem Generieren auf. Default: an.", fallback: false },
-  postprocess_output: { kind: "toggle", label: "Postprocess output", help: "Entfernt/saeubert Stille und fuegt kleine Fades/Pads an. Default: an.", fallback: false },
-  ming_max_slots: { kind: "number", label: "Ming slots", help: "Ming: Zeilen, die gleichzeitig decodiert werden (kontinuierliches Batching, neue Anfragen steigen am naechsten Schritt ein). Mehr Slots = mehr Durchsatz und VRAM. Aktiv beim naechsten Laden von Ming. Die Qualitaetsparameter (flow steps 10, CFG 2.0) sind fest.", fallback: 1, shown: 16, min: 1, max: 64, clamp: true },
-  ming_first_chunk_latents: { kind: "number", label: "Erster Chunk (Latents)", help: "Ming: Latents (je 80 ms) im ersten Stream-Chunk eines Satzes. Klein = schnelle erste Audiodaten (TTFA).", fallback: 1, shown: 2, min: 1, max: 8, clamp: true },
-  ming_max_chunk_latents: { kind: "number", label: "Folge-Chunks (Latents)", help: "Ming: Latents (je 80 ms) in den folgenden Stream-Chunks. Groesser = weniger Overhead, etwas spaetere Lieferung.", fallback: 1, shown: 8, min: 1, max: 32, clamp: true },
+  num_step: { kind: "optional-number", label: "Steps", help: "OmniVoice diffusion/sampling steps. More can improve quality and costs time. Default 25." },
+  guidance_scale: { kind: "optional-number", label: "Guidance", help: "Guidance scale. Higher follows the prompt more closely but can add artifacts. Default 2.0.", step: 0.1 },
+  duration: { kind: "optional-number", label: "Duration (s)", help: "Optional target duration in seconds. Leave empty for OmniVoice's own estimate.", step: 0.1, placeholder: "auto" },
+  t_shift: { kind: "optional-number", label: "T shift", help: "OmniVoice time-shift parameter. Change it only to test sampling behaviour. Default 0.1.", step: 0.1 },
+  position_temperature: { kind: "optional-number", label: "Position temperature", help: "Temperature of the position choice during token unmasking. Default 5.0.", step: 0.1 },
+  class_temperature: { kind: "optional-number", label: "Class temperature", help: "Temperature of the token class choice. 0 means greedy. Default 0.0.", step: 0.1 },
+  audio_chunk_duration: { kind: "optional-number", label: "Audio chunk (s)", help: "Internal OmniVoice target length of long audio chunks in seconds. Default 30.1.", step: 0.1 },
+  audio_chunk_threshold: { kind: "optional-number", label: "Chunk threshold (s)", help: "Estimated duration from which OmniVoice cuts internally. Set it high for audiobooks (for example 1800) so the text is one continuous sequence; VRAM is the limit (about 7 to 9 minutes at once). Default 30.", step: 0.1 },
+  compile_model: { kind: "toggle", label: "torch.compile for the LLM", help: "Compiles the LLM inside the OmniVoice model. Takes effect after a reload or restart.", fallback: false },
+  sdpa_prefer_cudnn: { kind: "toggle", label: "Prefer cuDNN attention", help: "Puts cuDNN first in the SDPA kernel choice (otherwise memory-efficient). About 15 to 22% faster on recent GPUs, audio numerically slightly different. Takes effect after a reload or restart.", fallback: true },
+  packed_cfg: { kind: "toggle", label: "Packed CFG (no padding)", help: "Computes one row [with voice | without voice] per item instead of two padded rows and saves the CFG padding tokens. About 20 to 33% faster on recent GPUs, audio numerically slightly different. Takes effect after a reload or restart.", fallback: true },
+  stream_first_preempt: { kind: "toggle", label: "Start streams early", help: "When a streaming request arrives while a batch runs, its first sentence runs alone at the next diffusion step instead of after the batch. First audio arrives much sooner; the running batch stays bit-identical and only pauses briefly.", fallback: true },
+  cudagraph_skip_dynamic_graphs: { kind: "toggle", label: "Skip dynamic CUDA graph shapes", help: "Lets Inductor skip dynamic CUDA graph shapes and silences many shape warnings.", fallback: false },
+  cuda_memory_trim_after_batch: { kind: "toggle", label: "Trim VRAM when the queue is empty", help: "Empties the PyTorch CUDA cache as soon as the queue is empty after a batch, so VRAM goes back to the other services after a busy phase.", fallback: true },
+  warmup_on_startup: { kind: "toggle", label: "Warmup on start", help: "Runs a warmup when the server starts. Good for the first latency, makes the start longer.", fallback: false },
+  denoise: { kind: "toggle", label: "Denoise", help: "Adds the OmniVoice denoise token to the generation. Default on.", fallback: false },
+  preprocess_prompt: { kind: "toggle", label: "Preprocess prompt", help: "Prepares the reference prompt and the clone audio before generating. Default on.", fallback: false },
+  postprocess_output: { kind: "toggle", label: "Postprocess output", help: "Trims silence and adds short fades and padding. Default on.", fallback: false },
+  ming_max_slots: { kind: "number", label: "Ming slots", help: "Ming: rows decoded at the same time (continuous batching; new requests join at the next step). More slots = more throughput and VRAM. Takes effect when Ming loads next. The quality parameters (10 flow steps, CFG 2.0) are fixed.", fallback: 1, shown: 16, min: 1, max: 64, clamp: true },
+  ming_first_chunk_latents: { kind: "number", label: "First chunk (latents)", help: "Ming: latents (80 ms each) in the first stream chunk of a sentence. Small = faster first audio (TTFA).", fallback: 1, shown: 2, min: 1, max: 8, clamp: true },
+  ming_max_chunk_latents: { kind: "number", label: "Later chunks (latents)", help: "Ming: latents (80 ms each) in the following stream chunks. Larger = less overhead, slightly later delivery.", fallback: 1, shown: 8, min: 1, max: 32, clamp: true },
   ming_output_sample_rate: {
     kind: "select",
-    label: "Ming Ausgaberate",
-    help: "Ming-Ausgaberate. 24000 haelt den Client-Vertrag (Raw-PCM von /v1/audio/speech ist 24 kHz); 44100 ist die native Rate.",
+    label: "Ming output rate",
+    help: "Ming output sample rate. 24000 keeps the client contract (raw PCM from /v1/audio/speech is 24 kHz); 44100 is the native rate.",
     fallback: 24000,
     options: [
-      { value: 24000, label: "24000 Hz (Client-Vertrag)" },
-      { value: 44100, label: "44100 Hz (nativ)" },
+      { value: 24000, label: "24000 Hz (client contract)" },
+      { value: 44100, label: "44100 Hz (native)" },
     ],
   },
-  ming_model_dir: { kind: "text", label: "Ming model dir", help: "Ordner mit den Ming-3.0-tts-0.5B Gewichten (hf download inclusionAI/Ming-3.0-tts-0.5B --local-dir ...)." },
-  ming_cuda_graphs: { kind: "toggle", label: "Ming CUDA Graphs", help: "Ming: CUDA Graphs fuer die Schritt-Schleife (die eager-Schleife ist launch-gebunden). Nur zum Debuggen abschalten.", fallback: true },
-  phonon_lang: { kind: "text", label: "Phonon Sprache", help: "Phonon: Sprache der Engine, z.B. de. Requests koennen sie nicht aendern. Aktiv beim naechsten Laden von Phonon.", placeholder: "de" },
-  phonon_quant: { kind: "text", label: "Phonon Quantisierung", help: "Phonon: Quantisierung der Modelldateien, z.B. q8. Aktiv beim naechsten Laden von Phonon.", placeholder: "q8" },
-  phonon_workers: { kind: "number", label: "Phonon Worker", help: "Phonon: parallele Engine-Instanzen auf der CPU. Mehr Worker = mehr gleichzeitige Saetze und mehr RAM. Aktiv beim naechsten Laden von Phonon.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
-  phonon_threads: { kind: "number", label: "Phonon Threads", help: "Phonon: Rust-Threads pro Engine. 0 = automatisch aus den CPU-Kernen und der Worker-Zahl. Aktiv beim naechsten Laden von Phonon.", fallback: 0, min: 0, max: 64, clamp: true },
-  audio8_max_slots: { kind: "number", label: "Audio8 Slots", help: "Audio8: Zeilen, die gleichzeitig rendern (kontinuierliches Batching, neue Anfragen steigen am naechsten Schritt ein). Mehr Slots = mehr Durchsatz und VRAM. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 16, min: 1, max: 64, clamp: true },
-  audio8_first_chunk_frames: { kind: "number", label: "Erster Chunk (Frames)", help: "Audio8: Frames (je 46 ms) im ersten Stream-Chunk eines Satzes. Klein = schnelle erste Audiodaten (TTFA). Default: 4. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 4, min: 1, max: 12, clamp: true },
-  audio8_chunk_frames: { kind: "number", label: "Folge-Chunks (Frames)", help: "Audio8: Frames (je 46 ms) in den folgenden Stream-Chunks. Groesser = weniger Overhead, etwas spaetere Lieferung. Default: 12. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 12, min: 1, max: 32, clamp: true },
+  ming_model_dir: { kind: "text", label: "Ming model directory", help: "Folder with the Ming-3.0-tts-0.5B weights (hf download inclusionAI/Ming-3.0-tts-0.5B --local-dir ...)." },
+  ming_cuda_graphs: { kind: "toggle", label: "Ming CUDA graphs", help: "Ming: CUDA graphs for the step loop (the eager loop is launch-bound). Turn off only for debugging.", fallback: true },
+  phonon_lang: { kind: "text", label: "Phonon language", help: "Phonon: language of the engine, for example de. Requests cannot change it. Takes effect when Phonon loads next.", placeholder: "de" },
+  phonon_quant: { kind: "text", label: "Phonon quantization", help: "Phonon: quantization of the model files, for example q8. Takes effect when Phonon loads next.", placeholder: "q8" },
+  phonon_workers: { kind: "number", label: "Phonon workers", help: "Phonon: parallel engine instances on the CPU. More workers = more sentences at once and more RAM. Takes effect when Phonon loads next.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
+  phonon_threads: { kind: "number", label: "Phonon threads", help: "Phonon: Rust threads per engine. 0 = automatic from the CPU cores and the worker count. Takes effect when Phonon loads next.", fallback: 0, min: 0, max: 64, clamp: true },
+  audio8_max_slots: { kind: "number", label: "Audio8 slots", help: "Audio8: rows rendered at the same time (continuous batching; new requests join at the next step). More slots = more throughput and VRAM. Takes effect when the model loads next.", fallback: 1, shown: 16, min: 1, max: 64, clamp: true },
+  audio8_first_chunk_frames: { kind: "number", label: "First chunk (frames)", help: "Audio8: frames (46 ms each) in the first stream chunk of a sentence. Small = faster first audio (TTFA). Default 4. Takes effect when the model loads next.", fallback: 1, shown: 4, min: 1, max: 12, clamp: true },
+  audio8_chunk_frames: { kind: "number", label: "Later chunks (frames)", help: "Audio8: frames (46 ms each) in the following stream chunks. Larger = less overhead, slightly later delivery. Default 12. Takes effect when the model loads next.", fallback: 1, shown: 12, min: 1, max: 32, clamp: true },
   audio8_output_sample_rate: {
     kind: "select",
-    label: "Audio8 Ausgaberate",
-    help: "Audio8-Ausgaberate. 44100 ist die native Rate; 24000 rechnet herunter und haelt den Client-Vertrag (Raw-PCM von /v1/audio/speech ist 24 kHz). Aktiv beim naechsten Laden des Modells.",
+    label: "Audio8 output rate",
+    help: "Audio8 output sample rate. 44100 is native; 24000 resamples and keeps the client contract (raw PCM from /v1/audio/speech is 24 kHz). Takes effect when the model loads next.",
     fallback: 44100,
     options: [
-      { value: 44100, label: "44100 Hz (nativ)" },
-      { value: 24000, label: "24000 Hz (Client-Vertrag)" },
+      { value: 44100, label: "44100 Hz (native)" },
+      { value: 24000, label: "24000 Hz (client contract)" },
     ],
   },
-  audio8_fragment_max_chars: { kind: "number", label: "Max. Zeichen pro Stueck", help: "Audio8: laengstes Textstueck, das in einem Zug gerendert wird (24-400). Das Modell laesst in langen Saetzen gelegentlich einen Satzteil aus, darum werden sie vorher geteilt; zu kleine Stuecke trennen Saetze an unguenstigen Stellen. Default: 200.", fallback: 200, min: 24, max: 400 },
-  audio8_temperature: { kind: "optional-number", label: "Temperature", help: "Audio8: Sampling-Temperatur (ueber 0 bis 2). Niedriger = gleichmaessiger, hoeher = mehr Variation. Default: 0.8. Aktiv beim naechsten Laden des Modells.", min: 0.05, max: 2, step: 0.05, placeholder: "0.8" },
-  audio8_top_p: { kind: "optional-number", label: "Top P", help: "Audio8: Anteil der Wahrscheinlichkeitsmasse, aus dem gesampelt wird (ueber 0 bis 1). Default: 0.95. Aktiv beim naechsten Laden des Modells.", min: 0.05, max: 1, step: 0.05, placeholder: "0.95" },
-  audio8_top_k: { kind: "number", label: "Top K", help: "Audio8: Anzahl der wahrscheinlichsten Token, aus denen gesampelt wird (1-1024). Default: 50. Aktiv beim naechsten Laden des Modells.", fallback: 50, min: 1, max: 1024, clamp: true },
-  audio8_cuda_graphs: { kind: "toggle", label: "Audio8 CUDA Graphs", help: "Audio8: CUDA Graphs fuer die Schritt-Schleife. Nur zum Debuggen abschalten. Aktiv beim naechsten Laden des Modells.", fallback: true },
-  audio8_onnx_workers: { kind: "number", label: "ONNX Worker", help: "Audio8 ONNX: Saetze, die gleichzeitig auf der CPU rendern. Jeder Worker hat einen LM-Thread und eigene Codec-Threads. Mehr Worker = mehr gleichzeitige Saetze und mehr RAM. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
-  audio8_onnx_threads: { kind: "number", label: "ONNX Codec-Threads", help: "Audio8 ONNX: Codec-Threads pro Worker. 0 = automatisch aus den physischen Kernen, die neben den LM-Threads frei bleiben. Aktiv beim naechsten Laden des Modells.", fallback: 0, min: 0, max: 64, clamp: true },
-  audio8_onnx_first_chunk_frames: { kind: "number", label: "Erster Chunk (Frames)", help: "Audio8 ONNX: Frames (je 46 ms) im ersten Stream-Chunk. Die CPU decodiert viel langsamer als die GPU, der erste Chunk muss bis zum naechsten reichen. Default: 6. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 6, min: 1, max: 32, clamp: true },
-  audio8_onnx_chunk_frames: { kind: "number", label: "Folge-Chunks (Frames)", help: "Audio8 ONNX: Mindestzahl Frames (je 46 ms) in den folgenden Stream-Chunks. Default: 8. Aktiv beim naechsten Laden des Modells.", fallback: 1, shown: 8, min: 1, max: 64, clamp: true },
-  whisper_base_url: { kind: "text", label: "Whisper URL", help: "Einzige Whisper URL. Host/Port reicht, z.B. http://127.0.0.1:7861 (Default, G3_WHISPER auf demselben Rechner); ein voller Endpoint wie /transcribe/ geht auch.", placeholder: "http://127.0.0.1:7861", also: { whisper_path: "" } },
-  vllm_base_url: { kind: "text", label: "vLLM Base URL", help: "OpenAI-kompatible vLLM Base URL fuer zufaellige WER-Referenzsaetze. Default: http://192.168.20.126:8000.", placeholder: "http://192.168.20.126:8000" },
-  vllm_model: { kind: "vllm-model", label: "vLLM Model", help: "vLLM Modell fuer WER-Saetze. Default: Qwen/Qwen3.6-35B-A3B-FP8. Leer lassen nutzt das erste Modell aus /v1/models." },
-  wer_concurrency: { kind: "number", label: "WER TTS wave", help: "TTS-Wellengroesse fuer WER-Benchmarks. Eine Welle wird zusammen in die Queue gelegt, damit die Engine echte Batches sieht.", fallback: 1, min: 1, max: 64 },
-  wer_transcription_concurrency: { kind: "number", label: "WER ASR concurrency", help: "Whisper-Parallelitaet nach der Audio-Erzeugung. Auf demselben GPU-System meist 1 lassen, damit ASR die TTS-Batches nicht ausbremst.", fallback: 1, min: 1, max: 64 },
-  queue_limit: { kind: "number", label: "Queue limit", help: "Maximale Anzahl wartender Jobs, bevor neue Requests mit 429 abgelehnt werden.", fallback: 1 },
-  max_input_chars: { kind: "number", label: "Max input chars", help: "Harte Obergrenze fuer die Zeichenzahl eines einzelnen Requests. Darueber kommt 413. 0 = aus.", fallback: 0, min: 0, step: 1000 },
+  audio8_fragment_max_chars: { kind: "number", label: "Max characters per piece", help: "Audio8: longest text piece rendered in one go (24 to 400). The model sometimes drops a clause in long sentences, so they are split first; very small pieces split sentences at awkward places. Default 200.", fallback: 200, min: 24, max: 400 },
+  audio8_temperature: { kind: "optional-number", label: "Temperature", help: "Audio8: sampling temperature (above 0 up to 2). Lower = more even, higher = more variation. Default 0.8. Takes effect when the model loads next.", min: 0.05, max: 2, step: 0.05, placeholder: "0.8" },
+  audio8_top_p: { kind: "optional-number", label: "Top P", help: "Audio8: share of the probability mass sampled from (above 0 up to 1). Default 0.95. Takes effect when the model loads next.", min: 0.05, max: 1, step: 0.05, placeholder: "0.95" },
+  audio8_top_k: { kind: "number", label: "Top K", help: "Audio8: number of most likely tokens sampled from (1 to 1024). Default 50. Takes effect when the model loads next.", fallback: 50, min: 1, max: 1024, clamp: true },
+  audio8_cuda_graphs: { kind: "toggle", label: "Audio8 CUDA graphs", help: "Audio8: CUDA graphs for the step loop. Turn off only for debugging. Takes effect when the model loads next.", fallback: true },
+  audio8_onnx_workers: { kind: "number", label: "ONNX workers", help: "Audio8 ONNX: sentences rendered at the same time on the CPU. Each worker has one LM thread and its own codec threads. More workers = more sentences at once and more RAM. Takes effect when the model loads next.", fallback: 1, shown: 2, min: 1, max: 16, clamp: true },
+  audio8_onnx_threads: { kind: "number", label: "ONNX codec threads", help: "Audio8 ONNX: codec threads per worker. 0 = automatic from the physical cores left next to the LM threads. Takes effect when the model loads next.", fallback: 0, min: 0, max: 64, clamp: true },
+  audio8_onnx_first_chunk_frames: { kind: "number", label: "First chunk (frames)", help: "Audio8 ONNX: frames (46 ms each) in the first stream chunk. The CPU decodes much slower than a GPU, so the first chunk must last until the next one. Default 6. Takes effect when the model loads next.", fallback: 1, shown: 6, min: 1, max: 32, clamp: true },
+  audio8_onnx_chunk_frames: { kind: "number", label: "Later chunks (frames)", help: "Audio8 ONNX: minimum frames (46 ms each) in the following stream chunks. Default 8. Takes effect when the model loads next.", fallback: 1, shown: 8, min: 1, max: 64, clamp: true },
+  whisper_base_url: { kind: "text", label: "Whisper URL", help: "The G3 Whisper server. Host and port are enough, for example http://127.0.0.1:7861 (G3 Whisper on the same machine); a full endpoint such as /transcribe/ works too.", placeholder: "http://127.0.0.1:7861", also: { whisper_path: "" } },
+  vllm_base_url: { kind: "text", label: "vLLM base URL", help: "OpenAI-compatible vLLM base URL that writes random WER reference sentences.", placeholder: "http://vllm-host:8000" },
+  vllm_model: { kind: "vllm-model", label: "vLLM model", help: "vLLM model for the WER sentences. Empty = the first model from /v1/models." },
+  wer_concurrency: { kind: "number", label: "WER TTS wave", help: "TTS wave size of WER benchmarks. One wave is queued together so the engine sees real batches.", fallback: 1, min: 1, max: 64 },
+  wer_transcription_concurrency: { kind: "number", label: "WER ASR concurrency", help: "Whisper parallelism after the audio is generated. On a shared GPU usually 1, so ASR does not slow the TTS batches down.", fallback: 1, min: 1, max: 64 },
+  queue_limit: { kind: "number", label: "Queue limit", help: "Maximum number of waiting jobs before new requests are refused with 429.", fallback: 1 },
+  max_input_chars: { kind: "number", label: "Max input characters", help: "Hard limit of characters in one request; above it the server answers 413. 0 = off.", fallback: 0, min: 0, step: 1000 },
   text_optimization_default: {
     kind: "select",
-    label: "Textoptimierung (Default)",
-    help: "Standard fuer API-Requests ohne eigenes text_optimization-Feld. 'deterministic' schreibt Datum, Zahlen, Einheiten, URLs und Markdown fuer de/en aus. Wirkt nur, wenn der Request de/en angibt oder der Text bei Auto/ohne Sprache als Deutsch/Englisch erkannt wird (Schreibweise oder typische Woerter); andere Sprachen bleiben unveraendert. Benchmarks, WER und Finetune bleiben immer aus.",
+    label: "Text optimization (default)",
+    help: "Default for API requests without their own text_optimization field. 'deterministic' writes out dates, numbers, units, URLs and Markdown for German and English. It acts only when the request says de/en or the text is detected as German or English (spelling or typical words); other languages stay unchanged. Benchmarks, WER and finetuning always run without it.",
     fallback: "off",
     options: [
       { value: "off", label: "off" },
       { value: "deterministic", label: "deterministic (de/en)" },
     ],
   },
-  sentence_chunking: { kind: "toggle", label: "Sentence chunking aktiv", help: "Zerlegt lange Texte in Saetze. Das macht Streaming frueher hoerbar und erlaubt Satz-Batching.", fallback: true },
+  sentence_chunking: { kind: "toggle", label: "Sentence chunking", help: "Splits long texts into sentences. Streams become audible sooner and sentences can be batched.", fallback: true },
 };
 
 /** The draft values of `fields`, for a preset that holds nothing of another engine. */
@@ -195,7 +195,7 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
         return (
           <select value={match ? voiceValue(match) : current} onChange={(event) => patch(event.target.value)} disabled={!context.voiceOptions.length}>
             {/* A saved voice outside the list stays what it is; nothing rewrites it behind the admin's back. */}
-            {!match ? <option value={current}>{current ? `${current} (nicht in der Liste)` : "Keine passende Stimme"}</option> : null}
+            {!match ? <option value={current}>{current ? `${current} (not in the list)` : "No matching voice"}</option> : null}
             {context.voiceOptions.map((voice) => <option key={voice.voice_id} value={voiceValue(voice)}>{voice.name}</option>)}
           </select>
         );
@@ -203,7 +203,7 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
       case "device":
         return (
           <select value={draft.preferred_device} onChange={(event) => patch(event.target.value)}>
-            {context.devices.map((device) => <option key={device.id} value={device.id}>{device.label}{device.available ? "" : " (nicht verfuegbar)"}</option>)}
+            {context.devices.map((device) => <option key={device.id} value={device.id}>{device.label}{device.available ? "" : " (not available)"}</option>)}
           </select>
         );
       case "vllm-model":
@@ -212,7 +212,7 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
             {context.vllmModels.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
         ) : (
-          <input value={draft.vllm_model || context.vllmModels[0] || ""} onChange={(event) => patch(event.target.value)} placeholder={context.vllmLoading ? "lade Modelle..." : "auto aus /v1/models"} />
+          <input value={draft.vllm_model || context.vllmModels[0] || ""} onChange={(event) => patch(event.target.value)} placeholder={context.vllmLoading ? "Loading models…" : "auto (first of /v1/models)"} />
         );
       default:
         return null;
@@ -226,9 +226,9 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
         <div className="field-grid four">
           {inputs.map(({ name, def }) => (
             <Fragment key={name}>
-              <label className="with-help" title={def.help}>{def.label}{renderControl(name, def)}</label>
+              <label>{def.label}{renderControl(name, def)}<span className="hint">{def.help}</span></label>
               {name === "vram_budget_mb" && showEstimate ? (
-                <label className="with-help" title={VRAM_ESTIMATE_HELP}>Est. VRAM peak<input type="text" readOnly value={estimate ? `~${estimate.peakGb} GB · ${estimate.budgetS}s/Batch (~${estimate.items} Saetze) · ${estimate.chars} Zeichen/Chunk` : "Budget aus (unbegrenzt)"} /></label>
+                <label>Estimated VRAM peak<input type="text" readOnly value={estimate ? `~${estimate.peakGb} GB · ${estimate.budgetS} s/batch (~${estimate.items} sentences) · ${estimate.chars} chars/chunk` : "Budget off (no limit)"} /><span className="hint">{VRAM_ESTIMATE_HELP}</span></label>
               ) : null}
             </Fragment>
           ))}
@@ -237,9 +237,9 @@ export function SettingsFields({ fields, draft, context, onPatch }: {
       {toggles.length ? (
         <div className="field-grid two runtime-toggle-grid">
           {toggles.map(({ name, def }) => (
-            <label key={name} className="checkbox-row with-help" title={def.help}>
+            <label key={name} className="checkbox-row">
               <input type="checkbox" checked={Boolean(draft[name] ?? (def.kind === "toggle" && def.fallback))} onChange={(event) => onPatch({ [name]: event.target.checked } as Partial<ServerSettings>)} />
-              {def.label}
+              <span className="checkbox-text">{def.label}<span className="hint">{def.help}</span></span>
             </label>
           ))}
         </div>

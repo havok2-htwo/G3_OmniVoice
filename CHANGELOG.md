@@ -4,6 +4,35 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - Admin UI follows the shared G3 admin standard
+
+- New look shared with G3 Rerank, Embed and Whisper (tokens, pill buttons, 24/16/12 px radii, one type scale, light mode
+  via `prefers-color-scheme`), compact header with status chips (state, model, GPU, API Open/Protected) and hash-routed
+  tabs: Dashboard, Playground, Voices, Models, Settings, Benchmark, Data generation, Training, History, API keys, Account.
+  Everything is English (no more German without umlauts); help texts are visible hints instead of hover-only tooltips.
+- One Settings save bar with an unsaved-changes count, Discard and Reload replaces the three save buttons; live updates no
+  longer overwrite unsaved edits, and model downloads use the saved model directory.
+- Performance panel (`GET /api/admin/perf`, shared contract schema 1): GPU utilization 0-100 %, VRAM 0 to the card total in
+  GB (card used and this service), realtime factor, queue depth and TTFA on a real 5-minute time axis. Replaces the old
+  mini graphs (integer-rounded throughput, "1/1/0" axes, no time scale).
+- API keys tab: status badge, copy buttons, key hint (`omnivoice_tts_AbCd…wXyZ`), confirm with a warning before revoking
+  the last key. Confirmations before deleting voices, presets, caches, clips and before unload.
+- The dashboard stream reconnects (1, 2, 5, 10 s) and shows "Live updates reconnecting…"; a failed first load shows the
+  error with Retry; an expired session returns to the login; login and password forms submit with Enter.
+
+### Fixed - Wrong GPU, admin synthesis behind API keys, key store
+
+- GPU stats showed nvidia-smi GPU 0 for `cuda:0`. With `CUDA_VISIBLE_DEVICES=<uuid>` that is another card (on a
+  two-GPU box the 2070 SUPER instead of the 3090). Cards are now matched by UUID; the GPU picker reads "GPU 1 · GeForce
+  RTX 3090 · 24 GB (cuda:0)", and the VRAM line shows this service's share.
+- Quick synthesis failed with 401 once a key existed: the public routes now accept a valid admin session (no usage
+  counted). They also accept `Authorization: Bearer <key>` besides `X-API-Key`; an explicitly sent wrong key is refused.
+- `/v1/jobs/{id}/audio`, the model and voice listings and the capabilities routes are key-protected once keys exist.
+- `server_secrets.json` is written atomically with mode 0600; an unreadable file is no longer treated as "no keys": the
+  public API answers 503 and the file is left untouched. Key usage is written at most every 5 s instead of per request.
+- Admin login: SameSite=Strict cookie, same-origin check on admin writes, 5 failed logins per minute per IP, new
+  passwords need 8 characters (existing ones keep working), the default credentials are shown only during setup.
+
 ### Fixed - Server hung after a client cancelled a job between two batches
 
 - A job cancelled (client Stop, closed stream, `DELETE`) while it was active but none of its sentences was rendering

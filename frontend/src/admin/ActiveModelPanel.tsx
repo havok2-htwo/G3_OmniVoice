@@ -1,16 +1,16 @@
-import type { DashboardSnapshot, EngineInfo, ModelDownloadStatus } from "../shared/api";
+import { formatMibAsGb, type DashboardSnapshot, type EngineInfo, type ModelDownloadStatus } from "../shared/api";
 
 const HELP = {
-  modelSelect: "Checkpoint dieser Engine fuer Preload, Warmup, Reload und Default. Wirkt fuer den naechsten Serverstart erst nach dem Speichern.",
-  preload: "Laedt das gewaehlte Modell ohne extra Benchmark-Run in den Speicher.",
-  warmup: "Fuehrt eine kurze Testgenerierung aus, damit CUDA/Triton/Kernels und Caches vorbereitet sind.",
-  reload: "Entlaedt und laedt das gewaehlte Modell neu. Noetig nach dtype/compile/graph-Aenderungen.",
-  unload: "Entfernt das Modell aus dem Speicher und leert CUDA Cache soweit moeglich.",
-  freeMemory: "Gibt ungenutzten VRAM frei. OmniVoice bleibt geladen, Ming und Audio8 werden im Leerlauf geschlossen und laden mit der naechsten Anfrage neu.",
-  saveDefault: "Speichert das gewaehlte Modell als Default fuer neue Requests und Startups.",
-  refreshCache: "Liest den lokalen Modellcache neu ein.",
-  download: "Startet einen Hugging-Face-Download im Hintergrund. Danach das Modell mit Preload/Warmup in den Speicher laden.",
-  deleteCache: "Loescht den lokalen Cache dieses Modells im Model directory.",
+  modelSelect: "Checkpoint of this engine for Preload, Warmup, Reload and the default. The default for the next server start changes only after Save as default.",
+  preload: "Loads the selected model into memory without a test run.",
+  warmup: "Runs a short test generation so CUDA kernels and caches are ready.",
+  reload: "Unloads and loads the selected model again. Needed after dtype, compile or graph changes.",
+  unload: "Removes the model from memory and empties the CUDA cache as far as possible.",
+  freeMemory: "Releases unused VRAM. OmniVoice stays loaded; Ming and Audio8 close while idle and load again with the next request.",
+  saveDefault: "Saves the selected model as the default for new requests and server starts.",
+  refreshCache: "Reads the local model cache again.",
+  download: "Starts a Hugging Face download in the background. Afterwards load the model with Preload or Warmup.",
+  deleteCache: "Deletes the local cache of this model in the model directory.",
 };
 
 function formatModelSize(model: ModelDownloadStatus) {
@@ -22,7 +22,7 @@ function formatModelSize(model: ModelDownloadStatus) {
   if (Number.isFinite(approxSize) && approxSize > 0) {
     return `~${approxSize.toFixed(approxSize >= 10 ? 1 : 2)} GB`;
   }
-  return "-";
+  return "—";
 }
 
 function formatModelStatus(status: string) {
@@ -34,7 +34,7 @@ function formatModelStatus(status: string) {
 }
 
 function resolveModelPath(model: ModelDownloadStatus) {
-  return model.local_path || model.cache_path || model.storage_root || "-";
+  return model.local_path || model.cache_path || model.storage_root || "—";
 }
 
 /** The former Model Control, for the one model that runs: only what can work on this engine. */
@@ -74,46 +74,62 @@ export function ActiveModelPanel({ engine, snapshot, selectedModel, download, de
   const lastJob = snapshot.jobs[0];
   const failedJob = lastJob?.status === "failed" && (!lastJob.model || snapshot.models.some((model) => model.model_id === lastJob.model)) ? lastJob.error_message : null;
 
+  const processMb = overview.gpu_process_memory_mb;
+  const vramText = usesGpu && overview.gpu_memory_total_mb > 0
+    ? `This service ${formatMibAsGb(processMb)} · card ${formatMibAsGb(overview.gpu_memory_used_mb)} / ${formatMibAsGb(overview.gpu_memory_total_mb)}`
+    : "—";
+  const confirmUnload = () => {
+    if (window.confirm(`Unload model "${selectedModel}"?
+
+Requests wait until it is loaded again (the next request or Preload loads it).`)) onOperation("unload");
+  };
+  const confirmDelete = () => {
+    if (window.confirm(`Delete cached model "${selectedModel}"?
+
+It must be downloaded again before it can be loaded.`)) onDelete(selectedModel);
+  };
+
   return (
-    <>
-      <div className="widget-header">
-        <h3>Aktives Modell: {engine.label}</h3>
-        <div className="inline-pills">
-          <span className={`pill ${engine.loaded ? "active" : ""}`}>{engine.loaded ? "geladen" : "nicht geladen"}</span>
-          <span className={`pill ${downloadStatus === "ready" ? "active" : ""}`}>{formatModelStatus(downloadStatus)}</span>
+    <div className="panel" aria-labelledby="active-model-title">
+      <div className="panel-head">
+        <h2 id="active-model-title">Active model · {engine.label}</h2>
+        <div className="button-row">
+          <span className={`badge ${engine.loaded ? "ok" : "plain"}`}>{engine.loaded ? "Loaded" : "Not loaded"}</span>
+          <span className={`badge ${downloadStatus === "ready" ? "ok" : downloadStatus === "downloading" ? "warn" : downloadStatus === "error" ? "danger" : "plain"}`}>{formatModelStatus(downloadStatus)}</span>
         </div>
       </div>
       {models.length > 1 ? (
         <div className="field-grid four">
-          <label className="with-help" title={HELP.modelSelect}>Modell<select value={selectedModel} onChange={(event) => onPickModel(event.target.value)}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+          <label>Model<select value={selectedModel} onChange={(event) => onPickModel(event.target.value)}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select><span className="hint">{HELP.modelSelect}</span></label>
         </div>
       ) : null}
-      <div className="metric-list compact model-control-summary">
-        <div className="metric-row"><span>Modell</span><strong className="mono path-cell">{selectedModel || "-"}</strong></div>
-        <div className="metric-row"><span>Storage</span><strong className="mono path-cell">{download ? resolveModelPath(download) : engine.model_dir || "-"}</strong></div>
-        <div className="metric-row"><span>Size</span><strong>{download ? formatModelSize(download) : "-"}</strong></div>
-        <div className="metric-row"><span>Runtime</span><strong title={deviceLabel}>{[engine.id, usesGpu ? settings.preferred_device : null, hasDtype ? settings.torch_dtype : null].filter(Boolean).join(" / ")}</strong></div>
-        {attention ? <div className="metric-row"><span>Attention</span><strong title={settings.attention_backend_note ?? ""}>{attention}{hasCompile && settings.attention_backend_note ? " (Fallback)" : ""}</strong></div> : null}
-        {usesGpu ? <div className="metric-row"><span>VRAM</span><strong>{overview.gpu_memory_used_mb} / {overview.gpu_memory_total_mb} MB</strong></div> : null}
-        {hasCompile ? <div className="metric-row"><span>Compile</span><strong>{settings.compile_model ? "llm on" : "llm off"}</strong></div> : null}
-      </div>
-      {download?.error ? <p className="model-error">{download.error}</p> : null}
-      {failedJob ? <div className="message error">{failedJob}</div> : null}
-      <div className="button-row compact">
+      <dl className="kv-list">
+        <div><dt>Model</dt><dd className="mono">{selectedModel || "—"}</dd></div>
+        <div><dt>Storage</dt><dd className="mono">{download ? resolveModelPath(download) : engine.model_dir || "—"}</dd></div>
+        <div><dt>Size</dt><dd>{download ? formatModelSize(download) : "—"}</dd></div>
+        <div><dt>Runtime</dt><dd title={deviceLabel}>{[engine.id, usesGpu ? deviceLabel : null, hasDtype ? settings.torch_dtype : null].filter(Boolean).join(" · ")}</dd></div>
+        {attention ? <div><dt>Attention</dt><dd title={settings.attention_backend_note ?? ""}>{attention}{hasCompile && settings.attention_backend_note ? " (fallback)" : ""}</dd></div> : null}
+        {usesGpu ? <div><dt>VRAM</dt><dd>{vramText}</dd></div> : null}
+        {hasCompile ? <div><dt>Compile</dt><dd>{settings.compile_model ? "LLM on" : "LLM off"}</dd></div> : null}
+      </dl>
+      {download?.error ? <div className="banner danger">{download.error}</div> : null}
+      {failedJob ? <div className="banner danger">Last job failed: {failedJob}</div> : null}
+      <div className="button-row">
+        <button type="button" onClick={() => onOperation("warmup")} disabled={actionBusy} title={HELP.warmup}>Warmup</button>
         <button className="secondary-button" type="button" onClick={() => onOperation("preload")} disabled={actionBusy} title={HELP.preload}>Preload</button>
-        <button className="primary-button" type="button" onClick={() => onOperation("warmup")} disabled={actionBusy} title={HELP.warmup}>Warmup</button>
         <button className="secondary-button" type="button" onClick={() => onOperation("reload")} disabled={actionBusy} title={HELP.reload}>Reload</button>
-        <button className="ghost-button" type="button" onClick={() => onOperation("unload")} disabled={actionBusy} title={HELP.unload}>Unload</button>
-        {usesGpu ? <button className="secondary-button" type="button" onClick={onFreeMemory} disabled={memoryBusy || busy} title={HELP.freeMemory}>Free VRAM</button> : null}
-        {models.length > 1 ? <button className="secondary-button" type="button" onClick={() => onSetDefault(selectedModel)} disabled={actionBusy || selectedModel === settings.default_model} title={HELP.saveDefault}>Als Default speichern</button> : null}
-        <button className="secondary-button" type="button" onClick={onRefreshCache} disabled={cacheRefreshing} title={HELP.refreshCache}>{cacheRefreshing ? "Refreshing..." : "Refresh Cache"}</button>
+        {usesGpu ? <button className="secondary-button" type="button" onClick={onFreeMemory} disabled={memoryBusy || busy} aria-busy={memoryBusy} title={HELP.freeMemory}>{memoryBusy ? "Freeing…" : "Free VRAM"}</button> : null}
+        {models.length > 1 ? <button className="secondary-button" type="button" onClick={() => onSetDefault(selectedModel)} disabled={actionBusy || selectedModel === settings.default_model} title={HELP.saveDefault}>Save as default</button> : null}
+        <button className="secondary-button" type="button" onClick={onRefreshCache} disabled={cacheRefreshing} aria-busy={cacheRefreshing} title={HELP.refreshCache}>{cacheRefreshing ? "Refreshing…" : "Refresh cache"}</button>
         {engine.downloadable ? (
           <button className="secondary-button" type="button" onClick={() => onDownload(selectedModel)} disabled={downloadStatus === "downloading" || actionBusy} title={HELP.download}>
-            {downloadStatus === "downloading" ? "Downloading..." : downloadingId === selectedModel ? "Starting..." : downloadStatus === "ready" ? "Download Again" : "Download"}
+            {downloadStatus === "downloading" ? "Downloading…" : downloadingId === selectedModel ? "Starting…" : downloadStatus === "ready" ? "Download again" : "Download"}
           </button>
         ) : null}
-        {canDeleteCache ? <button className="ghost-button" type="button" onClick={() => onDelete(selectedModel)} disabled={!download?.cache_path || downloadStatus === "downloading" || actionBusy} title={HELP.deleteCache}>Delete Cache</button> : null}
+        <button className="danger-button" type="button" onClick={confirmUnload} disabled={actionBusy} title={HELP.unload}>Unload</button>
+        {canDeleteCache ? <button className="danger-button" type="button" onClick={confirmDelete} disabled={!download?.cache_path || downloadStatus === "downloading" || actionBusy} title={HELP.deleteCache}>Delete cache</button> : null}
       </div>
-    </>
+      <p className="hint">Warmup runs a short test generation; Preload only loads the weights; Reload is needed after dtype, compile or graph changes. Unload frees the GPU until the next request; Free VRAM only releases unused memory.</p>
+    </div>
   );
 }

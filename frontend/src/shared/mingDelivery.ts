@@ -1,56 +1,56 @@
 import type { MingDeliveryFields, MingEmotion, MingLevel, MingSpeakingRate, ReferenceMode } from "./api";
 
 export const MING_EMOTION_OPTIONS: Array<{ value: MingEmotion; label: string }> = [
-  { value: "happy", label: "froehlich" },
-  { value: "sad", label: "traurig" },
-  { value: "angry", label: "wuetend" },
-  { value: "fearful", label: "aengstlich" },
-  { value: "disgusted", label: "angeekelt" },
-  { value: "surprised", label: "ueberrascht" },
+  { value: "happy", label: "happy" },
+  { value: "sad", label: "sad" },
+  { value: "angry", label: "angry" },
+  { value: "fearful", label: "fearful" },
+  { value: "disgusted", label: "disgusted" },
+  { value: "surprised", label: "surprised" },
   { value: "neutral", label: "neutral" },
 ];
 
 export const MING_RATE_OPTIONS: Array<{ value: MingSpeakingRate; label: string }> = [
-  { value: "slow", label: "langsam" },
+  { value: "slow", label: "slow" },
   { value: "medium", label: "normal" },
-  { value: "fast", label: "schnell" },
+  { value: "fast", label: "fast" },
 ];
 
 export const MING_PITCH_OPTIONS: Array<{ value: MingLevel; label: string }> = [
-  { value: "low", label: "tief" },
-  { value: "medium", label: "mittel" },
-  { value: "high", label: "hoch" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
 ];
 
 export const MING_VOLUME_OPTIONS: Array<{ value: MingLevel; label: string }> = [
-  { value: "low", label: "leise" },
-  { value: "medium", label: "mittel" },
-  { value: "high", label: "laut" },
+  { value: "low", label: "quiet" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "loud" },
 ];
 
 export const REFERENCE_MODE_OPTIONS: Array<{ value: ReferenceMode; label: string }> = [
   { value: "auto", label: "auto" },
-  { value: "full", label: "voll" },
-  { value: "speaker", label: "nur Sprecher" },
+  { value: "full", label: "full" },
+  { value: "speaker", label: "speaker only" },
 ];
 
 /** Ming's inline paralinguistic tags (case-sensitive upstream; the server maps other spellings). The first ones are
- * shown directly, the rest behind "mehr". */
+ * shown directly, the rest behind "more". */
 export const MING_TAGS: Array<{ tag: string; label: string; common?: boolean }> = [
-  { tag: "[Laughter]", label: "Lachen", common: true },
-  { tag: "[Sigh]", label: "Seufzen", common: true },
-  { tag: "[Breathing]", label: "Atmen", common: true },
-  { tag: "[Uhm]", label: "Aehm", common: true },
-  { tag: "[Cough]", label: "Husten", common: true },
-  { tag: "[Surprise-ah]", label: "Ah! (ueberrascht)" },
-  { tag: "[Surprise-oh]", label: "Oh! (ueberrascht)" },
-  { tag: "[Dissatisfaction-hnn]", label: "Hmpf (unzufrieden)" },
-  { tag: "[Confirmation-en]", label: "Mhm (zustimmend)" },
-  { tag: "[Question-ah]", label: "Ah? (fragend)" },
-  { tag: "[Question-oh]", label: "Oh? (fragend)" },
-  { tag: "[Question-en]", label: "Hm? (fragend)" },
-  { tag: "[Question-ei]", label: "Ei? (fragend)" },
-  { tag: "[Question-huh]", label: "Hae? (fragend)" },
+  { tag: "[Laughter]", label: "Laughter", common: true },
+  { tag: "[Sigh]", label: "Sigh", common: true },
+  { tag: "[Breathing]", label: "Breathing", common: true },
+  { tag: "[Uhm]", label: "Uhm", common: true },
+  { tag: "[Cough]", label: "Cough", common: true },
+  { tag: "[Surprise-ah]", label: "Ah! (surprised)" },
+  { tag: "[Surprise-oh]", label: "Oh! (surprised)" },
+  { tag: "[Dissatisfaction-hnn]", label: "Hmpf (dissatisfied)" },
+  { tag: "[Confirmation-en]", label: "Mhm (agreeing)" },
+  { tag: "[Question-ah]", label: "Ah? (asking)" },
+  { tag: "[Question-oh]", label: "Oh? (asking)" },
+  { tag: "[Question-en]", label: "Hm? (asking)" },
+  { tag: "[Question-ei]", label: "Ei? (asking)" },
+  { tag: "[Question-huh]", label: "Huh? (asking)" },
 ];
 
 export type MingDeliveryDraft = {

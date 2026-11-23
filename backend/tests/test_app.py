@@ -306,9 +306,13 @@ def test_client_api_key_gates_public_synthesis() -> None:
     assert key['alias'] == 'tests'
     assert [item['id'] for item in client.get('/api/admin/api-keys').json()['keys']] == [key['id']]
 
-    assert client.post('/v1/audio/speech', json=body).status_code == 401
-    assert client.post('/v1/audio/speech', json=body, headers={'X-API-Key': 'wrong'}).status_code == 401
-    assert client.post('/v1/audio/speech', json=body, headers={'X-API-Key': key['token']}).status_code == 200
+    # The same client without the admin session cookie (an admin session may use the public API).
+    from test_admin_contract import Anonymous
+
+    anon = Anonymous(client)
+    assert anon.post('/v1/audio/speech', json=body).status_code == 401
+    assert anon.post('/v1/audio/speech', json=body, headers={'X-API-Key': 'wrong'}).status_code == 401
+    assert anon.post('/v1/audio/speech', json=body, headers={'X-API-Key': key['token']}).status_code == 200
 
     assert client.delete(f"/api/admin/api-keys/{key['id']}").status_code == 200
     assert client.post('/v1/audio/speech', json=body).status_code == 200

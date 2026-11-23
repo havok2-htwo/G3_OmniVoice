@@ -159,6 +159,8 @@ def _unavailable_gpu_stats() -> dict[str, int | str | None]:
         'memory_total_mb': 0,
         'utilization_percent': 0,
         'temperature_c': None,
+        'process_memory_mb': None,
+        'nvml_index': None,
     }
 
 
@@ -1490,29 +1492,81 @@ def query_nvidia_smi_all() -> list[dict[str, int | str | None]]:
     return gpus
 
 
-def query_nvidia_smi(preferred_device: str | None = None) -> dict[str, int | str | None]:
-    gpus = query_nvidia_smi_all()
-    if not gpus:
-        return _unavailable_gpu_stats()
+def _stats_from_g3_gpu(gpu: dict[str, Any]) -> dict[str, int | str | None]:
+    def as_int(value: Any) -> int:
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return 0
 
+    temp = gpu.get('temp_c')
+    process = gpu.get('process_mib')
+    return {
+        'name': str(gpu.get('name') or 'Unavailable'),
+        'memory_used_mb': as_int(gpu.get('mem_used_mib')),
+        'memory_total_mb': as_int(gpu.get('mem_total_mib')),
+        'utilization_percent': as_int(gpu.get('util_pct')),
+        'temperature_c': as_int(temp) if temp is not None else None,
+        'process_memory_mb': as_int(process) if process is not None else None,
+        'nvml_index': gpu.get('nvml_index'),
+    }
+
+
+def query_nvidia_smi(preferred_device: str | None = None) -> dict[str, int | str | None]:
+    """Stats of the card behind preferred_device (cuda:N as torch numbers it in this process).
+
+    The card is matched by UUID (g3_gpu): with CUDA_VISIBLE_DEVICES=<uuid> cuda:0 is not nvidia-smi GPU 0."""
     try:
         cuda_index = _cuda_index_for_device(preferred_device)
     except ValueError:
         cuda_index = None
 
-    selected = None
     if cuda_index is not None:
-        selected = next((gpu for gpu in gpus if gpu.get('index') == cuda_index), None)
-        if selected is None and 0 <= cuda_index < len(gpus):
-            selected = gpus[cuda_index]
-    selected = selected or gpus[0]
+        try:
+            from .g3_gpu import gpu_for_cuda_index
+
+            matched = gpu_for_cuda_index(cuda_index)
+        except Exception:
+            matched = None
+        if matched is not None:
+            return _stats_from_g3_gpu(matched)
+
+    gpus = query_nvidia_smi_all()
+    if not gpus:
+        return _unavailable_gpu_stats()
+    selected = gpus[0] if cuda_index is None or len(gpus) == 1 else None
+    if selected is None:
+        # No UUID match (no torch, no NVML): only trust the index when nothing remaps the devices.
+        if not os.environ.get('CUDA_VISIBLE_DEVICES'):
+            selected = next((gpu for gpu in gpus if gpu.get('index') == cuda_index), None)
+        if selected is None:
+            return _unavailable_gpu_stats()
     return {
         'name': str(selected.get('name') or 'Unavailable'),
         'memory_used_mb': int(selected.get('memory_used_mb') or 0),
         'memory_total_mb': int(selected.get('memory_total_mb') or 0),
         'utilization_percent': int(selected.get('utilization_percent') or 0),
         'temperature_c': selected.get('temperature_c') if selected.get('temperature_c') is not None else None,
+        'process_memory_mb': None,
+        'nvml_index': selected.get('index'),
     }
+
+
+def _gpu_device_label(cuda_index: int, name: str, memory_total_mb: int) -> str:
+    """'GPU 1 · GeForce RTX 3090 · 24 GB (cuda:0)': the nvidia-smi number, matched by UUID, plus the torch id."""
+    nvml_index = None
+    try:
+        from .g3_gpu import gpu_for_cuda_index
+
+        matched = gpu_for_cuda_index(cuda_index)
+        nvml_index = matched.get('nvml_index') if matched else None
+    except Exception:
+        nvml_index = None
+    short = str(name or 'GPU').removeprefix('NVIDIA ').strip()
+    label = f'GPU {nvml_index} · {short}' if nvml_index is not None else short
+    if memory_total_mb:
+        label += f' · {memory_total_mb / 1024:.0f} GB'
+    return f'{label} (cuda:{cuda_index})'
 
 
 def query_runtime_devices(preferred_device: str | None = None) -> list[dict[str, Any]]:
@@ -1539,9 +1593,7 @@ def query_runtime_devices(preferred_device: str | None = None) -> list[dict[str,
                 name = torch.cuda.get_device_name(index)
                 properties = torch.cuda.get_device_properties(index)
                 memory_total_mb = int(getattr(properties, 'total_memory', 0) // (1024 * 1024))
-                label = f'cuda:{index} - {name}'
-                if memory_total_mb:
-                    label += f' ({memory_total_mb // 1024} GB)'
+                label = _gpu_device_label(index, name, memory_total_mb)
                 cuda_devices.append(
                     {
                         'id': f'cuda:{index}',
@@ -1562,9 +1614,7 @@ def query_runtime_devices(preferred_device: str | None = None) -> list[dict[str,
             index = int(gpu.get('index') or 0)
             name = str(gpu.get('name') or f'NVIDIA GPU {index}')
             memory_total_mb = int(gpu.get('memory_total_mb') or 0)
-            label = f'cuda:{index} - {name}'
-            if memory_total_mb:
-                label += f' ({memory_total_mb // 1024} GB)'
+            label = _gpu_device_label(index, name, memory_total_mb)
             cuda_devices.append(
                 {
                     'id': f'cuda:{index}',

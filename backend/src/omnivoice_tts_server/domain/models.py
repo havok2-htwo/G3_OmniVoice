@@ -342,6 +342,10 @@ class GpuStatsResponse(BaseModel):
     memory_total_mb: int
     utilization_percent: int
     temperature_c: int | None = None
+    # This process's memory on the card (MiB, from the compute-process list); None when unknown.
+    process_memory_mb: int | None = None
+    # nvidia-smi number of the card (the UI shows "GPU <n>"); None when unknown.
+    nvml_index: int | None = None
 
 
 class RuntimeDeviceInfo(BaseModel):
@@ -938,12 +942,16 @@ class DashboardOverview(BaseModel):
     job_wall_ms_avg: float | None = None
     realtime_x_avg: float | None = None
     jobs_total: int
+    # Jobs that ended with an error since the server started.
+    jobs_failed_total: int = 0
     audio_seconds_total: float
     gpu_name: str
     gpu_memory_used_mb: int
     gpu_memory_total_mb: int
     gpu_utilization_pct: int
     gpu_temperature_c: int | None = None
+    gpu_process_memory_mb: int | None = None
+    gpu_index: int | None = None
 
 
 class BatchSnapshot(BaseModel):

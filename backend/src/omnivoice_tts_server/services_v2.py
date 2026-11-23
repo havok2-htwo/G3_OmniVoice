@@ -1519,6 +1519,8 @@ class QueueService:
 
     def _fail_job_locked(self, job: JobRecord, message: str) -> None:
         now = utcnow()
+        if job.status != JobStatus.failed:
+            self.store.total_jobs_failed += 1
         job.status = JobStatus.failed
         job.error_message = message
         job.completed_at = now

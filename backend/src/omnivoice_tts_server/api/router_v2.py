@@ -90,6 +90,7 @@ from ..domain.state import (
     STREAM_CHUNKS,
     STREAM_EVENTS,
     VoiceProfileRecord,
+    LIVE_THROUGHPUT_WINDOW_S,
     live_mean,
     live_throughput_x,
     new_id,
@@ -108,11 +109,16 @@ from ..runtime_v2 import (
 from ..security import (
     SESSION_COOKIE_NAME,
     authorize_api_key,
+    clear_login_failures,
     clear_session_cookie,
+    login_rate_limited,
+    record_login_failure,
     require_admin,
+    require_same_origin,
     require_session,
     set_session_cookie,
 )
+from ..g3_gpu import perf_payload
 from ..capacity import capacity_summary as _capacity_summary
 from ..presets import delete_preset as _delete_preset
 from ..presets import list_presets as _list_presets
@@ -899,12 +905,15 @@ def _dashboard_snapshot(request: Request) -> DashboardSnapshot:
         realtime_x_live=live_throughput_x(store.audio_output_events, time.monotonic()),
         ttfa_ms_live=live_mean(store.ttfa_events, time.monotonic()),
         jobs_total=stats.global_.jobs_total,
+        jobs_failed_total=store.total_jobs_failed,
         audio_seconds_total=stats.global_.audio_seconds_total,
         gpu_name=gpu.name,
         gpu_memory_used_mb=gpu.memory_used_mb,
         gpu_memory_total_mb=gpu.memory_total_mb,
         gpu_utilization_pct=gpu.utilization_percent,
         gpu_temperature_c=gpu.temperature_c,
+        gpu_process_memory_mb=gpu.process_memory_mb,
+        gpu_index=gpu.nvml_index,
     )
     jobs = [_job_item(request, job_id) for job_id in sorted(store.jobs, key=lambda value: store.jobs[value].created_at, reverse=True)[:24]]
     return DashboardSnapshot(
@@ -960,14 +969,28 @@ async def healthcheck_api() -> dict[str, bool]:
 # --- Auth: username/password login backed by an httpOnly session cookie ---
 @router.post('/api/admin/auth/login')
 async def admin_login(payload: LoginPayload, request: Request, response: Response) -> dict[str, Any]:
+    require_same_origin(request)
     store = request.app.state.store
-    user = store.verify_user(payload.username, payload.password)
+    if login_rate_limited(request):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many failed logins. Wait a minute and try again.',
+        )
+    user = await asyncio.to_thread(store.verify_user, payload.username, payload.password)
     if not user:
+        record_login_failure(request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid username or password.')
+    clear_login_failures(request)
     token = store.create_session(user['username'])
     store.touch_login(user['username'])
     set_session_cookie(response, request, token)
     return {'username': user['username'], 'must_change_password': bool(user.get('must_change_password'))}
+
+
+@router.get('/api/admin/auth/setup')
+async def admin_auth_setup(request: Request) -> dict[str, bool]:
+    """Public: whether the initial password still has to be changed (the login page shows the default then)."""
+    return {'setup_pending': request.app.state.store.setup_pending()}
 
 
 @router.post('/api/admin/auth/logout')
@@ -989,8 +1012,10 @@ async def admin_change_password(
     store = request.app.state.store
     if not store.verify_user(ctx['username'], payload.current_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Current password is incorrect.')
-    if len(payload.new_password or '') < 4:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Password must be at least 4 characters.')
+    if len(payload.new_password or '') < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Password must be at least 8 characters.')
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='The new password must differ from the current one.')
     store.set_password(ctx['username'], payload.new_password)
     token = store.create_session(ctx['username'])
     set_session_cookie(response, request, token)
@@ -1444,6 +1469,34 @@ async def admin_free_memory(request: Request) -> MemoryCleanupResponse:
     )
 
 
+PERF_SERVICE_NAME = 'G3 OmniVoice'
+
+
+def perf_metrics(store: Any, now: float | None = None) -> list[dict[str, Any]]:
+    """Service metrics of GET /api/admin/perf (STANDARD.md 4.1): realtime factor, queue depth, TTFA.
+
+    Realtime factor = audio seconds delivered per wall second over the last 30 s (0 when idle). TTFA is the mean
+    over the jobs that finished in the last 30 s, None when none did (unknown is not 0 ms)."""
+    now = time.monotonic() if now is None else now
+    window = LIVE_THROUGHPUT_WINDOW_S
+    has_ttfa = any(when >= now - window for when, _ in store.ttfa_events)
+    return [
+        {'key': 'throughput', 'label': 'Realtime factor', 'unit': 'x',
+         'value': live_throughput_x(store.audio_output_events, now), 'decimals': 2, 'window_s': int(window)},
+        {'key': 'queue', 'label': 'Queue depth', 'unit': '', 'value': store.queue_depth(), 'decimals': 0,
+         'integer': True},
+        {'key': 'latency', 'label': 'TTFA', 'unit': 'ms',
+         'value': live_mean(store.ttfa_events, now) if has_ttfa else None, 'decimals': 0, 'window_s': int(window)},
+    ]
+
+
+@admin.get('/perf')
+async def admin_perf(request: Request) -> dict[str, Any]:
+    """Shared performance contract (schema 1): GPU cards matched by UUID plus the service metrics."""
+    metrics = perf_metrics(request.app.state.store)
+    return await asyncio.to_thread(perf_payload, PERF_SERVICE_NAME, metrics)
+
+
 @admin.get('/dashboard/stream')
 async def admin_dashboard_stream(request: Request) -> StreamingResponse:
     events: EventHub = request.app.state.events
@@ -1690,18 +1743,18 @@ async def transcribe(request: Request, file: UploadFile = File(...)) -> Transcri
 
 
 @router.get('/api/v1/voices', response_model=VoiceCatalogResponse)
-async def list_public_voices(request: Request) -> VoiceCatalogResponse:
+async def list_public_voices(request: Request, _: str | None = Depends(authorize_api_key)) -> VoiceCatalogResponse:
     return VoiceCatalogResponse(voices=_voice_items(request))
 
 
 @router.get('/v1/voices')
-async def list_voices_alias(request: Request) -> dict[str, Any]:
+async def list_voices_alias(request: Request, _: str | None = Depends(authorize_api_key)) -> dict[str, Any]:
     entries = _openai_voice_entries(request)
     return {'object': 'list', 'data': entries, 'voices': entries}
 
 
 @router.get('/v1/audio/voices')
-async def list_audio_voices(request: Request) -> dict[str, Any]:
+async def list_audio_voices(request: Request, _: str | None = Depends(authorize_api_key)) -> dict[str, Any]:
     # Open WebUI reads the 'voices' key from {base}/audio/voices.
     return {'voices': _openai_voice_entries(request)}
 
@@ -1717,17 +1770,17 @@ async def list_languages_alias() -> list[str]:
 
 
 @router.get('/api/v1/models', response_model=list[ModelInfo])
-async def list_models(request: Request) -> list[ModelInfo]:
+async def list_models(request: Request, _: str | None = Depends(authorize_api_key)) -> list[ModelInfo]:
     return _model_items(request)
 
 
 @router.get('/v1/models')
-async def list_openai_models(request: Request) -> dict[str, Any]:
+async def list_openai_models(request: Request, _: str | None = Depends(authorize_api_key)) -> dict[str, Any]:
     return {'object': 'list', 'data': _openai_model_entries(request)}
 
 
 @router.get('/v1/audio/models')
-async def list_openai_audio_models(request: Request) -> dict[str, Any]:
+async def list_openai_audio_models(request: Request, _: str | None = Depends(authorize_api_key)) -> dict[str, Any]:
     # Open WebUI reads the 'models' key from {base}/audio/models.
     return {'models': _openai_model_entries(request)}
 
@@ -1785,12 +1838,12 @@ def _capabilities(request: Request) -> CapabilitiesResponse:
 
 
 @router.get('/api/v1/capabilities', response_model=CapabilitiesResponse)
-async def public_capabilities(request: Request) -> CapabilitiesResponse:
+async def public_capabilities(request: Request, _: str | None = Depends(authorize_api_key)) -> CapabilitiesResponse:
     return _capabilities(request)
 
 
 @router.get('/v1/capabilities', response_model=CapabilitiesResponse)
-async def public_capabilities_alias(request: Request) -> CapabilitiesResponse:
+async def public_capabilities_alias(request: Request, _: str | None = Depends(authorize_api_key)) -> CapabilitiesResponse:
     return _capabilities(request)
 
 
@@ -1870,7 +1923,9 @@ async def _optimize_text_preview(request: Request, payload: TextOptimizeRequest)
 
 
 @router.get('/v1/jobs/{job_id}/audio')
-async def public_job_audio(request: Request, job_id: str, format: str | None = None) -> Response:
+async def public_job_audio(
+    request: Request, job_id: str, format: str | None = None, _: str | None = Depends(authorize_api_key)
+) -> Response:
     response = _completed_job_audio_response(request, job_id, format)
     response.headers.update(_text_optimization_headers(request.app.state.store.jobs.get(job_id)))
     return response

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import secrets
 import threading
 from collections import deque
@@ -37,9 +39,32 @@ def _json_load(path: Path) -> dict[str, Any] | list[Any]:
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
 
-def _json_dump(path: Path, payload: Any) -> None:
+def _json_dump(path: Path, payload: Any, *, private: bool = False) -> None:
+    """Write atomically: a crash mid-write leaves the old file, never a truncated one. private -> mode 0600."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_BINARY', 0)
+    fd = os.open(tmp, flags, 0o600 if private else 0o644)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if private:
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+logger = logging.getLogger(__name__)
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -52,6 +77,27 @@ def hash_token(raw_token: str) -> str:
 
 def generate_api_key() -> str:
     return f'{API_KEY_PREFIX}_{secrets.token_urlsafe(24)}'
+
+
+_dummy_password_hash: str | None = None
+
+
+def _dummy_hash() -> str:
+    global _dummy_password_hash
+    if _dummy_password_hash is None:
+        _dummy_password_hash = build_pbkdf2_hash(secrets.token_urlsafe(16))
+    return _dummy_password_hash
+
+
+def api_key_hint(raw_key: str) -> str:
+    """Masked preview stored at creation: prefix, first 4 and last 4 characters of the random part."""
+    prefix = f'{API_KEY_PREFIX}_'
+    body = raw_key[len(prefix):] if raw_key.startswith(prefix) else raw_key
+    return f'{prefix}{body[:4]}…{body[-4:]}'
+
+
+# Usage counters are written at most this often (seconds), never once per request.
+API_KEY_USAGE_FLUSH_SECONDS = 5.0
 
 # --- per-engine voice seeds (VoiceProfileRecord) ---
 # Engines a voice profile can store a best seed for. The OmniVoice seed lives in VoiceProfileRecord.seed (the field
@@ -105,6 +151,7 @@ class ApiKeyRecord:
     alias: str = ""
     total_seconds_processed: float = 0.0
     request_count: int = 0
+    hint: str | None = None
 
 
 @dataclass
@@ -308,6 +355,7 @@ class InMemoryStore:
         # (monotonic time, ttfa ms) per completed job that produced audio: the live time-to-first-audio line.
         self.ttfa_events: deque[tuple[float, float]] = deque(maxlen=4096)
         self.total_jobs_completed = 0
+        self.total_jobs_failed = 0
         self.total_audio_seconds = 0.0
         self.exclusive_lock = asyncio.Lock()
         self.current_batch: dict[str, Any] | None = None
@@ -323,6 +371,10 @@ class InMemoryStore:
         self.model_download_jobs: dict[tuple[str, str], dict[str, Any]] = {}
         self.model_download_lock = threading.RLock()
         self.file_lock = threading.RLock()
+        # Set when server_secrets.json exists but cannot be read: the public API answers 503 (fail closed) and the
+        # file is never overwritten, so the administrator can repair it.
+        self.secrets_load_error: str | None = None
+        self._usage_flush_timer: threading.Timer | None = None
 
     def _load_api_key(self, item: dict[str, Any]) -> None:
         usage = item.get("usage") if isinstance(item.get("usage"), dict) else {}
@@ -336,6 +388,7 @@ class InMemoryStore:
             alias=item.get("alias") or item.get("name") or "",
             total_seconds_processed=float(usage.get("total_seconds_processed") or 0.0),
             request_count=int(usage.get("request_count") or 0),
+            hint=item.get("hint") if isinstance(item.get("hint"), str) else None,
         )
 
     @staticmethod
@@ -354,9 +407,19 @@ class InMemoryStore:
         self.data_dir = data_dir
         secrets_path = data_dir / "server_secrets.json"
         with self.file_lock:
-            payload = _json_load(secrets_path)
-            if not isinstance(payload, dict):
-                payload = {}
+            self.secrets_load_error = None
+            try:
+                payload = _json_load(secrets_path)
+                if not isinstance(payload, dict):
+                    raise ValueError(f'expected a JSON object, got {type(payload).__name__}')
+            except (OSError, ValueError) as exc:
+                # Fail closed: never treat an unreadable key store as "no keys" (that would open the API).
+                self.secrets_load_error = f'{secrets_path.name}: {exc}'
+                logger.error('cannot read %s (%s); public API answers 503 until it is repaired', secrets_path, exc)
+                self.users = {}
+                self.sessions = {}
+                self.api_keys = {}
+                return
             self.users = {}
             self.sessions = {}
             self.api_keys = {}
@@ -389,9 +452,14 @@ class InMemoryStore:
             self.save_secrets(data_dir)
 
     def save_secrets(self, data_dir: Path) -> None:
+        if self.secrets_load_error is not None:
+            return  # keep the unreadable file as it is for repair
         data_dir.mkdir(parents=True, exist_ok=True)
         secrets_path = data_dir / "server_secrets.json"
         with self.file_lock:
+            if self._usage_flush_timer is not None:
+                self._usage_flush_timer.cancel()
+                self._usage_flush_timer = None
             payload = {
                 "version": SECRETS_VERSION,
                 "users": dict(self.users),
@@ -402,6 +470,7 @@ class InMemoryStore:
                         "name": rec.name,
                         "key_hash": rec.key_hash,
                         "alias": rec.alias,
+                        "hint": rec.hint,
                         "created_at": rec.created_at.isoformat(),
                         "usage": {
                             "total_seconds_processed": round(float(rec.total_seconds_processed), 3),
@@ -412,7 +481,7 @@ class InMemoryStore:
                     for rec in self.api_keys.values()
                 },
             }
-            _json_dump(secrets_path, payload)
+            _json_dump(secrets_path, payload, private=True)
 
     # ---- auth: users, sessions, client api keys ----
     def _persist(self) -> None:
@@ -451,9 +520,16 @@ class InMemoryStore:
             return None
         with self.file_lock:
             user = self.users.get(username)
-            if not user or not verify_pbkdf2_hash(password, user.get("password_hash", "")):
-                return None
-            return dict(user)
+            encoded = user.get("password_hash", "") if user else _dummy_hash()
+        # Unknown users cost one hash too, so the timing does not tell which usernames exist.
+        if not verify_pbkdf2_hash(password, encoded) or not user:
+            return None
+        return dict(user)
+
+    def setup_pending(self) -> bool:
+        """True while an account still has to replace its initial password (the default admin/admin)."""
+        with self.file_lock:
+            return any(user.get("must_change_password") for user in self.users.values())
 
     def touch_login(self, username: str) -> None:
         with self.file_lock:
@@ -519,6 +595,7 @@ class InMemoryStore:
                 {
                     "id": rec.key_id,
                     "alias": rec.alias or rec.name,
+                    "hint": rec.hint,
                     "created_at": rec.created_at.isoformat(),
                     "usage": {
                         "total_seconds_processed": round(float(rec.total_seconds_processed), 3),
@@ -534,8 +611,11 @@ class InMemoryStore:
     def has_api_keys(self) -> bool:
         return len(self.api_keys) > 0
 
+    def api_keys_unavailable(self) -> bool:
+        return self.secrets_load_error is not None
+
     def create_api_key(self, alias: str) -> dict[str, Any]:
-        alias = (alias or "").strip() or "Unnamed key"
+        alias = (alias or "").strip()[:64] or "Unnamed key"
         raw = generate_api_key()
         key_id = new_id("key")
         created = utcnow()
@@ -546,9 +626,17 @@ class InMemoryStore:
                 key_hash=hash_token(raw),
                 created_at=created,
                 alias=alias,
+                hint=api_key_hint(raw),
             )
             self._persist()
-        return {"id": key_id, "alias": alias, "created_at": created.isoformat(), "token": raw}
+        return {
+            "id": key_id,
+            "alias": alias,
+            "hint": api_key_hint(raw),
+            "created_at": created.isoformat(),
+            "usage": {"total_seconds_processed": 0.0, "request_count": 0, "last_used_at": None},
+            "token": raw,
+        }
 
     def delete_api_key(self, key_id: str) -> bool:
         with self.file_lock:
@@ -561,11 +649,13 @@ class InMemoryStore:
         if not raw_key:
             return None
         provided = hash_token(raw_key.strip())
+        matched: str | None = None
         with self.file_lock:
+            # Compare against every hash (no early exit), so the timing does not depend on the position.
             for rec in self.api_keys.values():
-                if not rec.disabled and secrets.compare_digest(rec.key_hash or "", provided):
-                    return rec.key_id
-        return None
+                if secrets.compare_digest(rec.key_hash or "", provided) and not rec.disabled:
+                    matched = rec.key_id
+        return matched
 
     def record_api_key_usage(self, key_id: str | None, audio_seconds: float) -> None:
         if not key_id:
@@ -577,7 +667,25 @@ class InMemoryStore:
             rec.total_seconds_processed = round(float(rec.total_seconds_processed) + float(audio_seconds or 0.0), 3)
             rec.request_count = int(rec.request_count) + 1
             rec.last_used_at = utcnow()
-            self._persist()
+            self._schedule_usage_flush()
+
+    def _schedule_usage_flush(self) -> None:
+        """Write usage counters after API_KEY_USAGE_FLUSH_SECONDS (debounced); shutdown saves whatever is left."""
+        with self.file_lock:
+            if self._usage_flush_timer is not None or self.data_dir is None:
+                return
+            timer = threading.Timer(API_KEY_USAGE_FLUSH_SECONDS, self._flush_usage)
+            timer.daemon = True
+            self._usage_flush_timer = timer
+            timer.start()
+
+    def _flush_usage(self) -> None:
+        with self.file_lock:
+            self._usage_flush_timer = None
+            try:
+                self._persist()
+            except Exception as exc:  # a failed flush must not kill the timer thread silently
+                logger.warning('api key usage flush failed: %s', exc)
 
     def load_voices(self, data_dir: Path) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)

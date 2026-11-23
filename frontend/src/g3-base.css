@@ -320,6 +320,16 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--da
 }
 .chip > .card-label { font-size: var(--fs-xs); }
 .chip > .value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-strip .chip { max-width: min(100%, 420px); }
+.chip .badge { padding: 1px 8px; }
+/* clickable chip (header "API" chip -> API keys tab): a link or a button, same look as a plain .chip */
+a.chip { text-decoration: none; cursor: pointer; }
+button.chip {
+  min-height: 0; padding: 6px 14px; gap: var(--sp-2); align-items: baseline; line-height: inherit;
+  background: var(--surface); color: var(--text-strong); border: 1px solid var(--line); box-shadow: none;
+  font-size: var(--fs-sm); font-weight: var(--fw-regular); letter-spacing: 0;
+}
+a.chip:hover, button.chip:hover:not(:disabled) { background: var(--surface-hover); transform: none; }
 
 /* ---------- 8. Tables ---------- */
 .table-wrap { position: relative; /* containing block for .sr-only header cells (else they widen the page on phones) */ min-width: 0; max-width: 100%; overflow-x: auto; border-radius: var(--r-card); border: 1px solid var(--line); }

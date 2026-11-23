@@ -17,6 +17,7 @@ All notable changes to G3_OmniVoice are recorded here.
   mini graphs (integer-rounded throughput, "1/1/0" axes, no time scale).
 - API keys tab: status badge, copy buttons, key hint (`omnivoice_tts_AbCd…wXyZ`), confirm with a warning before revoking
   the last key. Confirmations before deleting voices, presets, caches, clips and before unload.
+- Performance graph axis labels: ticks print the decimals they need (`0.25`, `1.25`, `2.8 GB`, no more `0.3` or `13` for 12.5), integer axes step 1/2/5 (queue peak 5 gives 0/2/4/6 instead of only 0 and 5), and rate charts no longer repeat the unit in the title. Header chips (state badge, clickable API chip) and the Account tab (Account panel first, then Change password; "Set a new password" on first login) look the same in all four G3 services.
 - The dashboard stream reconnects (1, 2, 5, 10 s) and shows "Live updates reconnecting…"; a failed first load shows the
   error with Retry; an expired session returns to the login; login and password forms submit with Enter.
 

@@ -16,13 +16,7 @@
 .landing-panel { width: min(560px, 100%); }
 .form-stack { display: grid; gap: var(--sp-4); }
 
-.chip-button {
-  min-height: 0; padding: 6px 14px; gap: var(--sp-2);
-  background: var(--surface); color: var(--text-strong); border: 1px solid var(--line);
-  box-shadow: none; font-weight: var(--fw-regular); letter-spacing: 0;
-}
-.chip-button:hover:not(:disabled) { background: var(--surface-hover); transform: none; }
-.status-strip .chip .value { max-width: 28ch; }
+.summary-cards { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 
 /* ---------- fields ---------- */
 .field-grid { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); align-items: start; }
@@ -148,7 +142,6 @@ details[open] > summary { margin-bottom: var(--sp-2); }
   .field-grid.two { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 720px) {
-  .status-strip .chip .value { max-width: 18ch; }
   .model-bubble-grid { grid-template-columns: minmax(0, 1fr); }
   .kv-list dd { text-align: left; }
   .save-bar { bottom: var(--sp-2); }

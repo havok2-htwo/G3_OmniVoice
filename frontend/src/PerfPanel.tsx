@@ -105,11 +105,39 @@ export function fmt(v: number | null | undefined, decimals = 1, unit = "") {
 }
 export const gpuTitle = (g: PerfGpu) => `${g.nvml_index != null ? `GPU ${g.nvml_index} · ` : ""}${g.name.replace(/^NVIDIA\s+/i, "")}`;
 
+/** Axis tick label: trailing zeros dropped ("0", "1.25", "2.5"), unit only for % and ×. */
+function fmtTick(v: number, decimals: number, unit: string) {
+  const s = new Intl.NumberFormat("en-US", { maximumFractionDigits: decimals }).format(v);
+  return unit === "%" ? `${s}%` : unit === "x" ? `${s}×` : s;
+}
+
 function niceCeil(x: number) {
   if (!(x > 0)) return 1;
   const p = Math.pow(10, Math.floor(Math.log10(x)));
   for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= x - 1e-9) return m * p;
   return 10 * p;
+}
+
+/** Fewest decimals (0-2) that print every tick within 0.5% of the axis: 0.25 stays "0.25", 2.75 GB becomes "2.8", 5.997 GB "6". */
+function tickDecimals(ticks: number[], yMax: number) {
+  for (let d = 0; d < 2; d++) {
+    const f = Math.pow(10, d);
+    if (ticks.every((v) => Math.abs(Math.round(v * f) / f - v) <= yMax * 0.005)) return d;
+  }
+  return 2;
+}
+
+/** Integer axis (queues): whole-number step 1/2/5 x 10^n, at most 4 steps, floor 4. Peak 5 gives 0/2/4/6, peak 9 gives 0/5/10. */
+function integerAxis(peak: number) {
+  const target = Math.max(4, Math.ceil(peak));
+  let step = 1;
+  for (let p = 1; step * 4 < target; p *= 10) {
+    step = [1, 2, 5].map((m) => m * p).find((s) => s * 4 >= target) ?? 10 * p;
+  }
+  const yMax = Math.ceil(target / step) * step;
+  const ticks: number[] = [];
+  for (let v = 0; v <= yMax; v += step) ticks.push(v);
+  return { yMax, ticks };
 }
 
 // ---------- chart ----------
@@ -209,7 +237,7 @@ function TimeChart({ title, subtitle, times, series, yMax, yTicks, tickDecimals,
             <g key={v}>
               <line x1={M.l} x2={width - M.r} y1={y(v)} y2={y(v)} className="perf-grid-line" />
               <text x={M.l - 6} y={y(v)} className="perf-tick" textAnchor="end" dominantBaseline="middle">
-                {fmt(v, tickDecimals, yUnit === "%" || yUnit === "x" ? yUnit : "")}
+                {fmtTick(v, tickDecimals, yUnit)}
               </text>
             </g>
           ))}
@@ -254,7 +282,9 @@ function TimeChart({ title, subtitle, times, series, yMax, yTicks, tickDecimals,
 }
 
 const css = (name: string) => `var(${name})`;
-const withUnit = (label: string, unit: string) => (unit && unit !== "%" && unit !== "x" ? `${label} (${unit})` : label);
+// "Latency (ms)", but no "Documents/s (docs/s)": a rate label already names its unit.
+const withUnit = (label: string, unit: string) =>
+  (unit && unit !== "%" && unit !== "x" && !(unit.endsWith("/s") && label.endsWith("/s")) ? `${label} (${unit})` : label);
 
 /** Dashboard section "Performance". Renders from the shared store; no fetching here. */
 export function PerfPanel({ title = "Performance" }: { title?: string }) {
@@ -296,7 +326,7 @@ export function PerfPanel({ title = "Performance" }: { title?: string }) {
                 values: per.map((p) => p?.util_pct ?? null) }]} />,
             <TimeChart key={`${g.uuid ?? g.nvml_index}-vram`} now={now} times={times}
               title={`VRAM (GB) · ${gpuTitle(g)}`} subtitle={`Axis = card total ${fmt(totalGb, 1, "GB")}`}
-              yMax={totalGb || 1} yTicks={vramTicks} tickDecimals={totalGb >= 10 ? 0 : 1} yUnit="GB"
+              yMax={totalGb || 1} yTicks={vramTicks} tickDecimals={tickDecimals(vramTicks, totalGb || 1)} yUnit="GB"
               series={[
                 { key: "card", label: "Card used (all processes)", color: css("--series-card"), area: true, decimals: 1, unit: "GB",
                   values: per.map((p) => mibToGb(p?.mem_used_mib)) },
@@ -308,13 +338,15 @@ export function PerfPanel({ title = "Performance" }: { title?: string }) {
         {(latest?.metrics ?? []).map((m) => {
           const values = hist.map((s) => s.snap.metrics.find((o) => o.key === m.key)?.value ?? null);
           const peak = Math.max(0, ...values.map((v) => v ?? 0));
-          const yMax = m.integer ? Math.max(4, niceCeil(peak)) : niceCeil(Math.max(peak, 1));
-          const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * yMax).filter((v) => !m.integer || Number.isInteger(v));
+          const axis = m.integer
+            ? integerAxis(peak)
+            : (() => { const max = niceCeil(Math.max(peak, 1)); return { yMax: max, ticks: [0, 0.25, 0.5, 0.75, 1].map((f) => f * max) }; })();
+          const { yMax, ticks } = axis;
           const decimals = m.decimals ?? (m.integer ? 0 : 1);
           const color = m.key === "queue" ? css("--series-queue") : m.key === "latency" ? css("--series-latency") : css("--series-service");
           return (
             <TimeChart key={m.key} now={now} times={times} title={withUnit(m.label, m.unit)}
-              yMax={yMax} yTicks={ticks} tickDecimals={yMax < 4 && !m.integer ? 1 : 0} yUnit={m.unit}
+              yMax={yMax} yTicks={ticks} tickDecimals={tickDecimals(ticks, yMax)} yUnit={m.unit}
               series={[{ key: m.key, label: m.window_s ? `${m.window_s} s average` : "Current", color, decimals, unit: m.unit, values }]} />
           );
         })}

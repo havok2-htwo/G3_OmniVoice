@@ -1805,8 +1805,8 @@ export function AdminApp() {
       <div className="gate-shell">
         <ToastHost />
         <main className="panel gate-panel" aria-labelledby="pw-title">
-          <p className="eyebrow">G3 OmniVoice · Security</p>
-          <h1 id="pw-title">Change password</h1>
+          <p className="eyebrow">G3 GPU service · Admin</p>
+          <h1 id="pw-title">Set a new password</h1>
           <p className="dim">Signed in as {currentUser || "admin"}. Choose a new password (at least 8 characters) to continue.</p>
           <form className="form-stack" onSubmit={(event) => void handleChangePassword(event)}>
             <input type="text" autoComplete="username" value={currentUser || "admin"} readOnly hidden />
@@ -1862,7 +1862,7 @@ export function AdminApp() {
 
   const dashboardTab = (
     <>
-      <div className="grid grid-auto">
+      <div className="grid grid-auto summary-cards">
         <div className="card">
           <span className="card-label">Model</span>
           <span className="card-value small" title={overview.active_model || undefined}>{overview.active_model || "None"}</span>
@@ -2522,7 +2522,7 @@ export function AdminApp() {
         <div className="panel-head"><h2 id="account-title">Account</h2></div>
         <dl className="kv-list">
           <div><dt>Signed in as</dt><dd>{currentUser || "admin"}</dd></div>
-          <div><dt>Session</dt><dd>httpOnly cookie, valid for 7 days</dd></div>
+          <div><dt>Session length</dt><dd>7 days after login</dd></div>
         </dl>
         <div className="button-row"><button className="ghost-button" type="button" onClick={() => void handleLogout()}>Log out</button></div>
       </section>
@@ -2556,7 +2556,7 @@ export function AdminApp() {
               <span className="chip"><span className="card-label">GPU</span><span className="value" title={gpuText}>{gpuText}</span></span>
               <button type="button" className="chip chip-button" onClick={() => setAdminTab("api-keys")} title="Manage API keys">
                 <span className="card-label">API</span>
-                <span className={`badge ${keyCount ? "ok" : "warn"}`}>{apiKeys === null ? "—" : keyCount ? "Protected" : "Open"}</span>
+                {apiKeys === null ? <span className="value">—</span> : <span className={`badge ${keyCount ? "ok" : "warn"}`}>{keyCount ? "Protected" : "Open"}</span>}
               </button>
             </div>
           </div>

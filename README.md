@@ -123,6 +123,8 @@ ENABLE_FLASHINFER=false docker compose up -d --build  # image without FlashInfer
   API keys are optional (see Notes).
 - WER benchmarks call a Whisper server. The compose points `OMNIVOICE_TTS_WHISPER_BASE_URL` at
   `http://host.docker.internal:7861` (a Whisper on the Docker host); set it in `.env` for a separate Whisper.
+  The first save in the admin Settings (or an engine switch) writes the URL into `data/runtime_settings.json`;
+  after that the saved value wins over `.env`, so change it in the admin Settings.
 - The g3_whisper repo has its own compose (project `g3-voice`) that builds this repo from a sibling checkout next
   to Whisper. Use either that stack or this standalone compose, not both: they share the port and container name.
 

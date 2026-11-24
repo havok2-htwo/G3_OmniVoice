@@ -12,6 +12,8 @@ All notable changes to G3_OmniVoice are recorded here.
   the g3-voice stack in g3_whisper and must not run next to it. README has a Docker section.
 - Dockerfile: the entrypoint comment no longer mentions a temporary startup admin key (admin access is the
   username/password login).
+- Docker docs: the compose header, README and entrypoint comment say that the first admin Settings save or engine
+  switch writes the Whisper URL into `data/runtime_settings.json`, after which `.env` no longer changes it.
 
 ### Changed - Admin UI follows the shared G3 admin standard
 

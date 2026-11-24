@@ -4,6 +4,15 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Added - Standalone docker-compose.yml
+
+- `docker-compose.yml` (project `g3-omnivoice`, port 8091, volumes for models and data, GPU reservation, healthcheck
+  with a 30-minute start period, `ENABLE_FLASHINFER` build arg passed through). WER benchmarks reach a Whisper on the
+  Docker host by default (`OMNIVOICE_TTS_WHISPER_BASE_URL`, overridable in `.env`). It is the standalone alternative to
+  the g3-voice stack in g3_whisper and must not run next to it. README has a Docker section.
+- Dockerfile: the entrypoint comment no longer mentions a temporary startup admin key (admin access is the
+  username/password login).
+
 ### Changed - Admin UI follows the shared G3 admin standard
 
 - New look shared with G3 Rerank, Embed and Whisper (tokens, pill buttons, 24/16/12 px radii, one type scale, light mode

@@ -123,8 +123,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 COPY tools/ ./tools/
 
-# Entrypoint prints a temporary startup admin key on boot (like start_server.bat) so a
-# fresh deploy can reach the admin UI when no fixed OMNIVOICE_TTS_ADMIN_API_KEY is set.
+# Thin entrypoint: admin access is the username/password login (default admin/admin, forced
+# change on first login); client API keys are optional and created in the admin UI.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

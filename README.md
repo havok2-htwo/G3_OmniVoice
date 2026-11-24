@@ -102,6 +102,30 @@ the `k2-fsa/OmniVoice-Base` voice-clone alias.
 these lists; only the admin panel hides them. A client request never changes the model the admin
 selected. `GET /api/v1/capabilities` tells a client what that selection offers.
 
+## Docker
+
+The Linux image (`Dockerfile`) builds the frontend, installs the CUDA 13.0 PyTorch stack pinned by
+`requirements-lock.txt` plus the `ming`, `phonon` and `audio8` engine extras, and ships FlashInfer (build arg
+`ENABLE_FLASHINFER`, default `true`). It ships no model weights. The standalone `docker-compose.yml` runs it as one
+GPU container:
+
+```bash
+docker compose up -d --build                          # .env is optional (OMNIVOICE_TTS_* settings)
+ENABLE_FLASHINFER=false docker compose up -d --build  # image without FlashInfer
+```
+
+- Host: Docker Engine + Compose v2 (>= 2.24.0) and the NVIDIA Container Toolkit.
+- Port 8091, project `g3-omnivoice`, container `g3-omnivoice`; named volumes for `/app/models` (model weights,
+  Hugging Face cache) and `/app/data` (runtime settings, admin users, API key hashes, voice profiles, history).
+- The first start downloads `k2-fsa/OmniVoice` (~3 GB) and warms it up, so the healthcheck (`/openapi.json`) allows
+  30 minutes. Ming, Audio8 and Phonon weights are downloaded from the admin UI or copied into the models volume.
+- Admin login at `/admin` is username/password (default `admin` / `admin`, forced change on first login); client
+  API keys are optional (see Notes).
+- WER benchmarks call a Whisper server. The compose points `OMNIVOICE_TTS_WHISPER_BASE_URL` at
+  `http://host.docker.internal:7861` (a Whisper on the Docker host); set it in `.env` for a separate Whisper.
+- The g3_whisper repo has its own compose (project `g3-voice`) that builds this repo from a sibling checkout next
+  to Whisper. Use either that stack or this standalone compose, not both: they share the port and container name.
+
 ## Frontend Dev
 
 ```powershell

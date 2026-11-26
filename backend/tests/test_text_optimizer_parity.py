@@ -2,16 +2,16 @@
 
 Fixtures (tests/fixtures/text_optimizer/, generated, never hand-edited):
 
-* golden.json.gz - 1530 unique inputs (the Genesis TTS sweep corpus, every input the TS
+* golden.json.gz - 3232 unique inputs (the Genesis TTS sweep corpus, every input the TS
   unit tests pass to the pipeline, and OmniVoice extra cases) x {de, en} x {floor, final}:
   optimizeTtsTextForLanguage output + appliedRules, and the full deterministic pipeline
   (buildDeterministicTtsFallback) output + appliedRules + authorization.
-* golden_components.json.gz - per-stage records: Markdown strip, stack-frame strip, URL
-  reduction, postProcessTtsText for de/en/None, language detection and binding.
+* golden_components.json.gz - per-stage records: Markdown strip (unbound, de, en), stack-frame
+  strip, link reference definitions, URL reduction, postProcessTtsText for de/en/None,
+  language detection and binding.
 
-They come from the unmodified TS sources run under node + tsx. To regenerate after a
-Genesis update, replace the copied TS sources in the golden harness, rerun its two node
-commands and gzip the outputs (see the commit that added this file).
+They come from the unmodified TS sources of Genesis3 main 0e1ded39e run under node + tsx.
+tools/text_optimizer_golden/ regenerates them after a Genesis update (see its README).
 
 A failure prints a per-rule mismatch histogram plus examples, so a port fix can go pass
 by pass (the component goldens isolate the stages).
@@ -63,7 +63,7 @@ def _rule_key(prefix: str, language, expected_rules, got_rules) -> str:
 
 
 def test_golden_record_count(golden) -> None:
-    assert len(golden) == 6120
+    assert len(golden) == 12928
     assert {(r['language'], r['stage']) for r in golden} == {('de', 'floor'), ('de', 'final'), ('en', 'floor'), ('en', 'final')}
 
 
@@ -94,7 +94,10 @@ def _component_result(record: dict):
     fn = record['fn']
     text = record['input']
     if fn == 'stripMarkdownForTts':
-        return markdown_stripper.strip_markdown_for_tts(text)
+        return markdown_stripper.strip_markdown_for_tts(text, record.get('language'))
+    if fn == 'stripLinkReferenceDefinitionsForTts':
+        stripped, count = reference_links.strip_link_reference_definitions_for_tts(text)
+        return {'text': stripped, 'strippedDefinitions': count}
     if fn == 'stripStackTraceFramesForTts':
         stripped, count = reference_links.strip_stack_trace_frames_for_tts(text)
         return {'text': stripped, 'strippedFrames': count}
@@ -113,7 +116,7 @@ def _component_result(record: dict):
 
 
 def test_pipeline_components_match_ts_golden(components) -> None:
-    assert len(components) == 15347
+    assert len(components) == 42035
     failures = []
     for record in components:
         got = _component_result(record)

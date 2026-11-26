@@ -32,7 +32,7 @@ def test_inline_tags_survive_english_pipeline_with_auto_binding() -> None:
     assert outcome.language == 'en'
     assert outcome.binding_origin == 'chunk_notation'
     assert '[laughter]' in outcome.text and '[B EY1 S]' in outcome.text
-    assert 'three thirty P M' in outcome.text
+    assert 'three thirty P-M' in outcome.text
     assert 'December' in outcome.text
 
 
@@ -40,7 +40,7 @@ def test_unprotected_genesis_pipeline_would_destroy_the_tags() -> None:
     # Documents why the wrapper exists: the TS pipeline speaks the tag text.
     raw = optimize_tts_text('Wir lachen [laughter] und [B EY1 S].', 'de')
     assert '[laughter]' not in raw.text
-    assert 'B EY 1 S' in raw.text
+    assert 'B EY eins S' in raw.text
 
 
 def test_markdown_links_are_not_treated_as_tags() -> None:
@@ -50,9 +50,10 @@ def test_markdown_links_are_not_treated_as_tags() -> None:
 
 
 def test_genesis_quirks_kept_for_parity() -> None:
-    # date_de_dm lower-cases its prefix and takes the sentence period as the date's dot.
+    # date_de_dm keeps its prefix as written (Bug 682) and takes the sentence period as the date's
+    # dot at the end of the text.
     outcome = optimize_text('Am 3.10. geht es los.', 'de')
-    assert outcome.text == 'am dritten Oktober geht es los.'
+    assert outcome.text == 'Am dritten Oktober geht es los.'
     assert optimize_text('Wir starten am 3.10.', 'de').text == 'Wir starten am dritten Oktober'
     # Exclamation marks become periods and quotes are dropped (post-processor).
     assert optimize_text('Super! Er sagt „Hallo“ um 9 Uhr.', 'de').text == 'Super. Er sagt Hallo um neun Uhr.'
@@ -81,9 +82,9 @@ def test_private_use_character_keeps_tag_protection() -> None:
 @pytest.mark.parametrize(
     ('text', 'language', 'expected'),
     [
-        ('Preis [ca. 5 €] und [Anm. d. Red.: 3 Tage]', 'de', 'Preis circa fünf € und Anm. d. Red.: drei Tage'),
+        ('Preis [ca. 5 €] und [Anm. d. Red.: 3 Tage]', 'de', 'Preis circa fünf Euro und Anm. d. Red.: drei Tage'),
         ('Laut Studie [1] steigen die Preise um 5 %.', 'de', 'Laut Studie eins steigen die Preise um fünf Prozent.'),
-        ('Aufgaben:\n- [ ] Milch kaufen\n- [x] 3 Eier holen', 'de', 'Aufgaben: Milch kaufen\nx drei Eier holen'),
+        ('Aufgaben:\n- [ ] Milch kaufen\n- [x] 3 Eier holen', 'de', 'Aufgaben:\nOffen: Milch kaufen,\nErledigt: drei Eier holen'),
         ('See [1] and [2], it costs $5.', 'en', 'See one and two, it costs five dollars.'),
     ],
 )
@@ -134,7 +135,7 @@ def test_auto_binding_uses_notation_and_passes_through_without_it() -> None:
         ('Das kostet 5 Euro.', 'Das kostet fünf Euro.', 'de'),
         ('Wir haben 20 % Rabatt auf 3 Artikel.', 'Wir haben zwanzig Prozent Rabatt auf drei Artikel.', 'de'),
         ('It costs 5 dollars and weighs 3 kg.', 'It costs five dollars and weighs three kilograms.', 'en'),
-        ('# Titel\n\n**Fett** und 🙂 hier.', 'Titel\nFett und hier.', 'de'),
+        ('# Titel\n\n**Fett** und 🙂 hier.', 'Titel.\nFett und hier.', 'de'),
         ('Siehe https://example.com/a/b?c=1 hier.', 'Siehe example punkt com hier.', 'de'),
     ],
 )
@@ -204,7 +205,7 @@ def test_paragraph_breaks_become_single_newlines() -> None:
 @pytest.mark.parametrize('separator', ['\r\n\r\n', '\r\r', '\r\n \r\n', '\u2029', '\n\r\n'])
 def test_windows_and_unicode_paragraph_breaks_keep_the_heading_apart(separator) -> None:
     outcome = optimize_text(f'Überschrift{separator}Am 3.4. kommen 5 Gäste.', 'de')
-    assert outcome.text == 'Überschrift\nam dritten April kommen fünf Gäste.'
+    assert outcome.text == 'Überschrift\nAm dritten April kommen fünf Gäste.'
 
 
 def test_number_dense_input_is_bounded_by_the_time_budget() -> None:
@@ -227,17 +228,18 @@ def test_time_budget_raises_timeout_inside_the_block_only() -> None:
 
 def test_list_lines_keep_their_newlines() -> None:
     outcome = optimize_text('Einkauf:\n1. Butter\n2. Milch\n3. Eier', 'de')
-    assert outcome.text == 'Einkauf:\nErstens: Butter\nZweitens: Milch\nDrittens: Eier'
+    # The Markdown line pass ends each ordered item with a period (Bug 825).
+    assert outcome.text == 'Einkauf:\nErstens: Butter.\nZweitens: Milch.\nDrittens: Eier'
 
 
-def test_url_port_mojibake_is_rescued_by_the_post_processor() -> None:
-    # de.ts writes 'fÃ¼nf' in GERMAN_DIGIT_WORD_SOURCE, so the optimizer alone keeps a spoken port
-    # containing a 5 twice (kept for parity, see the parity notes); the post-processor's echo
-    # collapse removes the duplicate in the full pipeline.
+def test_url_port_with_a_five_is_spoken_once() -> None:
+    # Genesis3 Bug 811 fixed the mojibake 'fÃ¼nf' in GERMAN_DIGIT_WORD_SOURCE: a spoken port with a
+    # 5 is recognised and no longer spoken twice. The full pipeline reduces the URL to its host first
+    # (Bug 812: also "localhost"), so the parenthetical stays there.
     text = 'Server: http://localhost:5000 (fünf null null null) läuft.'
     optimizer_only = optimize_tts_text_for_language(text, 'de').text
-    assert optimizer_only.count('fünf null null null') == 2
-    assert optimize_tts_text(text, 'de').text == 'Server: http://localhost: fünf null null null läuft.'
+    assert optimizer_only == 'Server: http://localhost: fünf null null null läuft.'
+    assert optimize_tts_text(text, 'de').text == 'Server: localhost (fünf null null null) läuft.'
     ok = optimize_tts_text_for_language('Server: http://localhost:8080 (acht null acht null) läuft.', 'de').text
     assert ok.count('acht null acht null') == 1
 

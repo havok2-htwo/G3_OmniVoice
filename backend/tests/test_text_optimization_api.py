@@ -162,7 +162,7 @@ def test_auto_language_binds_from_notation_or_stays_raw(tmp_path) -> None:
     english = submit(queue, SpeechRequest(input='The call is on March 3, 2026 at 4:15 PM.', language='Auto', text_optimization=True))
     assert english.text_optimization['language'] == 'en'
     # The post-processor silences the hyphen between letters ("twenty-six" -> "twenty six").
-    assert english.spoken_text == 'The call is on March third two thousand twenty six at four fifteen P M.'
+    assert english.spoken_text == 'The call is on March third two thousand twenty six at four fifteen P-M.'
     # No notation, but German function words: bound from the words.
     words = submit(queue, SpeechRequest(input='Ich habe 3 Katzen.', text_optimization=True))
     assert words.text_optimization['language'] == 'de'
@@ -421,7 +421,7 @@ def test_dry_run_endpoints() -> None:
     floor = client.post('/api/v1/text/optimize', json={'input': 'Pokémon kam 1996 raus.', 'language': 'de', 'stage': 'floor'})
     assert floor.json()['text'] == 'Pokémon kam 1996 raus.'
     admin = client.post('/api/admin/text/optimize', json={'input': 'See you at 7pm.', 'language': 'en'})
-    assert admin.status_code == 200 and admin.json()['text'] == 'See you at seven P M.'
+    assert admin.status_code == 200 and admin.json()['text'] == 'See you at seven P-M.'
 
 
 def test_dry_run_rejects_what_synthesis_rejects_and_falls_back_on_errors(monkeypatch) -> None:

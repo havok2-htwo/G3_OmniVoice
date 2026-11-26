@@ -8,16 +8,26 @@ from __future__ import annotations
 from typing import Optional
 
 from .jsre import js, js_number, js_replace, js_trim
-from .notation_prepass import NotationPrepassConfig, apply_notation_prepass, escape_for_regexp
+from .markdown_line_structure import MarkdownSpokenWords
+from .notation_prepass import NotationPrepassConfig, apply_notation_normalization, apply_notation_prepass, escape_for_regexp
 from .shared import (
+    EMAIL_ADDRESS_PATTERN_SOURCE,
     PHONE_NUMBER_PATTERN_SOURCE,
+    VERSION_PRE_RELEASE_TAG_SOURCE,
+    VERSION_WILDCARD_SOURCE,
     SpeakPass,
     TtsAlgorithmOptimizationResult,
+    TtsOptimizeOptions,
     finalize_optimized_text,
+    holds_dot_name_before_extension,
     parse_phone_number_match,
     replace_ordered_sequence_markers,
     replace_with_tracking,
 )
+
+# The words of a task item's state and of a status mark (Bug 826).
+ENGLISH_MARKDOWN_WORDS = MarkdownSpokenWords(task_open='Open', task_done='Done', status_yes='Yes', status_no='No', status_warning='Warning')
+
 
 ENGLISH_DIGITS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
 ENGLISH_SMALL = [
@@ -52,6 +62,10 @@ ENGLISH_CURRENCY_MAP = {
     "EUR": _EUR, "EURO": _EUR, "EUROS": _EUR, "€": _EUR,
     "GBP": _GBP, "£": _GBP,
 }
+
+# Bug 435: the names of the currencies of an exchange pair ("EUR/USD" is "euro to US dollar").
+ENGLISH_CURRENCY_PAIR_NAMES = {"EUR": "euro", "USD": "US dollar", "GBP": "pound", "CHF": "Swiss franc", "JPY": "yen"}
+ENGLISH_CURRENCY_PAIR_CODE_SOURCE = "|".join(ENGLISH_CURRENCY_PAIR_NAMES)
 
 _TRAILING_DOT = js(r"\.$", "")
 
@@ -322,11 +336,18 @@ def speak_english_currency(amount_token: str, currency_token: str) -> str:
     fraction_value = js_number(normalized_fraction) if normalized_fraction else 0
     if fraction_value > 0:
         sub_label = currency["subSingular"] if fraction_value == 1 else currency["subPlural"]
+        # "$0.99" is "ninety-nine cents", never "zero dollars and ...".
+        if integer_value == 0:
+            return f"{prefix}{integer_to_english_words(int(fraction_value))} {sub_label}"
         return f"{prefix}{integer_words} {unit_label} and {integer_to_english_words(int(fraction_value))} {sub_label}"
     return js_trim(f"{prefix}{integer_words} {unit_label}")
 
 
-ENGLISH_SCALE_WORDS = {"k": "thousand", "m": "million", "mn": "million", "b": "billion", "bn": "billion", "tn": "trillion"}
+ENGLISH_SCALE_WORDS = {
+    "k": "thousand", "m": "million", "mn": "million", "b": "billion", "bn": "billion", "tn": "trillion",
+    # The written-out scale after a currency ("$3.2 million"): amount_scale_word_en.
+    "thousand": "thousand", "million": "million", "billion": "billion", "trillion": "trillion",
+}
 
 
 def _unit_word(singular: str, plural: Optional[str] = None):
@@ -420,9 +441,13 @@ _SHORT_NUMBER = js(r"^\d{1,3}$", "")
 def is_english_unit_reading_plausible(number_token: str, spacing: str, unit_key: str) -> bool:
     if len(unit_key) > 1 or _UPPER_ASCII.test(unit_key):
         return True
-    if len(spacing) > 0:
+    # A hyphen ("a 64-MB limit") counts as glued, not as a space.
+    if _BLANK_SPACING.test(spacing):
         return True
-    return unit_key in ("h", "s") and _SHORT_NUMBER.test(number_token)
+    return spacing == "" and unit_key in ("h", "s") and _SHORT_NUMBER.test(number_token)
+
+
+_BLANK_SPACING = js(r"^[ \t]+$", "")
 
 
 def speak_english_duration(hours, minutes, seconds, zero_form: str) -> str:
@@ -444,8 +469,18 @@ def speak_english_duration(hours, minutes, seconds, zero_form: str) -> str:
 
 
 def speak_english_version(prefix, parts) -> str:
-    spoken = " point ".join(integer_to_english_words(int(part)) for part in parts if isinstance(part, str) and part != "")
+    spoken = " point ".join(speak_english_version_part(part) for part in parts if isinstance(part, str) and part != "")
     return f"version {spoken}" if prefix else spoken
+
+
+_VERSION_WILDCARD_PART = js(r"^[x*]$", "i")
+
+
+def speak_english_version_part(part: str) -> str:
+    """Bug 840: a part that stands for any number is "x"; a leading zero stays a cardinal."""
+    if _VERSION_WILDCARD_PART.test(part):
+        return "x"
+    return integer_to_english_words(int(part))
 
 
 def speak_english_ipv4(octets, port=None) -> Optional[str]:
@@ -474,7 +509,8 @@ def speak_english_unit(number_token: str, spacing: str, unit_token: str) -> Opti
         return None
     parsed = parse_english_number_token(number_token)
     is_exactly_one = bool(parsed) and not parsed[0] and not parsed[2] and _strip_leading_zeros(parsed[1]) == "1"
-    return f"{speak_english_numeric_token(number_token)} {unit[0] if is_exactly_one else unit[1]}"
+    # A hyphenated unit is a compound adjective and stays singular: "a sixty-four megabyte limit".
+    return f"{speak_english_numeric_token(number_token)} {unit[0] if is_exactly_one or spacing == '-' else unit[1]}"
 
 
 def spell_english_hex(token: str) -> str:
@@ -557,19 +593,154 @@ def speak_english_date(month: int, day: int, year: int) -> Optional[str]:
 
 # --- speak callbacks -------------------------------------------------------------------------------
 
-def _speak_domain(_match, label_part, tld):
+_CAPITALISED_WORD = js(r"^\p{Lu}\p{Ll}+$", "u")
+
+
+def _speak_domain(_match, label_part, tld, *_rest):
     labels = [part for part in (js_trim(p) for p in (label_part or "").split(".")) if part]
     if not labels:
+        return None
+    # Bug 969: a capital with lower-case letters behind a dot is the next sentence after a missing blank.
+    if _CAPITALISED_WORD.test(tld or ""):
         return None
     return f"{' dot '.join(labels)} dot {(tld or '').lower().replace('.', ' dot ', 1)}"
 
 
-def _speak_version(_match, short_prefix, short_first, short_second, prefix, first, second, third, fourth):
+def _speak_version(_match, labelled, short_prefix, short_first, short_second, short_wildcard, prefix, first, second, third,
+                   fourth, third_wildcard, second_wildcard, bare_first, bare_wildcard, tag, tag_number, *_rest):
+    marked = labelled is not None
+    version_prefix = None
     if short_first is not None:
-        return speak_english_version(short_prefix, [short_first, short_second])
-    if all(len(part) == 3 for part in (second, third, fourth) if part):
+        version_prefix = short_prefix
+        spoken = speak_english_version(None, [short_first, short_second if short_second is not None else short_wildcard])
+    elif bare_first is not None:
+        if bare_wildcard == "*" and not marked:
+            return None
+        spoken = speak_english_version(None, [bare_first, bare_wildcard])
+    else:
+        version_prefix = prefix
+        wildcard = third_wildcard if third_wildcard is not None else second_wildcard
+        if wildcard == "*" and not prefix and not marked:
+            return None
+        if third is not None and all(len(part) == 3 for part in (second, third, fourth) if part):
+            return None
+        spoken = speak_english_version(
+            None, [first, second, third, fourth if fourth is not None else third_wildcard, second_wildcard]
+        )
+    if tag is not None:
+        spoken = f"{spoken} {f'{tag} {speak_english_version_part(tag_number)}' if tag_number is not None else tag}"
+    return f"version {spoken}" if version_prefix and not marked else spoken
+
+
+def _speak_dotted_dmy(_match, day_token, month_token, year_token, *_rest):
+    day = int(day_token)
+    month = int(month_token)
+    if day < 1 or day > 31 or month < 1 or month > 12:
         return None
-    return speak_english_version(prefix, [first, second, third, fourth])
+    return speak_english_date(month, day, int(year_token))
+
+
+_SUFFIX_CURRENCY_WORD = js(r"^(?:dollars?|euros?|pounds?)$", "i")
+
+
+def _speak_amount_scale_word(_match, prefix_currency, number_token, scale_token, suffix_currency, *_rest):
+    suffix_is_word = bool(suffix_currency) and _SUFFIX_CURRENCY_WORD.test(suffix_currency)
+    currency = prefix_currency or (None if suffix_is_word else suffix_currency)
+    if not currency:
+        return None
+    return speak_english_amount_scale(number_token, scale_token, currency)
+
+
+def _speak_currency_pair(_match, base_code, quote_code, *_rest):
+    base = ENGLISH_CURRENCY_PAIR_NAMES.get(base_code)
+    quote = ENGLISH_CURRENCY_PAIR_NAMES.get(quote_code)
+    return f"{base} to {quote}" if base and quote and base_code != quote_code else None
+
+
+# Bug 844: German notation that the English number passes read with a wrong value (apostrophe
+# groups, the decimal comma, thousands dots with a decimal comma, the hyphen of a phone extension).
+_DOT_GROUP = js(r"\d\.\d{3}", "")
+_DOTS_WITH_DECIMAL_COMMA = js(r"(?<![\w.,])(\d{1,3}(?:\.\d{3})+),(\d{1,2})(?!\d|[.,]\d)", "g")
+_DOT_GROUPS_BESIDE_CURRENCY = js(
+    r"(?<![\w.,])((?:€|\$|£)\s*)?(\d{1,3}(?:\.\d{3}){2,})(?!\d|[.,]\d)(\s*(?:€|\$|£|(?:EUROS?|EUR|USD|GBP)\b))?", "gi"
+)
+_APOSTROPHE_GROUP = js(r"\d['’‘]\d{3}", "")
+_APOSTROPHE_THOUSANDS = js(r"(?<![\d'’‘.,])(\d{1,3})((?:['’‘]\d{3})+)(?:([.,])(\d+))?(?![\d'’‘])", "g")
+_APOSTROPHES = js(r"['’‘]", "g")
+_THOUSANDS_COMMAS = js(r"\B(?=(\d{3})+(?!\d))", "g")
+_DECIMAL_COMMA = js(
+    r"(?<![\w.,(\[])(?<!\b(?:pages?|items?|options?|steps?|rows?|columns?|lines?|Pages?|Items?|Options?|Steps?|Rows?|Columns?"
+    r"|Lines?)[ \t]+)(?<!\p{L},\p{L}[ \t]*=[ \t]*)(-?\d+),(\d+)(?![\d,]|\.\d|[ \t]*[AaPp]\.?[Mm]\b|\))(?:(?=[ \t]+(?:and|or)[ \t]+"
+    r"(\d+)(?!\d|[.,]\d))|)(?:(?=(\p{L}))|)",
+    "gu",
+)
+_ZERO_LEFT = js(r"^-?0$", "")
+_ZERO_LED = js(r"^0\d", "")
+_PHONE_EXTENSION = js(r"\b((?:[Ff]ax|[Tt]el|[Pp]hone|[Ee]xt|[Ee]xtension))(\.?:?[ \t]+)-[ \t]?(\d{1,6})(?!\d|[.,]\d|[\"″])", "g")
+
+
+def normalize_english_foreign_numbers(text: str, applied_rules: list[str]) -> str:
+    result = text
+    if _DOT_GROUP.test(result):
+        result = replace_with_tracking(
+            result,
+            _DOTS_WITH_DECIMAL_COMMA,
+            lambda _m, whole, fraction, *_r: f"{whole.replace('.', ',')}.{fraction}",
+            "german_grouping_en",
+            applied_rules,
+        )
+        result = replace_with_tracking(
+            result,
+            _DOT_GROUPS_BESIDE_CURRENCY,
+            lambda match, prefix, whole, suffix, *_r: (
+                f"{prefix or ''}{whole.replace('.', ',')}{suffix or ''}" if prefix or suffix else match
+            ),
+            "german_grouping_en",
+            applied_rules,
+        )
+    if _APOSTROPHE_GROUP.test(result):
+
+        def apostrophes(match, head, groups, mark, tail, *_rest):
+            digits = f"{head}{js_replace(_APOSTROPHES, groups, '')}"
+            whole = digits
+            fraction = ""
+            if mark is not None and tail is not None:
+                if mark == "," and len(tail) == 3:
+                    whole = f"{digits}{tail}"
+                elif mark == "," and len(tail) > 2:
+                    return match
+                else:
+                    fraction = f".{tail}"
+            return f"{js_replace(_THOUSANDS_COMMAS, whole, ',')}{fraction}"
+
+        result = replace_with_tracking(result, _APOSTROPHE_THOUSANDS, apostrophes, "apostrophe_thousands", applied_rules)
+    if "," in result:
+
+        def decimal_comma(match, left, right, list_end, glued, *_rest):
+            zero_led = _ZERO_LEFT.test(left)
+            if len(right) == 3 and not zero_led:
+                return match
+            if (
+                list_end is not None
+                and _ALL_DIGITS.test(left)
+                and not _ZERO_LED.test(right)
+                and int(left) < int(right) < int(list_end)
+            ):
+                return f"{left}, {right}"
+            return f"{left}.{right}{' ' if glued is not None else ''}"
+
+        result = replace_with_tracking(result, _DECIMAL_COMMA, decimal_comma, "decimal_comma_en", applied_rules)
+    if "-" in result:
+        result = replace_with_tracking(
+            result,
+            _PHONE_EXTENSION,
+            lambda _m, label, link, digits, *_r: (
+                f"{label}{link}{spell_english_digits(digits) if len(digits) > 1 and digits.startswith('0') else digits}"
+            ),
+            "phone_extension_en",
+            applied_rules,
+        )
+    return result
 
 
 def _speak_slash_full(_match, first_token, second_token, year_token):
@@ -638,10 +809,17 @@ def _speak_named_month(_match, month_label, day_token, year_token):
     return speak_english_date(month, day, year) or None
 
 
-def _speak_day_month(_match, prefix, day_token, month_label, year_token):
+_DOTTED_DAY_START = js(r"^(?:on\s+)?\d{1,2}\.", "i")
+_FOUR_DIGITS = js(r"^\d{4}$", "")
+
+
+def _speak_day_month(match, prefix, day_token, month_label, year_token, *_rest):
     month = english_month_index(month_label)
     day = int(day_token)
     year = parse_english_year_token(year_token)
+    # The dotted day takes a four-digit year only: "3. May 26 people" is no date.
+    if _DOTTED_DAY_START.test(match) and not _FOUR_DIGITS.test(year_token):
+        return None
     if not month or year is None or day < 1 or day > 31:
         return None
     spoken_date = speak_english_date(month, day, year)
@@ -756,24 +934,44 @@ def _speak_dimension(_match, chain):
 
 
 ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
+    SpeakPass("email_address_span_en", js(EMAIL_ADDRESS_PATTERN_SOURCE, "giu"), lambda match, *_r: match),
     SpeakPass(
         "domain_en",
-        js(r"(?<![\w@/.-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+)(de|com|org|net|eu|at|ch|io|dev|info|news|co\.uk|us|ai)(?![\w-])", "gi"),
+        js(
+            r"(?<![\p{L}\p{N}_@/.-])((?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+)(de|com|org|net|eu|at|ch|io|dev|info|news|co\.uk|us|ai)"
+            r"(?![\p{L}\p{N}_-])",
+            "giu",
+        ),
         _speak_domain,
     ),
     SpeakPass(
         "network_port_en",
-        js(r"\b(port(?:\s+number)?)(?:\s*[:=]\s*|\s+)(\d{1,5})\b", "gi"),
-        lambda _m, label, number_token: speak_english_network_port(label, number_token),
+        js(r"\b(port(?:\s+number)?)(?:\s*[:=]\s*|\s+)(\d{1,5})\b|(?<=\s)(?<!\d[ \t]+):(\d{2,5})\b(?![.,:]?\d)", "gi"),
+        lambda _m, label, number_token, bare_token, *_r: (
+            speak_english_network_port("port", bare_token) if bare_token is not None else speak_english_network_port(label, number_token)
+        ),
     ),
     SpeakPass(
         "ipv4_en",
         js(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?(?!\w|\.\d)", "g"),
-        lambda _m, a, b, c, d, port: speak_english_ipv4([a, b, c, d], port),
+        lambda _m, a, b, c, d, port, *_r: speak_english_ipv4([a, b, c, d], port),
+    ),
+    SpeakPass(
+        "date_en_dotted_dmy",
+        js(r"(?<![\d.,])(\d{1,2})\.(\d{1,2})\.((?:19|20)\d{2})(?!\d|[.,]\d)", "g"),
+        _speak_dotted_dmy,
     ),
     SpeakPass(
         "version_en",
-        js(r"(?<![\w.,-])(?:(v)(\d{1,3})\.(\d{1,3})(?!\d|\.\d)|(v)?(\d{1,3})\.(\d{1,3})\.(\d{1,4})(?:\.(\d{1,4}))?(?!\d|[.,]\d))", "gi"),
+        js(
+            r"(?<![\w.,-])(?:(?<=\bversion[ \t]*:?[ \t]*)()|)"
+            r"(?:(v)(\d{1,3})\.(?:(\d{1,3})(?!\d|\.(?:\d|" + VERSION_WILDCARD_SOURCE + r"))|(" + VERSION_WILDCARD_SOURCE + r"))"
+            r"|(v)?(\d{1,3})\.(\d{1,3})\.(?:(\d{1,4})(?:\.(?:(\d{1,4})|(" + VERSION_WILDCARD_SOURCE + r")))?(?!\d|[.,]\d)|("
+            + VERSION_WILDCARD_SOURCE + r"))"
+            r"|(\d{1,3})\.(" + VERSION_WILDCARD_SOURCE + r"))"
+            r"(?:-(" + VERSION_PRE_RELEASE_TAG_SOURCE + r")(?:\.?(\d{1,3}))?(?![\w-]|[.,]\d))?",
+            "gi",
+        ),
         _speak_version,
     ),
     SpeakPass(
@@ -794,7 +992,7 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
     SpeakPass(
         "phone_number_en",
         js(PHONE_NUMBER_PATTERN_SOURCE, "gu"),
-        lambda match: speak_english_phone_number(match),
+        lambda match, *_r: speak_english_phone_number(match),
     ),
     SpeakPass(
         "date_en_month_day_slash",
@@ -818,7 +1016,7 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
     ),
     SpeakPass(
         "date_en_day_month",
-        js(rf"\b(on\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\s+({ENGLISH_MONTH_SOURCE})\.?\s+(\d{{2,4}})\b(?!:)", "gi"),
+        js(rf"\b(on\s+)?(\d{{1,2}})(?:st|nd|rd|th|\.)?\s+({ENGLISH_MONTH_SOURCE})\.?\s+(\d{{2,4}})\b(?!:)", "gi"),
         _speak_day_month,
     ),
     SpeakPass(
@@ -882,7 +1080,7 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
     SpeakPass(
         "ordinal_en",
         js(r"\b(\d{1,4})(?:st|nd|rd|th)\b", "g"),
-        lambda _m, number_token: ordinal_english(int(number_token)),
+        lambda _m, number_token, *_r: ordinal_english(int(number_token)),
     ),
     SpeakPass(
         "feet_inches_en",
@@ -892,7 +1090,7 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
     SpeakPass(
         "inch_mark_en",
         js(r"(?<=\s)(\d+(?:\.\d+)?)\"(?=\s|$|[,.;:)])", "g"),
-        lambda _m, number_token: f"{speak_english_numeric_token(number_token)} {'inch' if number_token == '1' else 'inches'}",
+        lambda _m, number_token, *_r: f"{speak_english_numeric_token(number_token)} {'inch' if number_token == '1' else 'inches'}",
     ),
     SpeakPass(
         "amount_scale_en",
@@ -900,30 +1098,47 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
             r"(?<!\w)(?:(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b)\s*)?(-?\d[\d.,]*\d|-?\d)\s*(bn|mn|tn)\b\.?(?:\s*(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b))?",
             "gi",
         ),
-        lambda _m, prefix_currency, number_token, scale_token, suffix_currency: speak_english_amount_scale(
+        lambda _m, prefix_currency, number_token, scale_token, suffix_currency, *_r: speak_english_amount_scale(
             number_token, scale_token, prefix_currency or suffix_currency
         ),
     ),
     SpeakPass(
         "amount_scale_symbol_en",
         js(r"(?<!\w)(€|\$|£)\s*(-?\d[\d.,]*)\s*([kmbKMB])\b", "g"),
-        lambda _m, currency_token, number_token, scale_token: speak_english_amount_scale(
+        lambda _m, currency_token, number_token, scale_token, *_r: speak_english_amount_scale(
             number_token, scale_token, currency_token
         ),
     ),
     SpeakPass(
+        "amount_scale_word_en",
+        js(
+            r"(?<![\w/])(?:(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b)\s*)?(-?\d[\d.,]*\d|-?\d)\s+(thousand|million|billion|trillion)\b"
+            r"(?:\s+(dollars?\b|euros?\b|pounds?\b|€|\$|£|(?:EUR|USD|GBP)\b))?",
+            "gi",
+        ),
+        _speak_amount_scale_word,
+    ),
+    SpeakPass(
         "unit_suffix_en",
-        js(rf"(?<!\w)(-?\d[\d.,]*)([ \t]*)({ENGLISH_UNIT_KEY_SOURCE})(?:\.(?![ \t]*$|[ \t]+\p{{Lu}}))?(?![\p{{L}}\d])", "gu"),
-        lambda _m, number_token, spacing, unit_token: speak_english_unit(number_token, spacing, unit_token),
+        js(rf"(?<!\w)(-?\d[\d.,]*)([ \t]*|-)({ENGLISH_UNIT_KEY_SOURCE})(?:\.(?![ \t]*$|[ \t]+\p{{Lu}}))?(?![\p{{L}}\d])", "gu"),
+        lambda _m, number_token, spacing, unit_token, *_r: speak_english_unit(number_token, spacing, unit_token),
     ),
     SpeakPass(
         "hex_color_en",
         js(r"#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b", "g"),
-        lambda _m, hex_token: spell_english_hex(hex_token),
+        lambda _m, hex_token, *_r: spell_english_hex(hex_token),
+    ),
+    SpeakPass(
+        "currency_pair_en",
+        js(
+            r"(?<![\p{L}\p{N}/])(" + ENGLISH_CURRENCY_PAIR_CODE_SOURCE + r")\/(" + ENGLISH_CURRENCY_PAIR_CODE_SOURCE + r")(?![\p{L}\p{N}/])",
+            "gu",
+        ),
+        _speak_currency_pair,
     ),
     SpeakPass(
         "currency_prefix",
-        js(r"(?<!\w)(-?)(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b)\s*(-?\d(?:[\d.,]*\d)?)", "gi"),
+        js(r"(?<![\w/])(-?)(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b)\s*(-?\d(?:[\d.,]*\d)?)", "gi"),
         _speak_currency_prefix,
     ),
     SpeakPass(
@@ -932,17 +1147,17 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
             r"(?<!\w)(-?\d(?:[\d.,]*\d)?)\s*(€|\$|£|(?:EUROS?|EUR|USD|GBP)\b)(?=$|[\s,.;:!?)]|\/(?!(?:EUR|USD|GBP|CHF|JPY)\b))",
             "gi",
         ),
-        lambda _m, amount_token, currency_token: speak_english_currency(amount_token, currency_token),
+        lambda _m, amount_token, currency_token, *_r: speak_english_currency(amount_token, currency_token),
     ),
     SpeakPass(
         "percent_en",
         js(r"(?<!\w)(-?\d[\d.,]*)\s*%", "g"),
-        lambda _m, number_token: f"{speak_english_numeric_token(number_token)} percent",
+        lambda _m, number_token, *_r: f"{speak_english_numeric_token(number_token)} percent",
     ),
     SpeakPass(
         "temperature_en",
         js(r"(?<!\w)(-?\d[\d.,]*)\s*(?:°|º)\s*([CFK])\b", "gi"),
-        lambda _m, number_token, unit_token: speak_english_temperature(number_token, (unit_token or "").upper()),
+        lambda _m, number_token, unit_token, *_r: speak_english_temperature(number_token, (unit_token or "").upper()),
     ),
     SpeakPass(
         "dimension_en",
@@ -952,19 +1167,19 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
     SpeakPass(
         "decimal_number_en",
         js(r"(?<![\w.,])(-?\d{1,3}(?:,\d{3})+\.\d+|-?\d+\.\d+)(?![.,]?\d)", "g"),
-        lambda _m, number_token: speak_english_numeric_token(number_token),
+        lambda _m, number_token, *_r: speak_english_numeric_token(number_token),
     ),
     SpeakPass(
         "thousands_number_en",
         js(r"(?<![\w.,])(-?\d{1,3}(?:,\d{3})+|-?\d{1,3}(?:\.\d{3}){2,})(?![.,]?\d)", "g"),
-        lambda _m, number_token: speak_english_numeric_token(
+        lambda _m, number_token, *_r: speak_english_numeric_token(
             number_token.replace(".", ",") if "." in number_token else number_token
         ),
     ),
     SpeakPass(
         "digit_sequence_en",
         js(r"\b(0\d{2,}|\d{5,})\b", "g"),
-        lambda _m, number_token: spell_english_digits(number_token),
+        lambda _m, number_token, *_r: spell_english_digits(number_token),
     ),
     SpeakPass(
         "year_number_en",
@@ -974,33 +1189,44 @@ ENGLISH_SPEAK_PASSES: list[SpeakPass] = [
             + ")[.:]?\\s+(?:1\\d{3}\\s*(?:,|and|or|to|through|until|till)\\s+)*)|(?<=\\()|(?<=(?:^|[.!?])\\s*))(1\\d{3})(?![\\p{L}\\p{N}_]|[.,]\\d|[ \\t]+by[ \\t]+\\d)",
             "gimu",
         ),
-        lambda _m, number_token: year_to_english_words(int(number_token)),
+        lambda _m, number_token, *_r: year_to_english_words(int(number_token)),
     ),
     SpeakPass(
         "integer_number_en",
         js(r"(?<![\w.])(-?\d+)\b(?!\.\d)", "g"),
-        lambda _m, number_token: speak_english_numeric_token(number_token),
+        lambda _m, number_token, *_r: speak_english_numeric_token(number_token),
     ),
 ]
 
 ENGLISH_SPEAK_PASS_BY_LABEL = {speak_pass.label: speak_pass for speak_pass in ENGLISH_SPEAK_PASSES}
 
 _FILENAME_LIST_ITEM = js(r"^(\s*)(\d{1,2})\.\s+(.+?\.[A-Za-z0-9]{2,8})\s*$", "gm")
+_ORDINAL_RANGE = js(r"\b(\d{1,3}(?:st|nd|rd|th))[ \t]?[–—-][ \t]?(\d{1,3}(?:st|nd|rd|th))\b", "g")
+_DIMENSION_UNIT = js(
+    r"(?<![\w.,])((?:\d+(?:\.\d+)?[ \t]*[x×][ \t]*)+)(?=\d+(?:\.\d+)?[ \t]*(?:" + ENGLISH_UNIT_KEY_SOURCE + r")(?![\p{L}\d]))", "gu"
+)
+_DIMENSION_X = js(r"[ \t]*[x×][ \t]*", "")
 
 ENGLISH_NOTATION_PREPASS = NotationPrepassConfig(
     lang="en",
     integer_words=integer_to_english_words,
     digit_words=spell_english_digits,
     year_words=year_to_english_words,
+    unit_symbol_source=ENGLISH_UNIT_KEY_SOURCE,
+    unit_symbols=tuple(ENGLISH_UNIT_WORDS),
 )
 
 
-def optimize_english_tts_text(text: str) -> TtsAlgorithmOptimizationResult:
-    """``optimizeEnglishTtsText``."""
+def optimize_english_tts_text(text: str, options: Optional[TtsOptimizeOptions] = None) -> TtsAlgorithmOptimizationResult:
+    """``optimizeEnglishTtsText``; of the options only ``answer_text`` counts."""
+    answer_text = options.answer_text if options else None
     result = text or ""
     applied_rules: list[str] = []
     if not js_trim(result):
         return TtsAlgorithmOptimizationResult(result, applied_rules, "en")
+
+    result = apply_notation_normalization(result, ENGLISH_NOTATION_PREPASS, applied_rules)
+    result = normalize_english_foreign_numbers(result, applied_rules)
 
     def run_speak_pass(label: str) -> None:
         nonlocal result
@@ -1017,18 +1243,21 @@ def optimize_english_tts_text(text: str) -> TtsAlgorithmOptimizationResult:
 
     def filename_item(match, leading_whitespace, index_token, filename, *_rest):
         index = int(index_token)
-        if index < 1 or index > 99:
+        if index < 1 or index > 99 or holds_dot_name_before_extension(filename):
             return match
         return f"{leading_whitespace}{capitalize_english_token(ordinal_english(index))}: {speak_english_filename_phrase(filename)}"
 
     result = replace_with_tracking(result, _FILENAME_LIST_ITEM, filename_item, "filename_list_item_en", applied_rules)
     result = normalize_english_url_ports(result, applied_rules)
     result = resolve_english_year_hint_leftovers(result, applied_rules)
-    result = apply_notation_prepass(result, ENGLISH_NOTATION_PREPASS, applied_rules)
+    result = replace_with_tracking(
+        result, _ORDINAL_RANGE, lambda _m, first, second, *_r: f"{first} to {second}", "ordinal_range_en", applied_rules
+    )
+    result = apply_notation_prepass(result, ENGLISH_NOTATION_PREPASS, applied_rules, answer_text)
     for label in (
-        "domain_en", "network_port_en", "ipv4_en", "version_en", "date_en_slash_full", "date_en_month_year",
-        "fraction_en", "phone_number_en", "date_en_month_day_slash", "date_iso", "date_en_year_month",
-        "date_en_named_month", "date_en_day_month", "date_en_month_day_range", "date_en_month_day",
+        "domain_en", "network_port_en", "ipv4_en", "date_en_dotted_dmy", "version_en", "date_en_slash_full",
+        "date_en_month_year", "fraction_en", "phone_number_en", "date_en_month_day_slash", "date_iso",
+        "date_en_year_month", "date_en_named_month", "date_en_day_month", "date_en_month_day_range", "date_en_month_day",
         "date_en_day_month_no_year", "duration_en_unit", "duration_en_compact", "time_en_hmm_dot",
         "time_en_hhmm", "time_en_hour_meridiem", "ordinal_en", "feet_inches_en", "inch_mark_en",
     ):
@@ -1038,10 +1267,22 @@ def optimize_english_tts_text(text: str) -> TtsAlgorithmOptimizationResult:
         result, lambda index: capitalize_english_token(ordinal_english(index)), "list_marker_en", applied_rules
     )
 
+    run_speak_pass("amount_scale_en")
+    run_speak_pass("amount_scale_symbol_en")
+    run_speak_pass("amount_scale_word_en")
+    result = replace_with_tracking(
+        result,
+        _DIMENSION_UNIT,
+        lambda _m, head, *_r: (
+            " by ".join(speak_english_numeric_token(token) for token in _DIMENSION_X.split(head) if token) + " by "
+        ),
+        "dimension_unit_en",
+        applied_rules,
+    )
     for label in (
-        "amount_scale_en", "amount_scale_symbol_en", "unit_suffix_en", "hex_color_en", "currency_prefix",
-        "currency_suffix", "percent_en", "temperature_en", "dimension_en", "decimal_number_en",
-        "thousands_number_en", "digit_sequence_en", "year_number_en", "integer_number_en",
+        "unit_suffix_en", "hex_color_en", "currency_prefix", "currency_suffix", "currency_pair_en", "percent_en",
+        "temperature_en", "dimension_en", "decimal_number_en", "thousands_number_en", "digit_sequence_en",
+        "year_number_en", "integer_number_en",
     ):
         run_speak_pass(label)
 

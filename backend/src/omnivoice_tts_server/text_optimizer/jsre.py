@@ -302,7 +302,12 @@ def _translate_class(source: str, i: int, unicode_mode: bool, ignore_case: bool 
 
     body_text = "".join(body)
     if ignore_case and body_text:
-        body_text += _class_case_closure(body_text, unicode_mode)
+        extras = _class_case_closure(body_text, unicode_mode)
+        if extras and body_text.endswith("-") and not body_text.endswith("\\-"):
+            # A trailing literal hyphen must stay last, or it would open a range with the extras.
+            body_text = body_text[:-1] + extras + "-"
+        else:
+            body_text += extras
     if not complements:
         if not body_text:
             # JS: [] never matches, [^] matches any character.

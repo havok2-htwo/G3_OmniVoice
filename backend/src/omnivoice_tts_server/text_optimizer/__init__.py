@@ -1,18 +1,20 @@
 """Deterministic TTS text optimizer (Python port of the Genesis3 TypeScript pipeline).
 
 The port keeps the TS rule names (``applied_rules``) and is checked against golden
-outputs of the original TS code (tests/test_text_optimizer_parity.py).
+outputs of the original TS code (tests/test_text_optimizer_parity.py). Reference: Genesis3
+main 0e1ded39e (2026-11-26); tools/text_optimizer_golden/ regenerates the fixtures.
 
 Public entry points:
 
 * :func:`optimize_text` - the server wrapper: language binding for request languages
   incl. ``Auto``, OmniVoice inline-tag protection, paragraph handling.
-* :func:`optimize_tts_text` - the full deterministic pipeline (stack frames, URL domains,
-  Markdown, de/en language passes, post-processor) for an already bound language.
+* :func:`optimize_tts_text` - the full deterministic pipeline (invisible characters, stack
+  frames, link definitions, URL domains, Markdown line structure, de/en language passes,
+  post-processor) for an already bound language.
 * :func:`optimize_tts_text_for_language` - the language passes alone (``index.ts``).
 * :func:`resolve_text_optimization_mode` - request flag / metadata / admin default.
 
-Importing the package is cheap; the ~250 rule patterns are compiled on first use of a
+Importing the package is cheap; the ~450 rule patterns are compiled on first use of a
 pipeline function (about one second), not at server import time.
 """
 

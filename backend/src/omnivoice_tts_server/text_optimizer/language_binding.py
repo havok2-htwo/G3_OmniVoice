@@ -2,7 +2,8 @@
 
 ``detect_hint_language_from_text`` votes with notation that only one of German
 or English writes; ``resolve_tts_language_binding`` falls back to a UI/default
-language unless the text carries the other convention's digit grouping.
+language unless the text carries the other convention's digit grouping or its writing does not
+fit that language (text_orthography.py).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .jsre import js, js_trim
+from .text_orthography import text_orthography_allows_language
 
 GERMAN_LANGUAGE_ANCHORS = (
     js(r"\b(?:januar|februar|märz|maerz|mai|juni|juli|oktober|dezember)\b", "gi"),
@@ -20,7 +22,7 @@ GERMAN_LANGUAGE_ANCHORS = (
     js(r"\b\d+,\d{1,2}\s?(?:€|EUR\b)", "g"),
     js(r"\b\d[\d.]*,\d+\s?(?:Mio|Mrd|Tsd)\b\.?", "g"),
     js(r"\b(?:am|vom|bis|zum|ab)\s+\d{1,2}\.\d{1,2}\.", "g"),
-    js(r"\b\d{1,2}\.\s?(?:Jan|Feb|Mär|Apr|Jun|Jul|Aug|Sept?|Okt|Nov|Dez)\.?(?![\p{L}])", "gu"),
+    js(r"\b\d{1,2}\.\s?(?:Jan|Feb|Mär|Mrz|Apr|Jun|Jul|Aug|Sept?|Okt|Nov|Dez)\.?(?![\p{L}])", "gu"),
 )
 ENGLISH_LANGUAGE_ANCHORS = (
     js(r"\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},\s*\d{4}\b", "gi"),
@@ -35,8 +37,8 @@ ENGLISH_LANGUAGE_ANCHORS = (
 )
 
 FOREIGN_GROUPING_BY_LANGUAGE = {
-    "de": js(r"(?<![\d.,])\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b(?![.,]\d)", ""),
-    "en": js(r"(?<![\d.,])\b\d{1,3}(?:\.\d{3})+(?:,\d+)?\b(?![.,]\d)", ""),
+    "de": js(r"(?<![\d.,])\b[1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?\b(?![.,]\d)", ""),
+    "en": js(r"(?<![\d.,])\b[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?\b(?![.,]\d)", ""),
 }
 
 
@@ -54,11 +56,27 @@ def detect_hint_language_from_text(text: str) -> Optional[str]:
     return "de" if german >= english else "en"
 
 
-def resolve_tts_language_binding(text: str, ui_language: Optional[str]) -> tuple[str, str]:
+def resolve_tts_language_binding(
+    text: str, ui_language: Optional[str], answer_language: Optional[dict] = None
+) -> tuple[str, str]:
     """``resolveTtsLanguageBinding`` -> (language '' | 'de' | 'en', origin).
 
-    origin is 'chunk_notation', 'ui_locale_fallback' or 'none'.
+    origin is 'chunk_notation', 'ui_locale_fallback', 'writing_not_ui_language' (the text's writing
+    does not fit the fallback language, Bugs 182/424) or 'none'; with a detector verdict
+    (``answer_language`` = {'language', 'origin': 'detector' | 'sentence'}, Bug 424) also
+    'answer_detector' or 'sentence_detector'. G3_OmniVoice runs no language detector and passes
+    none; the parameter keeps the port complete for the TS unit tests.
     """
+    verdict = answer_language or {}
+    if verdict.get("origin") in ("detector", "sentence") and verdict.get("language"):
+        language = verdict["language"]
+        origin = "sentence_detector" if verdict["origin"] == "sentence" else "answer_detector"
+        if detect_hint_language_from_text(text) == language:
+            return language, origin
+        foreign_grouping = FOREIGN_GROUPING_BY_LANGUAGE.get(language)
+        if foreign_grouping is not None and foreign_grouping.test(text or ""):
+            return "", "none"
+        return language, origin
     detected = detect_hint_language_from_text(text)
     if detected:
         return detected, "chunk_notation"
@@ -69,4 +87,6 @@ def resolve_tts_language_binding(text: str, ui_language: Optional[str]) -> tuple
     foreign = FOREIGN_GROUPING_BY_LANGUAGE.get(fallback)
     if foreign is not None and foreign.test(text or ""):
         return "", "none"
+    if not text_orthography_allows_language(text or "", fallback):
+        return "", "writing_not_ui_language"
     return fallback, "ui_locale_fallback"

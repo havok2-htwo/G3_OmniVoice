@@ -305,11 +305,13 @@ TTS pipeline; no LLM is involved:
 - numbers, decimals, thousands, ordinals, fractions, percent, currency
   (`29,90 €` -> `neunundzwanzig Euro und neunzig Cent`), units (`5 km`, `2,4 GHz`),
   temperatures, phone numbers, IPs, versions, ports, hex colours, IBANs, list markers
-- full URLs are reduced to their domain (`https://heise.de/x` -> `heise punkt de`),
-  stack-trace frames are dropped
-- Markdown (fences, links, bold, bullets, tables) and emoji are removed
-- abbreviations (`z.B.`, `inkl.`, `Tel.`, `e.g.`, ...) are expanded and known
-  acronyms are spelled (`API` -> `A P I`)
+- full URLs are reduced to their domain (`https://heise.de/x` -> `heise punkt D-E`),
+  stack-trace frames and link reference definitions are dropped
+- Markdown (fences, links, bold, tables, HTML tags and entities, inline math) and emoji
+  are removed; its structure is spoken as sentence boundaries (a heading ends with a
+  period, list items are separated, task boxes become `Offen:`/`Erledigt:`)
+- abbreviations (`z.B.`, `inkl.`, `Tel.`, `Dr.`, `e.g.`, ...) are expanded and known
+  acronyms are spelled with hyphens (`API` -> `A-P-I`)
 - `!` at a sentence end becomes `.`, quotation marks are dropped, en/em dashes
   become a spaced hyphen pause. These punctuation changes only happen when at least
   one rule fired; a text no rule touches is spoken exactly as sent.
@@ -345,10 +347,9 @@ tags such as `[laughter]` / `[Cough]` in any case, and ARPAbet pronunciations su
 
 Limits: the rule passes have a 5-second budget per request. Number-dense input (long
 digit lists, `1.1.1...` runs) can exceed it; the raw text is then spoken
-(`binding_origin: timeout`). Known gaps inherited from the Genesis rules (kept for
-parity with the TS reference): `25:30 min` is read as a ratio (`fünfundzwanzig zu
-dreißig`), a lone attributive `1` (`1 Person`, `Ich kaufe 1 Butter`) stays a digit in
-German, a keycap `1️⃣` becomes `1`, and a sentence-initial `Am 3.4.` is lower-cased.
+(`binding_origin: timeout`). A known gap inherited from the Genesis rules (kept for
+parity with the TS reference): a lone attributive `1` (`1 Person`, `Ich kaufe 1
+Butter`) stays a digit in German, because its form depends on the noun's gender.
 
 What is never changed: `request.input` stays the raw text (job lists show it),
 `ref_text` and `instructions` are not touched, and inline control spans such as

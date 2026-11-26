@@ -332,7 +332,9 @@ services running; details in `docs/perf-experiments-2026-10-16.md`):
   zweitausendsechsundzwanzig um vierzehn Uhr dreißig`). It is a Python port of
   the Genesis3 deterministic TTS pipeline
   (`backend/src/omnivoice_tts_server/text_optimizer/`), checked against golden
-  outputs of the TS original. The admin default `text_optimization_default` is
+  outputs of the TS original; the reference is Genesis3 `main` at `0e1ded39e`
+  (2026-11-26), and `tools/text_optimizer_golden/` regenerates the fixtures after
+  a Genesis update. The admin default `text_optimization_default` is
   `off`, so existing clients hear no change; benchmarks and WER runs always stay
   off. The admin Quick Synthesis panel has a mode switch and a text preview
   (`POST /api/v1/text/optimize`).

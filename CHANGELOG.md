@@ -4,6 +4,29 @@ All notable changes to G3_OmniVoice are recorded here.
 
 ## [Unreleased]
 
+### Changed - text optimizer synced with Genesis3 main 0e1ded39e
+
+- The deterministic text optimizer (`text_optimizer/`) follows Genesis3 again. The port was made against Genesis3
+  `ac7863b35` (2026-10-15); it now matches `main` at `0e1ded39e` (2026-11-26), which brings the Genesis fixes since
+  then (Bugs 682, 811-846, 857, 868, 870, 964, 966, 969, 1024, 1052, 422/424, 435): Markdown structure is spoken as
+  sentence boundaries (headings, paragraphs, list items, task states), HTML, entities and inline math are read,
+  invisible characters and link reference definitions are removed, acronyms are spelled with hyphens (`A-P-I`),
+  domains and e-mail addresses take the forms the voice reads best (`heise punkt D-E`), "Pst" is skipped, and many
+  date, number, unit, money, version, range and operator rules were added or corrected in both languages.
+- New modules for the new Genesis passes: `pair_context`, `latex_math`, `markdown_html`, `markdown_inline`,
+  `markdown_line_structure`, `spoken_abbreviations`, `text_orthography`. The pipeline order is the one of
+  `buildDeterministicTtsFallback`, incl. the second language pass and the day.month pairs held for the model. Not
+  ported, as before: the hint injector, the number fidelity gate, the LLM guard, the chunker, the table parser, and
+  the language detector and opaque identifier reduction that Genesis runs before the pipeline.
+- `jsre`: a class under `/i` that ends with a literal hyphen kept it last; the added case variants turned it into
+  a range (`[\p{L}\p{N}_@/.-]` lost the `-`).
+- Parity, against outputs of the unmodified TS code: 12928/12928 golden records (3232 inputs: the previous 1530,
+  the current sweep corpus and the inputs of the current TS unit tests), 42035/42035 component records, 1912 replayed
+  assertions and 5620 call results of the TS unit tests. Before the sync, 1724 of 6120 golden records and 823 of
+  15347 component records differed from current Genesis.
+- `tools/text_optimizer_golden/` holds the golden harness (corpus, recorder, generator), so a later sync starts from
+  the same fixtures.
+- First use of the optimizer compiles more patterns now: about two seconds instead of one.
 ### Added - Standalone docker-compose.yml
 
 - `docker-compose.yml` (project `g3-omnivoice`, port 8091, volumes for models and data, GPU reservation, healthcheck

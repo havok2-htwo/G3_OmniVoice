@@ -1075,15 +1075,20 @@ GERMAN_NAME_NUMBER_PATTERN = js(
     "gu",
 )
 
-_name_number_cache: dict = {"text": None, "spans": []}
+# Memo of the last text's name-number spans (as in de.ts). The optimizer runs on several threads at
+# once (asyncio.to_thread per request), so text and spans live in one immutable tuple that is read
+# once and replaced in a single assignment; a thread never pairs one text with another's spans.
+_name_number_cache: tuple = (None, ())
 
 
 def is_german_name_number_at(text: str, offset: int, match: str) -> bool:
-    if _name_number_cache["text"] != text:
-        _name_number_cache["text"] = text
-        _name_number_cache["spans"] = [(m.start(), m.end()) for m in GERMAN_NAME_NUMBER_PATTERN.finditer(text)]
+    global _name_number_cache
+    cached_text, spans = _name_number_cache
+    if cached_text != text:
+        spans = tuple((m.start(), m.end()) for m in GERMAN_NAME_NUMBER_PATTERN.finditer(text))
+        _name_number_cache = (text, spans)
     end = offset + len(match)
-    return any(offset < stop and end > start for start, stop in _name_number_cache["spans"])
+    return any(offset < stop and end > start for start, stop in spans)
 
 
 # Bug 1024: a day.month without a year right after a word is a date or a number that continues a

@@ -66,7 +66,11 @@ def build_deterministic_tts_text(
 ) -> DeterministicTtsResult:
     """Port of ``buildDeterministicTtsFallback``: line breaks, invisible characters, frames, link
     reference definitions, URL domains, Markdown, language passes, post-processor and (if the
-    post-processor changed anything) a second language pass; held day.month pairs go back last."""
+    post-processor changed anything) a second language pass; held day.month pairs go back last.
+
+    The options continues_numbered_list, starts_inside_line, mixed_status_run and answer_text mirror
+    the TS chunk-context options. service.py never passes them (one whole text per request); they
+    are kept for parity and only checked by the TS unit-test replay, not by the golden fixtures."""
     source = trim_keeping_list_item_depth_for_tts(
         remove_invisible_characters_for_tts(unify_line_breaks_for_tts(source_text or ""))
     )

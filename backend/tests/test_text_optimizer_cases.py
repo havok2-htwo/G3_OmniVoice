@@ -377,3 +377,37 @@ def test_jsre_sticky_and_number() -> None:
     assert js_number('') == 0 and js_number(' 08 ') == 8 and js_number('1e3') == 1000
     assert js_number('1.2.3') != js_number('1.2.3')  # NaN
     assert js_trim('﻿ a 　') == 'a'
+
+
+def test_name_number_memo_is_thread_safe():
+    """Review find: the name-number memo from de.ts must not mix texts across request threads."""
+    import sys
+    import threading
+
+    from omnivoice_tts_server.text_optimizer.de import is_german_name_number_at
+
+    pairs = [
+        (f"Die Karte heißt RTX 40{i:02d} gut", True) if i % 2 == 0 else (f"Die Karte hatte nur 40{i:02d} gut", False)
+        for i in range(100)
+    ]
+    for text, expected in pairs:
+        assert is_german_name_number_at(text, 20, text[20:24]) is expected, text
+
+    errors: list[str] = []
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        def worker() -> None:
+            for _ in range(50):
+                for text, expected in pairs:
+                    if is_german_name_number_at(text, 20, text[20:24]) is not expected:
+                        errors.append(text)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(old_interval)
+    assert errors == []
